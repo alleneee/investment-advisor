@@ -1,0 +1,17 @@
+{
+  "name": "pi-advisor-agent",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.19.0" },
+  "scripts": {
+    "test": "node --import tsx --test apps/agent-runtime/src/*.test.ts packages/contracts/src/*.test.ts",
+    "agent:dev": "node --env-file-if-exists=.env --import tsx apps/agent-runtime/src/server-entry.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.83.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

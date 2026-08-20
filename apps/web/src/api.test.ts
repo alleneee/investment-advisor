@@ -1,0 +1,495 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ApiError, createHttpApi, toInvestmentReportJob, toReport, toStockInformation } from "./api";
+
+function payload() {
+  return {
+    market_snapshot: {
+      snapshot_id: "snapshot-1",
+      source: "tushare",
+      adjustment: "qfq",
+      bars: [
+        { occurred_at: "2024-08-01T00:00:00Z", open: "8", close: "8.5", low: "7", high: "10", volume: "80" },
+        { occurred_at: "2024-08-02T00:00:00Z", open: "8.5", close: "9", low: "8", high: "9.5", volume: null },
+        { occurred_at: "2024-08-05T00:00:00Z", open: "9", close: "11", low: "9", high: "12", volume: "100" },
+      ],
+      window: { start: "20240801", end: "20240805", bar_count: 3 },
+      facts: [],
+      quality: { status: "ok" as const, warnings: [] },
+    },
+    chan_analysis: {
+      analysis_id: "chan-1",
+      engine_version: "chan-engine.v1",
+      timeframe: "1d",
+      snapshot: {
+        bars: [
+          { occurred_at: "2024-08-01T00:00:00Z" },
+          { occurred_at: "2024-08-05T00:00:00Z" },
+        ],
+        strokes: [],
+        confirmed: [
+          { direction: "up", start_index: 0, end_index: 1, start_price: "7", end_price: "12" },
+        ],
+        provisional: [
+          { direction: "down", start_index: 1, end_index: 1, start_price: "12", end_price: "11" },
+        ],
+        centers: [
+          { start_index: 0, end_index: 1, lower: "8", upper: "10" },
+        ],
+      },
+    },
+  };
+}
+
+function informationPayload() {
+  return {
+    symbol: "002940.SZ",
+    snapshot_id: "information-1",
+    generated_at: "2026-08-13T09:00:00+08:00",
+    news: [{
+      id: "news-1",
+      title: "公司发布经营进展",
+      summary: "经营保持稳定",
+      published_at: "2026-08-13T08:00:00+08:00",
+      source: "东财",
+      url: "https://example.com/news/1",
+    }],
+    messages: [{
+      id: "irm-1",
+      question: "产能进展如何",
+      answer: "按计划推进",
+      answerer: "证券部",
+      published_at: "2026-08-12T16:00:00+08:00",
+      source: "cninfo",
+    }],
+    sentiment: {
+      hot_rank: 8,
+      heat: 9123,
+      rank_change: 2,
+      concepts: ["机器人"],
+      tag: "热股",
+      observed_at: "2026-08-13T09:00:00+08:00",
+    },
+    quality: {
+      status: "ok",
+      warnings: [],
+      sources: {
+        eastmoney_news: { status: "fresh", fetched_at: "2026-08-13T09:00:00+08:00" },
+        cninfo_irm: { status: "cached", fetched_at: "2026-08-13T08:00:00+08:00" },
+        ths_hot_list: { status: "stale", fetched_at: "2026-08-13T07:00:00+08:00" },
+      },
+    },
+  };
+}
+
+function reportEnvelope() {
+  const closeFact = { ref: "market.latest_close", kind: "price_level", label: "最新收盘", value: 20.6, unit: "CNY", occurred_at: "2026-08-12T15:00:00+08:00" };
+  const structureFact = { ref: "chan.structure", kind: "structure", label: "当前结构", value: "中枢震荡" };
+  const newsFact = { ref: "news.latest", kind: "news", label: "公司进展", value: "经营保持稳定", url: "https://example.com/news/1" };
+  const scenarioInputs: Array<[string, string, string, typeof closeFact | typeof structureFact]> = [
+    ["bullish", "结构确认后观察偏强情景。", "break_above", closeFact],
+    ["base", "中枢约束下保持基准观察。", "structure_confirmed", structureFact],
+    ["bearish", "结构失效后观察偏弱情景。", "break_below", closeFact],
+  ];
+  const scenarios = scenarioInputs.map(([scenarioCase, narrative, operator, fact]) => ({
+    case: scenarioCase,
+    narrative,
+    trigger: { operator, fact_ref: fact.ref, fact },
+    invalidation: { operator: "structure_invalidated", fact_ref: structureFact.ref, fact: structureFact },
+    evidence_refs: [fact.ref, newsFact.ref],
+    evidence: [fact, newsFact],
+  }));
+  return {
+    report_id: "report-1",
+    status: "completed",
+    symbol: "002940.SZ",
+    timeframe: "1w",
+    as_of: "2026-08-13",
+    input_digest: "digest-1",
+    attempt_count: 1,
+    updated_at: "2026-08-13T09:06:00+08:00",
+    report: {
+      id: "report-1",
+      schema_version: "investment_report.v2",
+      run_id: "run-1",
+      symbol: "002940.SZ",
+      timeframe: "1w",
+      as_of: "2026-08-13",
+      generated_at: "2026-08-13T09:05:00+08:00",
+      title: "结构与资讯综合研判",
+      executive_summary: "结构处于等待确认阶段。",
+      market_snapshot: { snapshot_id: "market-1" },
+      chan_analysis: { analysis_id: "chan-1" },
+      information_snapshot: informationPayload(),
+      draft: { raw: "不会交给组件" },
+      reference_registry: {
+        [closeFact.ref]: closeFact,
+        [structureFact.ref]: structureFact,
+        [newsFact.ref]: newsFact,
+      },
+      outlook: {
+        horizon: "5-20-trading-days",
+        direction: "uncertain",
+        confidence: "medium",
+        thesis: "以后续结构确认与失效条件切换情景。",
+        scenarios,
+      },
+      risks: [{ narrative: "资讯存在时效差异。", evidence_refs: [newsFact.ref], evidence: [newsFact] }],
+      evidence_refs: [closeFact.ref, structureFact.ref, newsFact.ref],
+      evidence: [closeFact, structureFact, newsFact],
+      disclaimer: "本报告基于固化数据生成，仅供研究参考，不构成任何投资建议。",
+      review: { status: "pending" },
+    },
+    error: null,
+  };
+}
+
+function jsonResponse(value: unknown, status = 200) {
+  return new Response(JSON.stringify(value), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function mutableReportEnvelope(): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(reportEnvelope())) as Record<string, unknown>;
+}
+
+function nestedRecord(value: unknown): Record<string, unknown> {
+  return value as Record<string, unknown>;
+}
+
+function nestedArray(value: unknown): Array<Record<string, unknown>> {
+  return value as Array<Record<string, unknown>>;
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("market analysis adapter", () => {
+  it("keeps raw bars and maps Chan indexes to dates", () => {
+    const report = toReport("600000.SH", "1d", payload());
+
+    expect(report.timeframe).toBe("1d");
+    expect(report.chart.bars).toHaveLength(3);
+    expect(report.chart.bars[0].volume).toBe(80);
+    expect(report.chart.bars[1].volume).toBeNull();
+    expect(report.chart.strokes[0]).toMatchObject({
+      startAt: "2024-08-01T00:00:00Z",
+      endAt: "2024-08-05T00:00:00Z",
+      state: "confirmed",
+    });
+    expect(report.chart.centers[0]).toMatchObject({
+      startAt: "2024-08-01T00:00:00Z",
+      endAt: "2024-08-05T00:00:00Z",
+      lower: 8,
+      upper: 10,
+    });
+  });
+
+  it.each([
+    ["non-finite OHLC", (value: ReturnType<typeof payload>) => { value.market_snapshot.bars[1].high = "Infinity"; }],
+    ["duplicate dates", (value: ReturnType<typeof payload>) => { value.market_snapshot.bars[1].occurred_at = value.market_snapshot.bars[0].occurred_at; }],
+    ["unordered dates", (value: ReturnType<typeof payload>) => { [value.market_snapshot.bars[0], value.market_snapshot.bars[1]] = [value.market_snapshot.bars[1], value.market_snapshot.bars[0]]; }],
+  ])("rejects %s without changing the time axis", (_name, mutate) => {
+    const value = payload();
+    mutate(value);
+
+    expect(() => toReport("600000.SH", "1d", value)).toThrow(ApiError);
+  });
+
+  it("filters invalid structures without shifting valid date coordinates", () => {
+    const value = payload();
+    value.chan_analysis.snapshot.confirmed.push(
+      { direction: "up", start_index: 0, end_index: 4, start_price: "7", end_price: "12" },
+      { direction: "up", start_index: 0, end_index: 1, start_price: "NaN", end_price: "12" },
+      { direction: "down", start_index: 1, end_index: 0, start_price: "12", end_price: "7" },
+    );
+    value.chan_analysis.snapshot.centers.push(
+      { start_index: 0, end_index: 1, lower: "10", upper: "10" },
+      { start_index: 0, end_index: 4, lower: "8", upper: "10" },
+    );
+
+    const report = toReport("600000.SH", "1d", value);
+
+    expect(report.chart.strokes).toHaveLength(2);
+    expect(report.chart.strokes[0].startAt).toBe("2024-08-01T00:00:00Z");
+    expect(report.chart.centers).toHaveLength(1);
+  });
+});
+
+describe("information and investment report API", () => {
+  it("creates and polls a full report job for every stock in the batch", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/watchlist") {
+        return jsonResponse([
+          { symbol: "002940.SZ", name: "昂利康" },
+          { symbol: "002309.SZ", name: "中利集团" },
+        ]);
+      }
+      if (path === "/api/market/002940.SZ/reports" && init?.method === "POST") {
+        return jsonResponse({ report_id: "report-002940", status: "queued", cached: false }, 202);
+      }
+      if (path === "/api/market/002309.SZ/reports" && init?.method === "POST") {
+        return jsonResponse({ report_id: "report-002309", status: "queued", cached: false }, 202);
+      }
+      const symbol = path.endsWith("report-002940") ? "002940.SZ" : "002309.SZ";
+      return jsonResponse({
+        report_id: path.endsWith("report-002940") ? "report-002940" : "report-002309",
+        status: path.endsWith("report-002940") ? "running" : "failed",
+        symbol,
+        timeframe: "1d",
+        as_of: "2026-08-13",
+        input_digest: `digest-${symbol}`,
+        attempt_count: 1,
+        updated_at: "2026-08-13T09:06:00+08:00",
+        report: null,
+        error: path.endsWith("report-002940") ? null : { code: "PROVIDER_ERROR", message: "生成失败", retryable: true },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createHttpApi("");
+
+    await api.createBatch();
+    const progress = await api.getProgress();
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/market/002940.SZ/reports", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ timeframe: "1d" }),
+    }));
+    expect(fetchMock).toHaveBeenCalledWith("/api/market/002309.SZ/reports", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ timeframe: "1d" }),
+    }));
+    expect(fetchMock).not.toHaveBeenCalledWith("/api/batches", expect.anything());
+    expect(progress).toEqual([
+      { symbol: "002940.SZ", name: "昂利康", reportId: "report-002940", stage: "报告生成", state: "running" },
+      { symbol: "002309.SZ", name: "中利集团", reportId: "report-002309", stage: "生成失败", state: "failed" },
+    ]);
+  });
+
+  it("maps the complete information DTO to camelCase", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(informationPayload()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const information = await createHttpApi("http://localhost:8000/").getInformation("002940.SZ");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/api/market/002940.SZ/information",
+      expect.any(Object),
+    );
+    expect(information).toMatchObject({
+      symbol: "002940.SZ",
+      snapshotId: "information-1",
+      generatedAt: "2026-08-13T09:00:00+08:00",
+      news: [{ publishedAt: "2026-08-13T08:00:00+08:00", url: "https://example.com/news/1" }],
+      messages: [{ answerer: "证券部", publishedAt: "2026-08-12T16:00:00+08:00" }],
+      sentiment: { hotRank: 8, rankChange: 2, observedAt: "2026-08-13T09:00:00+08:00" },
+      quality: { sources: { eastmoneyNews: { status: "fresh" }, cninfoIrm: { status: "cached" } } },
+    });
+  });
+
+  it("clears non-http external URLs", async () => {
+    const raw = informationPayload();
+    raw.news[0].url = "javascript:alert(1)";
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(raw)));
+
+    const information = await createHttpApi("").getInformation("002940.SZ");
+
+    expect(information.news[0].url).toBeNull();
+  });
+
+  it("rejects invalid required information timestamps as a 502 adapter error", async () => {
+    const raw = informationPayload();
+    raw.generated_at = "not-a-date";
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(raw)));
+
+    await expect(createHttpApi("").getInformation("002940.SZ")).rejects.toMatchObject({
+      name: "ApiError",
+      status: 502,
+    });
+  });
+
+  it("creates an investment report with the selected timeframe", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ report_id: "report-1", status: "queued", cached: false }, 202));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const created = await createHttpApi("").createInvestmentReport("002940.SZ", "1w");
+
+    expect(created).toEqual({ reportId: "report-1", status: "queued", cached: false });
+    expect(fetchMock).toHaveBeenCalledWith("/api/market/002940.SZ/reports", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ timeframe: "1w" }),
+    }));
+  });
+
+  it("hydrates a completed report envelope without exposing raw draft text", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(reportEnvelope())));
+
+    const job = await createHttpApi("").getInvestmentReport("report-1");
+
+    expect(job).toMatchObject({
+      reportId: "report-1",
+      status: "completed",
+      inputDigest: "digest-1",
+      attemptCount: 1,
+      report: {
+        schemaVersion: "investment_report.v2",
+        generatedAt: "2026-08-13T09:05:00+08:00",
+        review: { status: "pending" },
+      },
+    });
+    expect(job.report?.outlook.scenarios[0]).toMatchObject({
+      case: "bullish",
+      trigger: { factRef: "market.latest_close", fact: { occurredAt: "2026-08-12T15:00:00+08:00" } },
+      evidenceRefs: ["market.latest_close", "news.latest"],
+    });
+    expect(job.report).not.toHaveProperty("draft");
+  });
+
+  it("posts an empty body to the dedicated retry endpoint", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ report_id: "report-1", status: "queued", cached: false }, 202));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const retried = await createHttpApi("").retryInvestmentReport("report-1");
+
+    expect(retried).toEqual({ reportId: "report-1", status: "queued", cached: false });
+    expect(fetchMock).toHaveBeenCalledWith("/api/reports/report-1/retry", expect.objectContaining({
+      method: "POST",
+      body: "{}",
+    }));
+  });
+
+  it("extracts a safe message from nested backend errors", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({
+      error: { code: "UPSTREAM_TIMEOUT", message: "上游生成超时", retryable: true },
+    }, 503)));
+
+    await expect(createHttpApi("").getInvestmentReport("report-1")).rejects.toEqual(
+      new ApiError("上游生成超时", 503),
+    );
+  });
+
+  it.each([
+    ["queued with report", "queued", false, true],
+    ["queued with error", "queued", true, false],
+    ["running with report", "running", false, true],
+    ["running with error", "running", true, false],
+    ["completed with error", "completed", true, true],
+    ["failed with report", "failed", true, true],
+  ])("rejects an invalid %s state payload", (_name, status, withError, withReport) => {
+    const raw = mutableReportEnvelope();
+    raw.status = status;
+    raw.report = withReport ? raw.report : null;
+    raw.error = withError ? { code: "TIMEOUT", message: "超时", retryable: true } : null;
+
+    expect(() => toInvestmentReportJob(raw)).toThrow(ApiError);
+  });
+
+  it.each([
+    ["queued", null, null],
+    ["running", null, null],
+    ["failed", null, { code: "TIMEOUT", message: "超时", retryable: true }],
+  ])("accepts the exact %s state payload", (status, report, error) => {
+    const raw = mutableReportEnvelope();
+    raw.status = status;
+    raw.report = report;
+    raw.error = error;
+
+    expect(toInvestmentReportJob(raw).status).toBe(status);
+  });
+
+  it.each([
+    ["report id", "report_id", "another-report"],
+    ["symbol", "symbol", "600519.SH"],
+    ["timeframe", "timeframe", "1d"],
+    ["as-of date", "as_of", "2026-08-12"],
+  ])("rejects an outer/inner %s mismatch", (_name, key, value) => {
+    const raw = mutableReportEnvelope();
+    raw[key] = value;
+
+    expect(() => toInvestmentReportJob(raw)).toThrow(ApiError);
+  });
+
+  it("rejects a condition fact that differs from its canonical registry fact", () => {
+    const raw = mutableReportEnvelope();
+    const report = nestedRecord(raw.report);
+    const outlook = nestedRecord(report.outlook);
+    const scenario = nestedArray(outlook.scenarios)[0];
+    const trigger = nestedRecord(scenario.trigger);
+    trigger.fact = { ...nestedRecord(trigger.fact), value: "保证上涨" };
+
+    expect(() => toInvestmentReportJob(raw)).toThrow(ApiError);
+  });
+
+  it("rejects an unknown condition reference even when the hydrated fact matches it", () => {
+    const raw = mutableReportEnvelope();
+    const report = nestedRecord(raw.report);
+    const scenario = nestedArray(nestedRecord(report.outlook).scenarios)[0];
+    const trigger = nestedRecord(scenario.trigger);
+    trigger.fact_ref = "unknown.fact";
+    trigger.fact = { ref: "unknown.fact", kind: "structure", label: "未知事实", value: "保证上涨" };
+
+    expect(() => toInvestmentReportJob(raw)).toThrow(ApiError);
+  });
+
+  it.each(["top", "scenario", "risk"])("rejects %s evidence that differs from its canonical registry fact", (location) => {
+    const raw = mutableReportEnvelope();
+    const report = nestedRecord(raw.report);
+    let owner = report;
+    if (location === "scenario") owner = nestedArray(nestedRecord(report.outlook).scenarios)[0];
+    if (location === "risk") owner = nestedArray(report.risks)[0];
+    const evidence = nestedArray(owner.evidence);
+    evidence[0] = { ...evidence[0], value: "保证上涨" };
+
+    expect(() => toInvestmentReportJob(raw)).toThrow(ApiError);
+  });
+
+  it.each(["top", "scenario", "risk"])("rejects %s evidence refs that do not exactly match evidence order and length", (location) => {
+    const raw = mutableReportEnvelope();
+    const report = nestedRecord(raw.report);
+    let owner = report;
+    if (location === "scenario") owner = nestedArray(nestedRecord(report.outlook).scenarios)[0];
+    if (location === "risk") owner = nestedArray(report.risks)[0];
+    owner.evidence_refs = [...(owner.evidence_refs as string[])].reverse().concat("unknown.ref");
+
+    expect(() => toInvestmentReportJob(raw)).toThrow(ApiError);
+  });
+
+  it("rejects unknown evidence even when the reference and hydrated fact match", () => {
+    const raw = mutableReportEnvelope();
+    const report = nestedRecord(raw.report);
+    const refs = report.evidence_refs as string[];
+    const evidence = nestedArray(report.evidence);
+    refs[0] = "unknown.fact";
+    evidence[0] = { ref: "unknown.fact", kind: "structure", label: "未知事实", value: "保证上涨" };
+
+    expect(() => toInvestmentReportJob(raw)).toThrow(ApiError);
+  });
+
+  it("rejects duplicate hydrated evidence references", () => {
+    const raw = mutableReportEnvelope();
+    const report = nestedRecord(raw.report);
+    const refs = report.evidence_refs as string[];
+    const evidence = nestedArray(report.evidence);
+    refs.push(refs[0]);
+    evidence.push({ ...evidence[0] });
+
+    expect(() => toInvestmentReportJob(raw)).toThrow(ApiError);
+  });
+
+  it("rejects a report disclaimer that differs from the fixed backend contract", () => {
+    const raw = mutableReportEnvelope();
+    nestedRecord(raw.report).disclaimer = "保证投资收益。";
+
+    expect(() => toInvestmentReportJob(raw)).toThrow(ApiError);
+  });
+
+  it.each(["2026-02-30", "2026", "08/13/2026"])("rejects non-strict date %s", (generatedAt) => {
+    const raw = informationPayload();
+    raw.generated_at = generatedAt;
+
+    expect(() => toStockInformation(raw)).toThrow(ApiError);
+  });
+});
