@@ -1,9 +1,10 @@
 import type { EChartsOption } from "echarts";
 import type { ChanChartData } from "./types";
 
-const CONFIRMED = "#67baa1";
-const PROVISIONAL = "#e56548";
-const CENTER = "#e4a15f";
+const UP = "#f6465d";
+const DOWN = "#0ecb81";
+const ACCENT = "#7ee0c8";
+const MUTED = "#8a9b96";
 
 interface TooltipParam {
   axisValue?: string;
@@ -32,7 +33,7 @@ export function buildChanChartOption(data: ChanChartData): EChartsOption {
       silent: false,
       connectNulls: false,
       lineStyle: {
-        color: confirmed ? CONFIRMED : PROVISIONAL,
+        color: ACCENT,
         width: confirmed ? 1.8 : 2.2,
         type: confirmed ? "solid" as const : "dashed" as const,
       },
@@ -120,7 +121,7 @@ export function buildChanChartOption(data: ChanChartData): EChartsOption {
         borderColor: "#294248",
         backgroundColor: "#07151e",
         fillerColor: "rgba(103, 186, 161, 0.16)",
-        handleStyle: { color: CONFIRMED, borderColor: CONFIRMED },
+        handleStyle: { color: ACCENT, borderColor: ACCENT },
         textStyle: { color: "#66827c", fontSize: 8 },
       },
     ],
@@ -132,10 +133,10 @@ export function buildChanChartOption(data: ChanChartData): EChartsOption {
         yAxisIndex: 0,
         data: data.bars.map((bar) => [bar.open, bar.close, bar.low, bar.high]),
         itemStyle: {
-          color: CONFIRMED,
-          color0: PROVISIONAL,
-          borderColor: CONFIRMED,
-          borderColor0: PROVISIONAL,
+          color: UP,
+          color0: DOWN,
+          borderColor: UP,
+          borderColor0: DOWN,
         },
         z: 2,
       },
@@ -151,8 +152,8 @@ export function buildChanChartOption(data: ChanChartData): EChartsOption {
         markArea: {
           silent: false,
           itemStyle: {
-            color: "rgba(228, 161, 95, 0.14)",
-            borderColor: CENTER,
+            color: "rgba(138, 155, 150, 0.14)",
+            borderColor: MUTED,
             borderWidth: 1,
           },
           label: { show: false },
@@ -168,7 +169,7 @@ export function buildChanChartOption(data: ChanChartData): EChartsOption {
         yAxisIndex: 1,
         data: data.bars.map((bar) => ({
           value: bar.volume,
-          itemStyle: { color: bar.close >= bar.open ? CONFIRMED : PROVISIONAL },
+          itemStyle: { color: bar.close >= bar.open ? UP : DOWN },
         })),
         z: 1,
       },

@@ -8,6 +8,16 @@ import { StockInformationPanel } from "./StockInformationPanel";
 import { TradeJournalPage } from "./TradeJournalPage";
 import { createMockTradingApi, type TradingApi } from "./trading-api";
 import { Atmosphere } from "./ui/Atmosphere";
+import { EmptyState } from "./ui/EmptyState";
+import { formatRate, type MetricTone } from "./ui/formatDisplay";
+import { Icon } from "./ui/Icon";
+import { KpiStrip } from "./ui/KpiStrip";
+import { MetricTile } from "./ui/MetricTile";
+import { Notice } from "./ui/Notice";
+import { Panel } from "./ui/Panel";
+import { SplitPane } from "./ui/SplitPane";
+import { StatusChip } from "./ui/StatusChip";
+import { ArrowUpRight, CandlestickChart, Database, LayoutDashboard, NotebookPen, Plus, ScrollText, X } from "lucide-react";
 import type {
   InvestmentReportJob,
   InvestmentReportStatus,
@@ -51,7 +61,7 @@ export function App({ api, tradingApi, initialError }: AppProps) {
   const tradingService = useMemo(() => tradingApi ?? createMockTradingApi(), [tradingApi]);
   const [shareToken, setShareToken] = useState<string | null>(shareTokenFromHash);
   if (import.meta.env.PROD && api == null) {
-    return <div className="notice" role="alert"><span>!</span><div><strong>未配置 API 地址</strong><br />请设置 VITE_API_BASE_URL 后重新启动前端，当前不会使用内置假数据。</div></div>;
+    return <Notice title="未配置 API 地址" detail="请设置 VITE_API_BASE_URL 后重新启动前端，当前不会使用内置假数据。" />;
   }
 
   useEffect(() => {
@@ -148,7 +158,9 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
   }, [currentSymbol, watchlist]);
 
   const completed = useMemo(() => progress.filter((item) => item.state === "completed").length, [progress]);
+  const runningCount = useMemo(() => progress.filter((item) => item.state === "running").length, [progress]);
   const runningLabel = progress.length ? `运行中 · ${completed} / ${progress.length}` : "暂无运行";
+  const batchChip = batchStatus(progress);
 
   async function loadReport(symbol: string, timeframe: Timeframe, clear = false) {
     const key = `${symbol}:${timeframe}`;
@@ -511,11 +523,11 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
         <div className="brand-mark" aria-label="结构投研台">CH<span>AN</span></div>
         <div className="rail-caption">结构投研台</div>
         <nav aria-label="主导航">
-          <a href="#/batch" className={`nav-item${view === "batch" ? " active" : ""}`} aria-current={view === "batch" ? "page" : undefined} onClick={() => setView("batch")}>今日批次 <span>{progress.length.toString().padStart(2, "0")}</span></a>
-          <a href="#/records" className={`nav-item${view === "records" ? " active" : ""}`} aria-current={view === "records" ? "page" : undefined} onClick={() => setView("records")}>研究记录 <span>{completed.toString().padStart(2, "0")}</span></a>
-          <a href="#/snapshots" className={`nav-item${view === "snapshots" ? " active" : ""}`} aria-current={view === "snapshots" ? "page" : undefined} onClick={() => setView("snapshots")}>数据快照</a>
-          <a href="#/journal" className={`nav-item${view === "journal" ? " active" : ""}`} aria-current={view === "journal" ? "page" : undefined} onClick={() => setView("journal")}>交易日记</a>
-          <a href="#/reviews" className={`nav-item${view === "reviews" ? " active" : ""}`} aria-current={view === "reviews" ? "page" : undefined} onClick={() => setView("reviews")}>复盘中心</a>
+          <a href="#/batch" className={`nav-item${view === "batch" ? " active" : ""}`} aria-current={view === "batch" ? "page" : undefined} onClick={() => setView("batch")}><Icon icon={LayoutDashboard} />今日批次 <span>{progress.length.toString().padStart(2, "0")}</span></a>
+          <a href="#/records" className={`nav-item${view === "records" ? " active" : ""}`} aria-current={view === "records" ? "page" : undefined} onClick={() => setView("records")}><Icon icon={ScrollText} />研究记录 <span>{completed.toString().padStart(2, "0")}</span></a>
+          <a href="#/snapshots" className={`nav-item${view === "snapshots" ? " active" : ""}`} aria-current={view === "snapshots" ? "page" : undefined} onClick={() => setView("snapshots")}><Icon icon={Database} />数据快照</a>
+          <a href="#/journal" className={`nav-item${view === "journal" ? " active" : ""}`} aria-current={view === "journal" ? "page" : undefined} onClick={() => setView("journal")}><Icon icon={NotebookPen} />交易日记</a>
+          <a href="#/reviews" className={`nav-item${view === "reviews" ? " active" : ""}`} aria-current={view === "reviews" ? "page" : undefined} onClick={() => setView("reviews")}><Icon icon={CandlestickChart} />复盘中心</a>
         </nav>
         <div className="rail-footer">LOCAL / INTERNAL<br /><span>v0.1 · TUSHARE CORE</span></div>
       </aside>
@@ -527,50 +539,55 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
             {view === "batch" ? <h1>收盘后的结构，<em>现在</em>可见。</h1> : <h1>{view === "records" ? "研究记录" : view === "snapshots" ? "数据快照" : view === "journal" ? "交易日记" : "复盘中心"}</h1>}
           </div>
           {view === "batch" && <button className="primary-button" onClick={createBatch} disabled={busy}>
-            {busy ? "正在创建…" : "生成本批报告"}<span>↗</span>
+            {busy ? "正在创建…" : "生成本批报告"}<Icon icon={ArrowUpRight} />
           </button>}
         </header>
 
-        {notice && <div className="notice" role="alert"><span>!</span><div><strong>数据服务暂不可用</strong><br />{notice}</div></div>}
+        {notice && <Notice title="数据服务暂不可用" detail={notice} />}
 
-        {view === "batch" && <><section className="dashboard-grid">
-          <section className="panel watchlist-panel">
-            <div className="panel-heading"><div><span className="section-index">01</span><h2>自选池</h2></div><span className="count-badge">{watchlist.length.toString().padStart(2, "0")} / 50</span></div>
-            <div className="watch-input"><label htmlFor="watch-code">股票代码</label><input id="watch-code" value={code} onChange={(event) => setCode(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void addSymbol(); }} placeholder="例如 600519" /><button onClick={() => void addSymbol()}>加入自选</button></div>
-            <div className="watch-items">{watchlist.map((item, index) => <div className={`watch-row${currentSymbol === item.symbol ? " selected" : ""}`} key={item.symbol}><button type="button" className="watch-select" aria-label={`选择 ${item.symbol} ${item.name}`} aria-pressed={currentSymbol === item.symbol} onClick={() => selectSymbol(item.symbol)}><span className="row-number">{String(index + 1).padStart(2, "0")}</span><span className="market-dot" data-market={item.market} /><span className="watch-name"><strong>{item.symbol}</strong><small>{item.name}</small></span></button><button type="button" className="icon-button" aria-label={`移除 ${item.symbol}`} onClick={() => void removeSymbol(item.symbol)}>×</button></div>)}</div>
-          </section>
-
-          <section className="panel pulse-panel">
-            <div className="panel-heading"><div><span className="section-index">02</span><h2>本批进度</h2></div><span className="live-pill"><i />LIVE</span></div>
+        {view === "batch" && <><KpiStrip>
+          <MetricTile label="自选" value={String(watchlist.length).padStart(2, "0")} />
+          <MetricTile label="已完成" value={String(completed).padStart(2, "0")} />
+          <MetricTile label="运行中" value={String(runningCount).padStart(2, "0")} />
+          <MetricTile label="本批状态" value={<StatusChip tone={batchChip.tone} label={batchChip.label} />} />
+        </KpiStrip>
+        <SplitPane
+          left={<Panel title="自选池" className="watchlist-panel">
+            <div className="watch-input"><label htmlFor="watch-code">股票代码</label><input id="watch-code" value={code} onChange={(event) => setCode(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void addSymbol(); }} placeholder="例如 600519" /><button onClick={() => void addSymbol()}><Icon icon={Plus} />加入自选</button></div>
+            <div className="watch-items">{watchlist.length ? watchlist.map((item, index) => <div className={`watch-row${currentSymbol === item.symbol ? " selected" : ""}`} key={item.symbol}><button type="button" className="watch-select" aria-label={`选择 ${item.symbol} ${item.name}`} aria-pressed={currentSymbol === item.symbol} onClick={() => selectSymbol(item.symbol)}><span className="row-number">{String(index + 1).padStart(2, "0")}</span><span className="market-dot" data-market={item.market} /><span className="watch-name"><strong>{item.symbol}</strong><small>{item.name}</small></span></button><button type="button" className="icon-button" aria-label={`移除 ${item.symbol}`} onClick={() => void removeSymbol(item.symbol)}><Icon icon={X} /></button></div>) : <EmptyState title="自选池还是空的。" />}</div>
+          </Panel>}
+          right={<>
+          <Panel title="本批进度" className="pulse-panel">
+            <span className="live-pill"><i />LIVE</span>
             <div className="progress-summary"><strong>{runningLabel}</strong><span>盘后手动触发</span></div>
             <div className="progress-track"><div style={{ width: `${progress.length ? Math.max(16, (completed / progress.length) * 100) : 0}%` }} /></div>
             <div className="run-list">{progress.slice(0, 6).map((item) => <div className="run-row" key={item.symbol}><span className={`status-dot ${item.state}`} /><strong>{item.symbol}</strong><span>{item.stage}</span><small>{stateLabel(item.state)}</small></div>)}</div>
-          </section>
-        </section>
-
-        <section className="report-section">
-          <div className="section-heading"><div><span className="section-index">03</span><h2>结构报告</h2></div><div className="data-line"><span className="status-dot completed" />TUSHARE · QFQ · DAILY + WEEKLY</div></div>
-          {report && <ReportView
-            report={report}
-            loadingTimeframe={loadingTimeframe}
-            chartNotice={chartNotice}
-            onTimeframeChange={(timeframe) => {
-              if (currentSymbol) {
-                resetOutlookSelection();
-                void loadReport(currentSymbol, timeframe);
-              }
-            }}
-          />}
-          {!report && loadingTimeframe && <div className="report-loading">正在加载结构报告…</div>}
-        </section>
+          </Panel>
+          <Panel title="结构报告" className="report-section">
+            {report && <ReportView
+              report={report}
+              loadingTimeframe={loadingTimeframe}
+              chartNotice={chartNotice}
+              onTimeframeChange={(timeframe) => {
+                if (currentSymbol) {
+                  resetOutlookSelection();
+                  void loadReport(currentSymbol, timeframe);
+                }
+              }}
+            />}
+            {!report && loadingTimeframe && <div className="report-loading">正在加载结构报告…</div>}
+            {!report && !loadingTimeframe && <EmptyState title="还没有结构报告。" />}
+          </Panel>
+          </>}
+        />
 
         <section className="evidence-section">
-          <div className="section-heading"><div><span className="section-index">04</span><h2>资讯与市场热度</h2></div><div className="data-line"><span className={`status-dot ${informationError ? "degraded" : "completed"}`} />EASTMONEY · CNINFO · THS</div></div>
+          <div className="section-heading"><h2>资讯与市场热度</h2><div className="data-line"><span className={`status-dot ${informationError ? "degraded" : "completed"}`} />EASTMONEY · CNINFO · THS</div></div>
           <StockInformationPanel information={information} loading={informationLoading} error={informationError} />
         </section>
 
         <section className="outlook-section">
-          <div className="section-heading"><div><span className="section-index">05</span><h2>AI 条件展望</h2></div><div className="data-line"><span className={`status-dot ${outlookJob?.status === "failed" ? "degraded" : outlookJob?.status === "running" || outlookPendingStatus === "running" ? "running" : "completed"}`} />PI AGENT · INVESTMENT REPORT V2</div></div>
+          <div className="section-heading"><h2>AI 条件展望</h2><div className="data-line"><span className={`status-dot ${outlookJob?.status === "failed" ? "degraded" : outlookJob?.status === "running" || outlookPendingStatus === "running" ? "running" : "completed"}`} />PI AGENT · INVESTMENT REPORT V2</div></div>
           <OutlookPanel
             job={outlookJob}
             pendingStatus={outlookPendingStatus}
@@ -617,10 +634,10 @@ function ResearchRecords({ api }: { api: WorkbenchApi }) {
   }, [api]);
 
   return <section className="view-section" aria-label="研究记录列表">
-    {error && <div className="notice" role="alert"><span>!</span><div><strong>研究记录暂不可用</strong><br />{error}</div></div>}
-    <div className="section-heading"><div><span className="section-index">01</span><h2>质量看板</h2></div><span className="count-badge">{quality ? quality.scope.toUpperCase() : "…"}</span></div>
-    {quality ? <QualityDashboard quality={quality} /> : <div className="empty-state">正在加载质量看板…</div>}
-    <div className="section-heading record-archive-heading"><div><span className="section-index">02</span><h2>运行归档</h2></div><span className="count-badge">{(jobs?.length ?? 0).toString().padStart(2, "0")} RECORDS</span></div>
+    {error && <Notice title="研究记录暂不可用" detail={error} />}
+    <div className="section-heading"><h2>质量看板</h2><span className="count-badge">{quality ? quality.scope.toUpperCase() : "…"}</span></div>
+    {quality ? <QualityDashboard quality={quality} /> : <div className="ui-skeleton">正在加载质量看板…</div>}
+    <div className="section-heading record-archive-heading"><h2>运行归档</h2><span className="count-badge">{(jobs?.length ?? 0).toString().padStart(2, "0")} RECORDS</span></div>
     <div className="record-list">
       {jobs?.length ? jobs.map((job) => <article className="record-row" key={job.reportId}>
         <span className={`status-dot ${job.status === "failed" ? "failed" : job.status === "completed" ? "completed" : "running"}`} />
@@ -633,12 +650,12 @@ function ResearchRecords({ api }: { api: WorkbenchApi }) {
 }
 
 function QualityDashboard({ quality }: { quality: ReportQualityDashboard }) {
-  return <div className="snapshot-grid quality-grid">
-    <article className="snapshot-card"><span>审阅通过率</span><strong>{rateLabel(quality.review.acceptRate)}</strong><small>{quality.review.accepted}/{quality.review.decided} 已决定</small></article>
-    <article className="snapshot-card"><span>有结论兑现率</span><strong>{rateLabel(quality.outcome.realizedRateOverConclusive)}</strong><small>{quality.outcome.realized}/{quality.outcome.conclusive} 明确结论</small></article>
-    <article className="snapshot-card"><span>已评估兑现率</span><strong>{rateLabel(quality.outcome.realizedRateOverEvaluated)}</strong><small>含冲突与无法判定，共 {quality.outcome.evaluated} 份</small></article>
-    <article className="snapshot-card"><span>情景分布</span><strong className="snapshot-date">{caseDistribution(quality.outcome.byCase)}</strong><small>看多 {quality.outcome.byCase.bullish ?? 0} · 基准 {quality.outcome.byCase.base ?? 0} · 看空 {quality.outcome.byCase.bearish ?? 0}</small></article>
-  </div>;
+  return <KpiStrip>
+    <MetricTile label="审阅通过率" value={quality.review.acceptRate == null ? "样本不足" : formatRate(quality.review.acceptRate)} detail={`${quality.review.accepted}/${quality.review.decided} 已决定`} />
+    <MetricTile label="有结论兑现率" value={quality.outcome.realizedRateOverConclusive == null ? "样本不足" : formatRate(quality.outcome.realizedRateOverConclusive)} detail={`${quality.outcome.realized}/${quality.outcome.conclusive} 明确结论`} />
+    <MetricTile label="已评估兑现率" value={quality.outcome.realizedRateOverEvaluated == null ? "样本不足" : formatRate(quality.outcome.realizedRateOverEvaluated)} detail={`含冲突与无法判定，共 ${quality.outcome.evaluated} 份`} />
+    <MetricTile label="情景分布" value={caseDistribution(quality.outcome.byCase)} detail={`看多 ${quality.outcome.byCase.bullish ?? 0} · 基准 ${quality.outcome.byCase.base ?? 0} · 看空 ${quality.outcome.byCase.bearish ?? 0}`} />
+  </KpiStrip>;
 }
 
 function DataSnapshots({ api, watchlist }: { api: WorkbenchApi; watchlist: WatchItem[] }) {
@@ -658,15 +675,15 @@ function DataSnapshots({ api, watchlist }: { api: WorkbenchApi; watchlist: Watch
   const asOfDates = new Set(completed.map((job) => job.asOf));
   const latestAsOf = completed[0]?.asOf ?? "—";
   return <section className="view-section" aria-label="数据快照详情">
-    {error && <div className="notice" role="alert"><span>!</span><div><strong>数据快照暂不可用</strong><br />{error}</div></div>}
-    <div className="snapshot-grid">
-      <article className="snapshot-card"><span>WATCHLIST</span><strong>{watchlist.length.toString().padStart(2, "0")}</strong><small>当前监控标的</small></article>
-      <article className="snapshot-card"><span>FROZEN</span><strong>{completed.length.toString().padStart(2, "0")}</strong><small>已固化研究报告</small></article>
-      <article className="snapshot-card"><span>AS-OF DAYS</span><strong>{asOfDates.size.toString().padStart(2, "0")}</strong><small>独立固化日期</small></article>
-      <article className="snapshot-card"><span>LATEST AS OF</span><strong className="snapshot-date">{latestAsOf}</strong><small>最近一份完成报告</small></article>
-    </div>
+    {error && <Notice title="数据快照暂不可用" detail={error} />}
+    <KpiStrip>
+      <MetricTile label="WATCHLIST" value={watchlist.length.toString().padStart(2, "0")} detail="当前监控标的" />
+      <MetricTile label="FROZEN" value={completed.length.toString().padStart(2, "0")} detail="已固化研究报告" />
+      <MetricTile label="AS-OF DAYS" value={asOfDates.size.toString().padStart(2, "0")} detail="独立固化日期" />
+      <MetricTile label="LATEST AS OF" value={latestAsOf} detail="最近一份完成报告" />
+    </KpiStrip>
     <div className="snapshot-details">
-      <div className="section-heading"><div><span className="section-index">01</span><h2>固化输入</h2></div><span className="data-line"><span className="status-dot completed" />MARKET · CHAN · INFORMATION</span></div>
+      <div className="section-heading"><h2>固化输入</h2><span className="data-line"><span className="status-dot completed" />MARKET · CHAN · INFORMATION</span></div>
       <div className="source-list">
         {completed.length ? completed.map((job, index) => <div className="source-row" key={job.reportId}>
           <span>{String(index + 1).padStart(2, "0")}</span>
@@ -718,9 +735,12 @@ function outcomeSummary(status: NonNullable<InvestmentReportJob["outcome"]>["sta
   return { pending: "窗口未满", none_realized: "未兑现", ambiguous: "多情景冲突", inconclusive: "无法判定" }[status];
 }
 
-function rateLabel(value: string | null): string {
-  if (value == null) return "样本不足";
-  return `${(Number(value) * 100).toFixed(2)}%`;
+function batchStatus(progress: RunProgress[]): { label: string; tone: MetricTone } {
+  if (!progress.length) return { label: "无批次", tone: "neutral" };
+  if (progress.some((item) => item.state === "failed")) return { label: "失败", tone: "down" };
+  if (progress.some((item) => item.state === "degraded")) return { label: "降级", tone: "risk" };
+  if (progress.some((item) => item.state === "running" || item.state === "queued")) return { label: "进行中", tone: "risk" };
+  return { label: "完成", tone: "up" };
 }
 
 function caseDistribution(byCase: ReportQualityDashboard["outcome"]["byCase"]): string {

@@ -2,9 +2,11 @@ import type { EChartsOption } from "echarts";
 import { reasonLabels } from "./trading-api";
 import type { TradingChartBundle, TradingChartExecution, TradingReviewDeterministicReport } from "./trading-types";
 
-const UP = "#67baa1";
-const DOWN = "#e56548";
-const CENTER = "#e4a15f";
+const UP = "#f6465d";
+const DOWN = "#0ecb81";
+const ACCENT = "#7ee0c8";
+const MUTED = "#8a9b96";
+const RISK = "#f0b429";
 
 interface TooltipParam {
   axisValue?: string;
@@ -22,7 +24,7 @@ export function buildTradingReviewChartOption(report: TradingReviewDeterministic
     yAxisIndex: 1,
     data: [[tradeDateOf(stroke.startAt), numberOrNull(stroke.startPrice)], [tradeDateOf(stroke.endAt), numberOrNull(stroke.endPrice)]],
     symbol: "none",
-    lineStyle: { color: stroke.state === "confirmed" ? UP : DOWN, width: stroke.state === "confirmed" ? 1.6 : 2, type: stroke.state === "confirmed" ? "solid" as const : "dashed" as const },
+    lineStyle: { color: ACCENT, width: stroke.state === "confirmed" ? 1.6 : 2, type: stroke.state === "confirmed" ? "solid" as const : "dashed" as const },
     z: 5,
   }));
   const centers = bundle.centers.map((center) => [
@@ -61,7 +63,7 @@ export function buildTradingReviewChartOption(report: TradingReviewDeterministic
     ],
     dataZoom: [
       { type: "inside", xAxisIndex: [1, 2], start: zoomStart(priceDates.length), end: 100 },
-      { type: "slider", xAxisIndex: [1, 2], start: zoomStart(priceDates.length), end: 100, height: 16, bottom: 14, borderColor: "#294248", backgroundColor: "#07151e", fillerColor: "rgba(103, 186, 161, 0.16)", handleStyle: { color: UP, borderColor: UP }, textStyle: { color: "#66827c", fontSize: 8 } },
+      { type: "slider", xAxisIndex: [1, 2], start: zoomStart(priceDates.length), end: 100, height: 16, bottom: 14, borderColor: "#294248", backgroundColor: "#07151e", fillerColor: "rgba(126, 224, 200, 0.16)", handleStyle: { color: ACCENT, borderColor: ACCENT }, textStyle: { color: "#66827c", fontSize: 8 } },
     ],
     series: [
       {
@@ -71,7 +73,7 @@ export function buildTradingReviewChartOption(report: TradingReviewDeterministic
         yAxisIndex: 0,
         data: report.equityCurve.map((point) => numberOrNull(point.equity)),
         symbol: "none",
-        lineStyle: { color: UP, width: 1.8 },
+        lineStyle: { color: ACCENT, width: 1.8 },
         areaStyle: { color: "rgba(103, 186, 161, 0.08)" },
       },
       {
@@ -81,7 +83,7 @@ export function buildTradingReviewChartOption(report: TradingReviewDeterministic
         yAxisIndex: 0,
         data: report.equityCurve.map((point) => numberOrNull(point.drawdownRate.value)),
         symbol: "none",
-        lineStyle: { color: CENTER, width: 1.2, type: "dashed" },
+        lineStyle: { color: RISK, width: 1.2, type: "dashed" },
       },
       {
         name: "未复权 K 线",
@@ -100,7 +102,7 @@ export function buildTradingReviewChartOption(report: TradingReviewDeterministic
         yAxisIndex: 1,
         data: [],
         symbol: "none",
-        markArea: { silent: true, itemStyle: { color: "rgba(228, 161, 95, 0.14)", borderColor: CENTER, borderWidth: 1 }, label: { show: false }, data: centers },
+        markArea: { silent: true, itemStyle: { color: "rgba(138, 155, 150, 0.14)", borderColor: MUTED, borderWidth: 1 }, label: { show: false }, data: centers },
         z: 1,
       },
       markerSeries("实际买入", buys, UP),

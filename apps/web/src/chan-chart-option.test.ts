@@ -31,11 +31,11 @@ describe("Chan chart option", () => {
 
     expect(candle.type).toBe("candlestick");
     expect((candle.data as number[][])[0]).toEqual([10, 11, 9, 12]);
-    expect(candle.itemStyle).toMatchObject({ color: "#67baa1", color0: "#e56548" });
-    expect(confirmed).toMatchObject({ type: "line", lineStyle: { color: "#67baa1", type: "solid" } });
-    expect(provisional).toMatchObject({ type: "line", lineStyle: { color: "#e56548", type: "dashed" } });
+    expect(candle.itemStyle).toMatchObject({ color: "#f6465d", color0: "#0ecb81" });
+    expect(confirmed).toMatchObject({ type: "line", lineStyle: { color: "#7ee0c8", type: "solid" } });
+    expect(provisional).toMatchObject({ type: "line", lineStyle: { color: "#7ee0c8", type: "dashed" } });
     expect(centers.markArea).toMatchObject({
-      itemStyle: { color: "rgba(228, 161, 95, 0.14)", borderColor: "#e4a15f" },
+      itemStyle: { color: "rgba(138, 155, 150, 0.14)", borderColor: "#8a9b96" },
     });
     expect((option.dataZoom as Array<{ type: string }>).map((item) => item.type)).toEqual(["inside", "slider"]);
   });
@@ -53,9 +53,9 @@ describe("Chan chart option", () => {
     const volumeData = volume.data as Array<{ value: number | null; itemStyle: { color: string } }>;
     expect(volume).toMatchObject({ name: "成交量", type: "bar", xAxisIndex: 1, yAxisIndex: 1 });
     expect(volumeData).toEqual([
-      { value: 100, itemStyle: { color: "#67baa1" } },
-      { value: 240, itemStyle: { color: "#e56548" } },
-      { value: null, itemStyle: { color: "#67baa1" } },
+      { value: 100, itemStyle: { color: "#f6465d" } },
+      { value: 240, itemStyle: { color: "#0ecb81" } },
+      { value: null, itemStyle: { color: "#f6465d" } },
     ]);
     expect(option.grid).toHaveLength(2);
     expect(option.xAxis).toHaveLength(2);

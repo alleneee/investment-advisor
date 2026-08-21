@@ -2,6 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import { attributionCategoryLabels, attributionReasonLabels, reasonLabels } from "./trading-api";
 import type { TradingApi } from "./trading-api";
 import { TradingReviewChart } from "./TradingReviewChart";
+import { DataTable } from "./ui/DataTable";
+import { EmptyState } from "./ui/EmptyState";
+import { formatMoney, formatRate, formatSignedMoney, signedTone } from "./ui/formatDisplay";
+import { KpiStrip } from "./ui/KpiStrip";
+import { MetricTile } from "./ui/MetricTile";
+import { Panel } from "./ui/Panel";
+import { SegmentedControl } from "./ui/SegmentedControl";
+import { SplitPane } from "./ui/SplitPane";
 import type {
   ReviewPeriodKind,
   StructureAttribution,
@@ -120,11 +128,10 @@ export function ReviewCenterPage({ api, today = currentShanghaiDate() }: ReviewC
   const selectedBundle = deterministic?.chartBundles[chartIndex] ?? deterministic?.chartBundles[0] ?? null;
 
   return <section className="review-center-page" aria-label="复盘中心">
-    <section className="review-controls journal-card">
-      <div className="review-controls-heading"><div><span className="section-index">01</span><h2>周期复盘</h2></div><span>所有结果来自固化账本、日复盘和行情快照</span></div>
-      <div className="review-period-switch" role="group" aria-label="复盘周期">
+    <Panel title="周期复盘">
+      <SegmentedControl className="review-period-switch" role="group" aria-label="复盘周期">
         {periods.map((period) => <button key={period.kind} type="button" aria-pressed={periodKind === period.kind} onClick={() => selectPeriod(period.kind)}>{period.label}</button>)}
-      </div>
+      </SegmentedControl>
       <div className="review-date-form">
         <label>周期开始<input type="date" value={periodStart} onChange={(event) => setPeriodStart(event.target.value)} /></label>
         <label>周期结束<input type="date" value={periodEnd} onChange={(event) => setPeriodEnd(event.target.value)} /></label>
@@ -132,32 +139,29 @@ export function ReviewCenterPage({ api, today = currentShanghaiDate() }: ReviewC
         <button className="primary-button" type="button" onClick={() => void create()} disabled={busy !== null}>{busy === "create" ? "正在生成…" : "生成确定性复盘"}</button>
       </div>
       {error && <p className="journal-error" role="alert">{error}</p>}
-    </section>
-
-    <section className="review-history" aria-label="报告版本历史">
-      <div className="section-heading"><div><span className="section-index">02</span><h2>报告版本</h2></div><span className="count-badge">{history.length.toString().padStart(2, "0")} SNAPSHOTS</span></div>
-      {history.length ? <div className="review-history-list">{history.map((item) => <button type="button" key={item.reportId} className={`review-history-item${report?.reportId === item.reportId ? " selected" : ""}`} onClick={() => { setReport(item); setChartIndex(0); }}><span>V{item.reportVersion}</span><strong>{statusLabel(item.snapshotStatus)}</strong><small>{item.periodStart} 至 {item.periodEnd}{item.isOutdated ? " · 已过期" : ""}</small></button>)}</div> : <p className="journal-muted">该周期还没有固化报告。</p>}
-    </section>
-
+    </Panel>
+    {deterministic && <MetricBand report={deterministic} />}
+    <SplitPane
+      left={<Panel title="报告版本" heading="h2" aria-label="报告版本历史">
+        {history.length ? <div className="review-history-list">{history.map((item) => <button type="button" key={item.reportId} className={`review-history-item${report?.reportId === item.reportId ? " selected" : ""}`} onClick={() => { setReport(item); setChartIndex(0); }}><span>V{item.reportVersion}</span><strong>{statusLabel(item.snapshotStatus)}</strong><small>{item.periodStart} 至 {item.periodEnd}{item.isOutdated ? " · 已过期" : ""}</small></button>)}</div> : <EmptyState title="该周期还没有固化报告。" />}
+      </Panel>}
+      right={deterministic ? <section className="review-result" aria-label="确定性复盘结果">
+        <div className="section-heading"><h2>确定性复盘结果</h2><ReportFlags report={report!} /></div>
+        {report?.isOutdated && <p className="review-warning">当前展示的是旧快照；账本、日复盘或行情已经变化，请重新生成新版本。</p>}
+        {report?.partialPeriod && <p className="review-warning">本周期尚不完整，以下内容只作进行中记录，不和完整周期做结论比较。</p>}
+        <ReasonMatrix report={deterministic} />
+        <CycleCases report={deterministic} />
+        <Panel title="权益、回撤与真实买卖点" heading="h3" className="review-chart-panel">
+          {deterministic.chartBundles.length > 1 && <div className="bundle-switch" aria-label="图表标的">{deterministic.chartBundles.map((bundle, index) => <button type="button" key={bundle.symbol} aria-pressed={selectedBundle?.symbol === bundle.symbol} onClick={() => setChartIndex(index)}>{bundle.symbol}</button>)}</div>}
+          {selectedBundle ? <TradingReviewChart report={deterministic} bundle={selectedBundle} /> : <p className="journal-muted">当前周期没有固化行情图表。</p>}
+        </Panel>
+        <Comparison report={deterministic} />
+      </section> : <EmptyState title="该周期还没有固化报告。" />}
+    />
     {report && <ReviewState report={report} onRetry={() => void retry()} retrying={busy === "retry"} />}
-    {deterministic && <section className="review-result" aria-label="确定性复盘结果">
-      <div className="section-heading"><div><span className="section-index">03</span><h2>确定性复盘结果</h2></div><ReportFlags report={report!} /></div>
-      {report?.isOutdated && <p className="review-warning">当前展示的是旧快照；账本、日复盘或行情已经变化，请重新生成新版本。</p>}
-      {report?.partialPeriod && <p className="review-warning">本周期尚不完整，以下内容只作进行中记录，不和完整周期做结论比较。</p>}
-      <MetricBand report={deterministic} />
-      <ReasonMatrix report={deterministic} />
-      <CycleCases report={deterministic} />
-      <section className="journal-card review-chart-panel">
-        <div className="journal-card-heading"><span className="section-index">04</span><h3>权益、回撤与真实买卖点</h3></div>
-        {deterministic.chartBundles.length > 1 && <div className="bundle-switch" aria-label="图表标的">{deterministic.chartBundles.map((bundle, index) => <button type="button" key={bundle.symbol} aria-pressed={selectedBundle?.symbol === bundle.symbol} onClick={() => setChartIndex(index)}>{bundle.symbol}</button>)}</div>}
-        {selectedBundle ? <TradingReviewChart report={deterministic} bundle={selectedBundle} /> : <p className="journal-muted">当前周期没有固化行情图表。</p>}
-      </section>
-      <Comparison report={deterministic} />
-      <section className="journal-card review-ai-status">
-        <div className="journal-card-heading"><span className="section-index">05</span><h3>Pi 复盘总结</h3></div>
-        {report?.aiStatus === "not_requested" ? <p><strong>Pi 总结尚未请求</strong><span>本版先展示可审计的确定性统计，不用模型替代交易事实。</span></p> : <p><strong>{aiStatusLabel(report!.aiStatus)}</strong><span>交易复盘文字状态独立于确定性快照；当前页面只展示服务端返回的真实状态。</span></p>}
-      </section>
-    </section>}
+    {deterministic && <Panel title="Pi 复盘总结" heading="h3">
+      {report?.aiStatus === "not_requested" ? <p><strong>Pi 总结尚未请求</strong><span>本版先展示可审计的确定性统计，不用模型替代交易事实。</span></p> : <p><strong>{aiStatusLabel(report!.aiStatus)}</strong><span>交易复盘文字状态独立于确定性快照；当前页面只展示服务端返回的真实状态。</span></p>}
+    </Panel>}
     <StructureAttributionSection api={api} />
   </section>;
 }
@@ -176,12 +180,11 @@ function StructureAttributionSection({ api }: { api: TradingApi }) {
     return () => { active = false; };
   }, [api]);
 
-  return <section className="journal-card structure-attribution" aria-label="结构位置归因">
-    <div className="journal-card-heading"><span className="section-index">09</span><h3>结构位置归因</h3></div>
+  return <Panel title="结构位置归因" heading="h3" className="structure-attribution" aria-label="结构位置归因">
     <p className="journal-muted">每个交易周期按其首笔买入成交时点的缠论结构位置归类；成交价先换算到行情前复权基准再与中枢比较；开放周期不参与胜率。</p>
     {error && <p className="journal-error" role="alert">{error}</p>}
     {attribution && <>
-      <table className="attribution-table" aria-label="买点结构类别聚合">
+      <DataTable className="attribution-table" aria-label="买点结构类别聚合">
         <thead><tr><th>类别</th><th>已结周期</th><th>开放周期</th><th>盈利周期</th><th>胜率</th><th>合计盈亏</th><th>平均盈亏</th></tr></thead>
         <tbody>
           {attribution.summary.map((row) => <tr key={row.category}>
@@ -189,29 +192,29 @@ function StructureAttributionSection({ api }: { api: TradingApi }) {
             <td>{row.closedCycles}</td>
             <td>{row.openCycles}</td>
             <td>{row.won}</td>
-            <td>{row.winRate === null ? "样本不足" : percentageText(row.winRate)}</td>
-            <td>{row.totalPnl}</td>
-            <td>{row.avgPnl ?? "—"}</td>
+            <td>{row.winRate === null ? "样本不足" : formatRate(row.winRate)}</td>
+            <td>{formatMoney(row.totalPnl)}</td>
+            <td>{row.avgPnl == null ? "—" : formatMoney(row.avgPnl)}</td>
           </tr>)}
         </tbody>
-      </table>
+      </DataTable>
       {attribution.quality.symbolsMissingMarketData.length > 0 && <p className="review-warning">以下股票行情缺失，相关成交无法归因：{attribution.quality.symbolsMissingMarketData.join("、")}</p>}
-      {attribution.executions.length ? <table className="attribution-table attribution-detail" aria-label="逐笔成交归因明细">
+      {attribution.executions.length ? <DataTable className="attribution-table attribution-detail" aria-label="逐笔成交归因明细">
         <thead><tr><th>成交日</th><th>股票</th><th>方向</th><th>成交价</th><th>换算价</th><th>中枢区间</th><th>类别</th></tr></thead>
         <tbody>
           {attribution.executions.map((row) => <tr key={row.executionId}>
             <td>{row.tradeDate}</td>
             <td>{row.symbol}</td>
             <td>{row.side === "buy" ? "买入" : "卖出"}</td>
-            <td>{row.price}</td>
-            <td>{row.adjustedPrice ?? "—"}</td>
+            <td>{formatMoney(row.price)}</td>
+            <td>{row.adjustedPrice == null ? "—" : formatMoney(row.adjustedPrice)}</td>
             <td>{row.centerLower !== null && row.centerUpper !== null ? `${row.centerLower} ~ ${row.centerUpper}` : "—"}</td>
             <td>{attributionLabel(row)}</td>
           </tr>)}
         </tbody>
-      </table> : <p className="journal-muted">还没有可归因的成交。</p>}
+      </DataTable> : <p className="journal-muted">还没有可归因的成交。</p>}
     </>}
-  </section>;
+  </Panel>;
 }
 
 function attributionLabel(row: StructureAttributionExecution): string {
@@ -231,31 +234,27 @@ function ReportFlags({ report }: { report: TradingReviewReport }) {
 
 function MetricBand({ report }: { report: TradingReviewDeterministicReport }) {
   const metrics = report.metrics;
-  return <section className="review-metric-band" aria-label="核心指标">
-    <Metric label="报告期已实现盈亏" value={metrics.periodRealizedPnl} />
-    <Metric label="闭合周期盈亏" value={metrics.closedCyclePnl} />
-    <Metric label="资金流调整收益率" value={metrics.accountAdjustedReturnRate.value} percentage unavailable={metrics.accountAdjustedReturnRate.unavailableReason} />
-    <Metric label="周期最大回撤" value={metrics.periodMaxDrawdownRate.value} percentage unavailable={metrics.periodMaxDrawdownRate.unavailableReason} />
-    <Metric label="胜率" value={metrics.winRate.value} percentage unavailable={metrics.winRate.unavailableReason} />
-    <Metric label="纪律执行率" value={metrics.disciplineAdherenceRate.value} percentage unavailable={metrics.disciplineAdherenceRate.unavailableReason} />
-  </section>;
-}
-
-function Metric({ label, value, percentage = false, unavailable }: { label: string; value: string | null; percentage?: boolean; unavailable?: string | null }) {
-  return <article><span>{label}</span><strong>{value === null ? "—" : percentage ? percentageText(value) : value}</strong>{unavailable && <small>{unavailable}</small>}</article>;
+  return <KpiStrip>
+    <MetricTile label="报告期已实现盈亏" value={formatSignedMoney(metrics.periodRealizedPnl)} tone={signedTone(metrics.periodRealizedPnl)} />
+    <MetricTile label="闭合周期盈亏" value={formatSignedMoney(metrics.closedCyclePnl)} tone={signedTone(metrics.closedCyclePnl)} />
+    <MetricTile label="资金流调整收益率" value={metrics.accountAdjustedReturnRate.value == null ? "—" : formatRate(metrics.accountAdjustedReturnRate.value)} tone={metrics.accountAdjustedReturnRate.value == null ? "neutral" : signedTone(metrics.accountAdjustedReturnRate.value)} detail={metrics.accountAdjustedReturnRate.unavailableReason ?? undefined} />
+    <MetricTile label="周期最大回撤" value={metrics.periodMaxDrawdownRate.value == null ? "—" : formatRate(metrics.periodMaxDrawdownRate.value)} tone="risk" detail={metrics.periodMaxDrawdownRate.unavailableReason ?? undefined} />
+    <MetricTile label="胜率" value={metrics.winRate.value == null ? "—" : formatRate(metrics.winRate.value)} detail={metrics.winRate.unavailableReason ?? undefined} />
+    <MetricTile label="纪律执行率" value={metrics.disciplineAdherenceRate.value == null ? "—" : formatRate(metrics.disciplineAdherenceRate.value)} detail={metrics.disciplineAdherenceRate.unavailableReason ?? undefined} />
+  </KpiStrip>;
 }
 
 function ReasonMatrix({ report }: { report: TradingReviewDeterministicReport }) {
-  return <section className="journal-card reason-matrix"><div className="journal-card-heading"><span className="section-index">06</span><h3>买卖理由表现</h3></div>{report.executionReasonFacts.length || report.reasonPerformance.length ? <div className="reason-grid">{report.executionReasonFacts.map((fact) => <article key={`${fact.side}-${fact.reasonCode}`}><span>{fact.side === "buy" ? "买入" : "卖出"}</span><strong>{reasonLabels[fact.reasonCode]}</strong><small>{fact.executionCount} 笔 · {fact.quantity} 股 · {fact.grossAmount}</small></article>)}{report.reasonPerformance.map((performance) => <article key={`${performance.side}-${performance.reasonCode}`}><span>{performance.side === "buy" ? "买入" : "卖出"}</span><strong>{reasonLabels[performance.reasonCode]}</strong><small>{performance.conclusionAllowed ? `样本 ${performance.sampleCount} · 净盈亏 ${performance.netPnl}` : `样本 ${performance.sampleCount}，仅展示事实`}</small></article>)}</div> : <p className="journal-muted">本周期没有足以归类的交易理由事实。</p>}</section>;
+  return <Panel title="买卖理由表现" heading="h3" className="reason-matrix">{report.executionReasonFacts.length || report.reasonPerformance.length ? <div className="reason-grid">{report.executionReasonFacts.map((fact) => <article key={`${fact.side}-${fact.reasonCode}`}><span>{fact.side === "buy" ? "买入" : "卖出"}</span><strong>{reasonLabels[fact.reasonCode]}</strong><small>{fact.executionCount} 笔 · {fact.quantity} 股 · {formatMoney(fact.grossAmount)}</small></article>)}{report.reasonPerformance.map((performance) => <article key={`${performance.side}-${performance.reasonCode}`}><span>{performance.side === "buy" ? "买入" : "卖出"}</span><strong>{reasonLabels[performance.reasonCode]}</strong><small>{performance.conclusionAllowed ? `样本 ${performance.sampleCount} · 净盈亏 ${formatSignedMoney(performance.netPnl)}` : `样本 ${performance.sampleCount}，仅展示事实`}</small></article>)}</div> : <p className="journal-muted">本周期没有足以归类的交易理由事实。</p>}</Panel>;
 }
 
 function CycleCases({ report }: { report: TradingReviewDeterministicReport }) {
-  return <section className="journal-card cycle-cases"><div className="journal-card-heading"><span className="section-index">07</span><h3>交易周期</h3></div>{report.cycleCases.length ? <div className="cycle-list">{report.cycleCases.map((cycle) => <article key={cycle.cycleId}><div><strong>{cycle.symbol}</strong><span>{cycle.name} · {cycle.holdingDays} 个交易日</span></div><div><span>{reasonLabels[cycle.buyReasonCode]} → {reasonLabels[cycle.sellReasonCode]}</span><strong>{cycle.netPnl}</strong></div></article>)}</div> : <p className="journal-muted">本周期还没有闭合交易周期。</p>}</section>;
+  return <Panel title="交易周期" heading="h3" className="cycle-cases">{report.cycleCases.length ? <div className="cycle-list">{report.cycleCases.map((cycle) => <article key={cycle.cycleId}><div><strong>{cycle.symbol}</strong><span>{cycle.name} · {cycle.holdingDays} 个交易日</span></div><div><span>{reasonLabels[cycle.buyReasonCode]} → {reasonLabels[cycle.sellReasonCode]}</span><strong>{formatSignedMoney(cycle.netPnl)}</strong></div></article>)}</div> : <p className="journal-muted">本周期还没有闭合交易周期。</p>}</Panel>;
 }
 
 function Comparison({ report }: { report: TradingReviewDeterministicReport }) {
-  if (report.comparison === null) return <section className="journal-card comparison-panel"><div className="journal-card-heading"><span className="section-index">08</span><h3>同类周期比较</h3></div><p className="journal-muted">{report.comparisonUnavailableReason === "partial_period" ? "当前周期尚未完整，暂不比较。" : "没有可比较的上一同类完整周期。"}</p></section>;
-  return <section className="journal-card comparison-panel"><div className="journal-card-heading"><span className="section-index">08</span><h3>同类周期比较</h3></div><p className="comparison-period">对比 {report.comparison.previousPeriod.start} 至 {report.comparison.previousPeriod.end}</p><div className="comparison-list">{report.comparison.metrics.map((metric) => <div key={metric.metricRef}><span>{metric.metricRef}</span><strong>{metric.current.value ?? "—"}</strong><small>前期 {metric.previous.value ?? "—"} · 变化 {metric.delta.value ?? "—"}</small></div>)}</div></section>;
+  if (report.comparison === null) return <Panel title="同类周期比较" heading="h3" className="comparison-panel"><p className="journal-muted">{report.comparisonUnavailableReason === "partial_period" ? "当前周期尚未完整，暂不比较。" : "没有可比较的上一同类完整周期。"}</p></Panel>;
+  return <Panel title="同类周期比较" heading="h3" className="comparison-panel"><p className="comparison-period">对比 {report.comparison.previousPeriod.start} 至 {report.comparison.previousPeriod.end}</p><div className="comparison-list">{report.comparison.metrics.map((metric) => <div key={metric.metricRef}><span>{metric.metricRef}</span><strong>{metric.current.value ?? "—"}</strong><small>前期 {metric.previous.value ?? "—"} · 变化 {metric.delta.value ?? "—"}</small></div>)}</div></Panel>;
 }
 
 function upsertReport(items: TradingReviewReport[], report: TradingReviewReport): TradingReviewReport[] {
@@ -295,11 +294,6 @@ function addDays(date: Date, amount: number): Date {
 
 function dateText(date: Date): string {
   return date.toISOString().slice(0, 10);
-}
-
-function percentageText(value: string): string {
-  const number = Number(value);
-  return Number.isFinite(number) ? `${(number * 100).toFixed(2)}%` : value;
 }
 
 function statusLabel(status: TradingReviewReport["snapshotStatus"]): string {

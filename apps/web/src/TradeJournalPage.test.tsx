@@ -63,7 +63,7 @@ describe("交易日记", () => {
       initialCapital: "120000.00",
     }));
     expect(await screen.findByRole("heading", { name: "每日交易日记" })).toBeInTheDocument();
-    expect(screen.getByText("100000.00")).toBeInTheDocument();
+    expect(screen.getByText("100,000.00")).toBeInTheDocument();
   });
 
   it("随买卖方向切换理由，并保存成交后刷新当日流水", async () => {

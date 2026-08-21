@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import { buyReasons, reasonLabels, sellReasons } from "./trading-api";
 import type { TradingApi } from "./trading-api";
+import { EmptyState } from "./ui/EmptyState";
+import { formatMoney, formatRate, formatSignedMoney, signedTone } from "./ui/formatDisplay";
+import { KpiStrip } from "./ui/KpiStrip";
+import { MetricTile } from "./ui/MetricTile";
+import { Panel } from "./ui/Panel";
+import { SplitPane } from "./ui/SplitPane";
 import type {
   CashFlow,
   CashFlowKind,
@@ -237,12 +243,8 @@ export function TradeJournalPage({ api, today = currentShanghaiDate() }: TradeJo
   if (account === undefined) return <section className="journal-loading">正在读取交易账户…</section>;
 
   if (account === null) {
-    return <section className="journal-onboarding" aria-label="创建交易账户">
-      <div className="journal-intro">
-        <span className="section-index">01</span>
-        <h2>创建交易账户</h2>
-        <p>建立一个本地人民币现金账户，再开始记录真实成交和收盘复盘。</p>
-      </div>
+    return <Panel title="创建交易账户" className="journal-onboarding" aria-label="创建交易账户">
+      <EmptyState title="建立一个本地人民币现金账户，再开始记录真实成交和收盘复盘。" />
       <div className="journal-form-grid">
         <label>账户名称<input value={name} onChange={(event) => setName(event.target.value)} /></label>
         <label>启用日期<input type="date" value={activatedOn} onChange={(event) => setActivatedOn(event.target.value)} /></label>
@@ -250,27 +252,37 @@ export function TradeJournalPage({ api, today = currentShanghaiDate() }: TradeJo
       </div>
       {error && <p className="journal-error" role="alert">{error}</p>}
       <button className="primary-button" type="button" onClick={() => void createAccount()} disabled={busy}>{busy ? "正在创建…" : "创建并进入日记"}</button>
-    </section>;
+    </Panel>;
   }
 
   const reasons = executionForm.side === "buy" ? buyReasons : sellReasons;
 
+  const pnl = account.dailyPnl;
   return <section className="trade-journal-page" aria-label="交易日记">
     <div className="journal-page-heading">
-      <div><span className="section-index">01</span><h2>每日交易日记</h2></div>
+      <h2>每日交易日记</h2>
       <label className="journal-date">交易日期<input type="date" value={tradeDate} onChange={(event) => setTradeDate(event.target.value)} /></label>
     </div>
     {error && <p className="journal-error" role="alert">{error}</p>}
-    <section className="account-summary" aria-label="账户摘要">
-      <AccountMetric label="总权益" value={account.totalEquity} />
-      <AccountMetric label="可用现金" value={account.cash} />
-      <AccountMetric label="持仓市值" value={account.positionMarketValue} />
-      <AccountMetric label="当日盈亏" value={account.dailyPnl} />
-      <AccountMetric label="成立以来回撤" value={percent(account.sinceInceptionDrawdown)} />
-    </section>
-    <div className="journal-workspace">
-      <form className="journal-card execution-entry" onSubmit={(event) => void saveExecution(event)}>
-        <SectionHeading index="02" title="成交录入" />
+    <KpiStrip>
+      <MetricTile label="总权益" value={displayMoney(account.totalEquity)} />
+      <MetricTile label="可用现金" value={displayMoney(account.cash)} />
+      <MetricTile label="持仓市值" value={displayMoney(account.positionMarketValue)} />
+      <MetricTile label="当日盈亏" value={pnl == null ? "—" : formatSignedMoney(pnl)} tone={pnl == null ? "neutral" : signedTone(pnl)} />
+      <MetricTile label="成立以来回撤" value={account.sinceInceptionDrawdown == null ? "—" : formatRate(account.sinceInceptionDrawdown)} tone="risk" />
+    </KpiStrip>
+    <SplitPane
+      left={<Panel title="今日流水" heading="h3" aria-label="今日流水">
+        {executions === undefined ? <p className="journal-muted">正在读取成交…</p> : executions.length === 0 ? <p className="journal-muted">今天还没有成交记录。</p> : <ul className="journal-list">
+          {executions.map((execution) => <li key={execution.executionId}>
+            <div><strong>{execution.side === "buy" ? "买入" : "卖出"} <span>{execution.symbol}</span></strong><span>{execution.name || "未填写名称"} · {formatMoney(execution.price)} × {execution.quantity}</span><small>{reasonLabels[execution.primaryReason]}{execution.tags.length ? ` · ${execution.tags.join(" / ")}` : ""}</small></div>
+            <button className="secondary-button" type="button" onClick={() => void deleteExecution(execution)}>删除</button>
+          </li>)}
+        </ul>}
+      </Panel>}
+      right={<>
+      <form className="ui-panel execution-entry" onSubmit={(event) => void saveExecution(event)}>
+        <h3>成交录入</h3>
         <div className="journal-form-grid">
           <label>股票代码<input required value={executionForm.symbol} onChange={(event) => setExecutionForm((current) => ({ ...current, symbol: event.target.value }))} placeholder="002940.SZ" /></label>
           <label>股票名称<input value={executionForm.name} onChange={(event) => setExecutionForm((current) => ({ ...current, name: event.target.value }))} placeholder="昂利康" /></label>
@@ -288,19 +300,8 @@ export function TradeJournalPage({ api, today = currentShanghaiDate() }: TradeJo
         </div>
         <button className="primary-button" type="submit" disabled={savingExecution}>{savingExecution ? "正在保存…" : "保存成交"}</button>
       </form>
-
-      <section className="journal-card journal-ledger" aria-label="今日流水">
-        <SectionHeading index="03" title="今日流水" />
-        {executions === undefined ? <p className="journal-muted">正在读取成交…</p> : executions.length === 0 ? <p className="journal-muted">今天还没有成交记录。</p> : <ul className="journal-list">
-          {executions.map((execution) => <li key={execution.executionId}>
-            <div><strong>{execution.side === "buy" ? "买入" : "卖出"} <span>{execution.symbol}</span></strong><span>{execution.name || "未填写名称"} · {execution.price} × {execution.quantity}</span><small>{reasonLabels[execution.primaryReason]}{execution.tags.length ? ` · ${execution.tags.join(" / ")}` : ""}</small></div>
-            <button className="secondary-button" type="button" onClick={() => void deleteExecution(execution)}>删除</button>
-          </li>)}
-        </ul>}
-      </section>
-
-      <form className="journal-card cash-flow-entry" onSubmit={(event) => void saveCashFlow(event)}>
-        <SectionHeading index="04" title="资金流水" />
+      <form className="ui-panel cash-flow-entry" onSubmit={(event) => void saveCashFlow(event)}>
+        <h3>资金流水</h3>
         <div className="journal-form-grid">
           <label>资金时间<input required type="datetime-local" value={cashFlowForm.occurredAt} onChange={(event) => setCashFlowForm((current) => ({ ...current, occurredAt: event.target.value }))} /></label>
           <label>资金类型<select value={cashFlowForm.kind} onChange={(event) => setCashFlowForm((current) => ({ ...current, kind: event.target.value as CashFlowKind }))}><option value="deposit">入金</option><option value="withdrawal">出金</option></select></label>
@@ -308,11 +309,11 @@ export function TradeJournalPage({ api, today = currentShanghaiDate() }: TradeJo
           <label className="journal-span-two">资金备注<textarea value={cashFlowForm.note} onChange={(event) => setCashFlowForm((current) => ({ ...current, note: event.target.value }))} /></label>
         </div>
         <button className="secondary-button" type="submit" disabled={savingCashFlow}>{savingCashFlow ? "正在保存…" : "保存资金流水"}</button>
-        {cashFlows !== undefined && cashFlows.length > 0 && <ul className="journal-list compact-list">{cashFlows.map((cashFlow) => <li key={cashFlow.cashFlowId}><div><strong>{cashFlow.kind === "deposit" ? "入金" : "出金"} {cashFlow.amount}</strong><span>{cashFlow.note || "无备注"}</span></div><button className="secondary-button" type="button" onClick={() => void deleteCashFlow(cashFlow)}>删除</button></li>)}</ul>}
+        {cashFlows !== undefined && cashFlows.length > 0 && <ul className="journal-list compact-list">{cashFlows.map((cashFlow) => <li key={cashFlow.cashFlowId}><div><strong>{cashFlow.kind === "deposit" ? "入金" : "出金"} {formatMoney(cashFlow.amount)}</strong><span>{cashFlow.note || "无备注"}</span></div><button className="secondary-button" type="button" onClick={() => void deleteCashFlow(cashFlow)}>删除</button></li>)}</ul>}
       </form>
-
-      <section className="journal-card daily-close" aria-label="收盘检查">
-        <SectionHeading index="05" title="收盘检查" />
+      </>}
+    />
+      <Panel title="收盘检查" heading="h3" aria-label="收盘检查">
         <div className="journal-form-grid">
           <label className="journal-span-two">失效条件<textarea value={dailyReviewForm.invalidationCondition} onChange={(event) => setDailyReviewForm((current) => ({ ...current, invalidationCondition: event.target.value }))} placeholder="今天持仓逻辑在什么条件下失效？" /></label>
           <label className="journal-span-two">次日计划<textarea value={dailyReviewForm.nextDayPlan} onChange={(event) => setDailyReviewForm((current) => ({ ...current, nextDayPlan: event.target.value }))} placeholder="下一交易日只观察和执行什么？" /></label>
@@ -322,17 +323,8 @@ export function TradeJournalPage({ api, today = currentShanghaiDate() }: TradeJo
         </div>
         <div className="journal-actions"><button className="secondary-button" type="button" onClick={() => void saveDailyReview("draft")} disabled={savingReview !== null}>{savingReview === "draft" ? "正在保存…" : "保存收盘草稿"}</button><button className="primary-button" type="button" onClick={() => void saveDailyReview("completed")} disabled={savingReview !== null}>{savingReview === "completed" ? "正在完成…" : "完成当日复盘"}</button></div>
         {dailyReview?.status === "completed" && <p className="journal-complete">该日复盘已完成。</p>}
-      </section>
-    </div>
+      </Panel>
   </section>;
-}
-
-function SectionHeading({ index, title }: { index: string; title: string }) {
-  return <div className="journal-card-heading"><span className="section-index">{index}</span><h3>{title}</h3></div>;
-}
-
-function AccountMetric({ label, value }: { label: string; value: string | null }) {
-  return <article className="account-metric"><span>{label}</span><strong>{value ?? "—"}</strong></article>;
 }
 
 function defaultExecutionForm(date: string, side: TradingSide = "buy"): ExecutionForm {
@@ -374,10 +366,8 @@ function idempotencyKey(): string {
   return `journal-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function percent(value: string | null): string | null {
-  if (value === null) return null;
-  const number = Number(value);
-  return Number.isFinite(number) ? `${(number * 100).toFixed(2)}%` : value;
+function displayMoney(value: string | null): string {
+  return value == null ? "—" : formatMoney(value);
 }
 
 function currentShanghaiDate(): string {
