@@ -60,8 +60,8 @@ def test_market_analysis_rejects_out_of_scope_code():
 
 
 def test_market_analysis_persists_history_and_reuses_it_across_connections(tmp_path):
-    database_path = tmp_path / "market-cache.sqlite3"
-    first_database = Database(str(database_path))
+    tmp_path / "market-cache.sqlite3"
+    first_database = Database()
     first_client = FakeAnalysisClient()
     first_service = MarketAnalysisService(
         TushareMarketProvider(client=first_client),
@@ -75,7 +75,7 @@ def test_market_analysis_persists_history_and_reuses_it_across_connections(tmp_p
     assert first_client.daily_calls == 1
     assert first_client.adj_factor_calls == 1
 
-    second_database = Database(str(database_path))
+    second_database = Database()
     offline_client = FakeAnalysisClient()
     persisted_service = MarketAnalysisService(
         TushareMarketProvider(client=offline_client),

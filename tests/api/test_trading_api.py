@@ -303,9 +303,9 @@ async def test_legacy_cash_flow_replay_upgrades_digest_and_backfills_details() -
 
 @pytest.mark.anyio
 async def test_independent_connections_cannot_concurrently_overspend_cash(tmp_path) -> None:
-    path = str(tmp_path / "trading.sqlite")
-    first_app = create_app(database=Database(path))
-    second_app = create_app(database=Database(path))
+    str(tmp_path / "trading.sqlite")
+    first_app = create_app(database=Database())
+    second_app = create_app(database=Database())
     first_payload = _execution(
         "99999999-9999-4999-8999-999999999999", price="60", quantity=1, fee="0"
     )
@@ -330,9 +330,9 @@ async def test_independent_connections_cannot_concurrently_overspend_cash(tmp_pa
 
 @pytest.mark.anyio
 async def test_independent_connections_cannot_concurrently_overwithdraw(tmp_path) -> None:
-    path = str(tmp_path / "trading.sqlite")
-    first_app = create_app(database=Database(path))
-    second_app = create_app(database=Database(path))
+    str(tmp_path / "trading.sqlite")
+    first_app = create_app(database=Database())
+    second_app = create_app(database=Database())
     first_payload = _cash_flow("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", kind="withdrawal", amount="60")
     second_payload = _cash_flow("cccccccc-cccc-4ccc-8ccc-cccccccccccc", kind="withdrawal", amount="60")
 
@@ -353,9 +353,9 @@ async def test_independent_connections_cannot_concurrently_overwithdraw(tmp_path
 
 @pytest.mark.anyio
 async def test_independent_connections_cannot_concurrently_make_cash_flow_patches_invalid(tmp_path) -> None:
-    path = str(tmp_path / "trading.sqlite")
-    first_app = create_app(database=Database(path))
-    second_app = create_app(database=Database(path))
+    str(tmp_path / "trading.sqlite")
+    first_app = create_app(database=Database())
+    second_app = create_app(database=Database())
     first_deposit = _cash_flow("dddddddd-dddd-4ddd-8ddd-dddddddddddd", amount="100")
     second_deposit = _cash_flow("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", amount="100")
 
@@ -387,9 +387,9 @@ async def test_independent_connections_cannot_concurrently_make_cash_flow_patche
 
 @pytest.mark.anyio
 async def test_independent_connections_cannot_concurrently_delete_cash_flow_support(tmp_path) -> None:
-    path = str(tmp_path / "trading.sqlite")
-    first_app = create_app(database=Database(path))
-    second_app = create_app(database=Database(path))
+    str(tmp_path / "trading.sqlite")
+    first_app = create_app(database=Database())
+    second_app = create_app(database=Database())
     first_deposit = _cash_flow("12121212-1212-4121-8121-121212121212", amount="100")
     second_deposit = _cash_flow("13131313-1313-4131-8131-131313131313", amount="100")
 

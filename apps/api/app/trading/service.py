@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
+
+import psycopg
 
 from .contracts import LedgerEvent, TradingReducerError
 from .metrics import AccountValuationService
@@ -259,7 +260,7 @@ class TradingService:
         now = datetime.now(UTC).isoformat()
         with self.database.transaction(immediate=True) as connection:
             row = connection.execute(
-                "SELECT * FROM daily_reviews WHERE account_id = ? AND trade_date = ?",
+                "SELECT * FROM daily_reviews WHERE account_id = %s AND trade_date = %s",
                 (account["account_id"], trade_date.isoformat()),
             ).fetchone()
             if row is None:
@@ -270,7 +271,7 @@ class TradingService:
                     """
                     INSERT INTO daily_reviews(
                         daily_review_id, account_id, trade_date, payload, revision, is_deleted, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+                    ) VALUES (%s, %s, %s, %s, %s, 0, %s, %s)
                     """,
                     (review_id, account["account_id"], trade_date.isoformat(), json.dumps(body, ensure_ascii=False), revision, now, now),
                 )
@@ -280,29 +281,29 @@ class TradingService:
                 review_id, revision = row["daily_review_id"], int(row["revision"]) + 1
                 connection.execute(
                     """
-                    UPDATE daily_reviews SET payload = ?, revision = ?, is_deleted = 0, updated_at = ?
-                    WHERE daily_review_id = ? AND revision = ?
+                    UPDATE daily_reviews SET payload = %s, revision = %s, is_deleted = 0, updated_at = %s
+                    WHERE daily_review_id = %s AND revision = %s
                     """,
                     (json.dumps(body, ensure_ascii=False), revision, now, review_id, expected_revision),
                 )
             updated = connection.execute(
                 """
                 UPDATE trading_meta SET daily_review_revision = daily_review_revision + 1
-                WHERE account_id = ?
+                WHERE account_id = %s
                 """,
                 (account["account_id"],),
             )
             if updated.rowcount != 1:
                 raise TradingNotFoundError("交易账户不存在")
             daily_revision = connection.execute(
-                "SELECT daily_review_revision FROM trading_meta WHERE account_id = ?",
+                "SELECT daily_review_revision FROM trading_meta WHERE account_id = %s",
                 (account["account_id"],),
-            ).fetchone()[0]
+            ).fetchone()["daily_review_revision"]
             connection.execute(
                 """
                 UPDATE trading_review_snapshots SET is_outdated = 1
-                WHERE account_id = ? AND period_start <= ? AND period_end >= ?
-                    AND daily_review_revision < ?
+                WHERE account_id = %s AND period_start <= %s AND period_end >= %s
+                    AND daily_review_revision < %s
                 """,
                 (account["account_id"], trade_date.isoformat(), trade_date.isoformat(), daily_revision),
             )
@@ -316,7 +317,7 @@ class TradingService:
                 """
                 SELECT review.*, meta.daily_review_revision FROM daily_reviews AS review
                 JOIN trading_meta AS meta ON meta.account_id = review.account_id
-                WHERE review.account_id = ? AND review.trade_date = ? AND review.is_deleted = 0
+                WHERE review.account_id = %s AND review.trade_date = %s AND review.is_deleted = 0
                 """,
                 (account["account_id"], trade_date.isoformat()),
             ).fetchone()
@@ -351,14 +352,14 @@ class TradingService:
         symbols = set(result.positions)
         with self.database.read() as connection:
             cached_rows = connection.execute(
-                "SELECT symbol, valuation_date FROM trading_market_prices WHERE account_id = ?",
+                "SELECT symbol, valuation_date FROM trading_market_prices WHERE account_id = %s",
                 (account_id,),
             ).fetchall()
             snapshot_ranges = connection.execute(
                 """
                 SELECT period_start, period_end
                 FROM trading_review_snapshots
-                WHERE account_id = ?
+                WHERE account_id = %s
                 """,
                 (account_id,),
             ).fetchall()
@@ -422,7 +423,7 @@ class TradingService:
 
     def _validate_ledger_in(
         self,
-        connection: sqlite3.Connection,
+        connection: psycopg.Connection,
         account: Mapping[str, Any],
         replacement: LedgerEvent | None,
         *,
@@ -445,14 +446,14 @@ class TradingService:
             events.append(self._execution_event(row, event_id=row["execution_id"], created_at=row["created_at"]))
         return events
 
-    def _ledger_events_in(self, connection: sqlite3.Connection, account_id: str) -> list[LedgerEvent]:
+    def _ledger_events_in(self, connection: psycopg.Connection, account_id: str) -> list[LedgerEvent]:
         events = []
         for row in connection.execute(
-            "SELECT * FROM cash_flows WHERE account_id = ? AND is_deleted = 0", (account_id,)
+            "SELECT * FROM cash_flows WHERE account_id = %s AND is_deleted = 0", (account_id,)
         ).fetchall():
             events.append(self._cash_flow_event(row, event_id=row["cash_flow_id"], created_at=row["created_at"]))
         for row in connection.execute(
-            "SELECT * FROM trade_executions WHERE account_id = ? AND is_deleted = 0", (account_id,)
+            "SELECT * FROM trade_executions WHERE account_id = %s AND is_deleted = 0", (account_id,)
         ).fetchall():
             events.append(self._execution_event(row, event_id=row["execution_id"], created_at=row["created_at"]))
         return events
@@ -541,7 +542,7 @@ class TradingService:
     def _execution_response(self, row: Mapping[str, Any]) -> dict[str, Any]:
         with self.database.read() as connection:
             details = connection.execute(
-                "SELECT name, tags, note FROM trading_execution_details WHERE execution_id = ?", (row["execution_id"],)
+                "SELECT name, tags, note FROM trading_execution_details WHERE execution_id = %s", (row["execution_id"],)
             ).fetchone()
         return {
             "execution_id": row["execution_id"], "symbol": row["symbol"],
@@ -556,7 +557,7 @@ class TradingService:
     def _cash_flow_response(self, row: Mapping[str, Any]) -> dict[str, Any]:
         with self.database.read() as connection:
             details = connection.execute(
-                "SELECT note FROM trading_cash_flow_details WHERE cash_flow_id = ?", (row["cash_flow_id"],)
+                "SELECT note FROM trading_cash_flow_details WHERE cash_flow_id = %s", (row["cash_flow_id"],)
             ).fetchone()
         return {
             "cash_flow_id": row["cash_flow_id"], "occurred_at": row["occurred_at"], "kind": row["kind"],

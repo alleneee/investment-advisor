@@ -13,6 +13,7 @@ from .analysis import MarketAnalysisService
 from .api import create_internal_router, create_router
 from .db import Database
 from .information import StockInformationService
+from .outcome import ReportOutcomeService
 from .providers.a_stock_data import AStockDataProvider
 from .providers.tushare import TushareMarketProvider
 from .reporting import AgentRuntimeClient, InvestmentReportService
@@ -43,8 +44,10 @@ def create_app(
     trading_calendar_provider: Any | None = None,
     trading_clock: Callable[[], datetime] | None = None,
     trading_report_scheduler: Callable[[Callable[[], None]], None] | None = None,
+    outcome_market_provider: Any | None = None,
+    outcome_clock: Callable[[], datetime] | None = None,
 ) -> FastAPI:
-    db = database or Database(os.getenv("APP_DATABASE_PATH", ":memory:"))
+    db = database or Database()
     information = information_service or StockInformationService(AStockDataProvider(), db)
     reports = InvestmentReportService(
         db,
@@ -61,6 +64,7 @@ def create_app(
         model=os.getenv("PI_MODEL", "glm-5.2"),
     )
     trading = trading_store or TradingStore(db)
+    outcomes = ReportOutcomeService(db, outcome_market_provider, clock=outcome_clock)
 
     @asynccontextmanager
     async def app_lifespan(_: FastAPI):
@@ -74,7 +78,7 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    instance.include_router(create_router(db, market_service, information, reports))
+    instance.include_router(create_router(db, market_service, information, reports, outcomes))
     instance.include_router(
         create_trading_router(
             trading,
@@ -86,6 +90,3 @@ def create_app(
     )
     instance.include_router(create_internal_router(db, market_service, os.getenv("INTERNAL_AGENT_TOKEN")))
     return instance
-
-
-app = create_app()

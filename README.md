@@ -10,7 +10,7 @@ Node sidecar 让 Pi 只生成受证据引用约束的三情景研究叙述。Rea
 ```mermaid
 flowchart LR
     A[React 结构投研台] --> B[FastAPI]
-    B --> C[(SQLite 行情与资讯缓存)]
+    B --> C[(PostgreSQL 行情与资讯缓存)]
     C -- 行情未命中 --> D[Tushare Python SDK]
     C -- 资讯未命中或过期 --> E[三源公开 HTTP]
     D --> F[前复权行情快照]
@@ -46,7 +46,7 @@ Tushare 是运行时数据源，不是由模型或 skill 代替调用。
 
 ## 目录
 
-- `apps/api`：FastAPI、SQLite、Tushare provider、ChanEngine 编排入口。
+- `apps/api`：FastAPI、PostgreSQL、Tushare provider、ChanEngine 编排入口。
 - `apps/api/app/domain/chan_engine.py`：包含处理、分型、严格笔、笔中枢，
   以及 confirmed/provisional 快照。
 - `apps/agent-runtime`：Pi 状态机、Python RPC client、HTTP sidecar 和受限报告工具。
@@ -75,7 +75,7 @@ npm --prefix apps/web install --install-strategy=shallow
 ```bash
 TUSHARE_TOKEN="你的 Tushare token"
 TUSHARE_API_URL="https://你的-tushare-服务.example/api"
-APP_DATABASE_PATH="data/chan-market.sqlite3"
+DATABASE_URL="postgresql://niko@127.0.0.1:5432/chan_market"
 INTERNAL_AGENT_TOKEN="FastAPI 与 sidecar 共享的内部 token"
 AGENT_RUNTIME_URL="http://127.0.0.1:8081"
 PYTHON_API_BASE_URL="http://127.0.0.1:8000"
@@ -89,8 +89,8 @@ VITE_API_BASE_URL="http://127.0.0.1:8000"
 
 `TUSHARE_TOKEN` 是 Python 数据服务的凭据。第三方套餐 Token 必须同时配置其
 对应的 `TUSHARE_API_URL`；未配置地址时使用 Tushare SDK 默认服务。
-`APP_DATABASE_PATH` 指定本地 SQLite 文件；使用示例值时，服务会自动创建
-`data` 目录和数据库文件。
+`DATABASE_URL` 指定 PostgreSQL 连接串，必须配置；缺失时服务启动直接失败，
+不再支持内存或 SQLite 数据库。
 `INTERNAL_AGENT_TOKEN` 是 FastAPI 与 Node sidecar 之间的必需共享凭据，两边
 必须使用同一个非空值；浏览器不会接触该值。
 `AGENT_RUNTIME_URL` 默认是 `http://127.0.0.1:8081`，
@@ -116,8 +116,8 @@ New API 的兼容层只允许标准消息角色，sidecar 会关闭 `developer` 
 分别打开三个终端：
 
 ```bash
-uv run --env-file .env uvicorn app.main:app --app-dir apps/api \
-  --host 127.0.0.1 --port 8000
+uv run --env-file .env uvicorn --factory app.main:create_app \
+  --app-dir apps/api --host 127.0.0.1 --port 8000
 ```
 
 ```bash
@@ -167,22 +167,28 @@ npm --prefix apps/web run dev
 ## 本地行情缓存
 
 FastAPI 会按股票、周期、前复权方式、截止日期和五年窗口固化行情快照。
-同一交易日再次查看相同股票时直接读取 SQLite，不再调用 Tushare。
+同一交易日再次查看相同股票时直接读取 PostgreSQL，不再调用 Tushare。
 日线首次拉取后，周线由已缓存的日线在本地聚合，因此切换周线也不会重复拉取
 该股票的五年历史行情。缓存使用请求截止日期隔离，避免不同截止日的前复权结果
 互相覆盖。
 
-本地开发默认在 `.env` 中配置：
+本地开发使用本机 PostgreSQL 实例，首次只需建库：
 
 ```bash
-APP_DATABASE_PATH="data/chan-market.sqlite3"
+createdb -h 127.0.0.1 -p 5432 chan_market
 ```
 
-数据库文件已被 `.gitignore` 忽略，不应提交到代码仓库。
+并在 `.env` 中配置：
+
+```bash
+DATABASE_URL="postgresql://niko@127.0.0.1:5432/chan_market"
+```
+
+生产环境使用托管 PostgreSQL 并通过 secret 注入连接串。
 
 ## 本地资讯缓存与降级
 
-资讯按来源写入同一个 SQLite 数据库，并使用独立有效期：
+资讯按来源写入同一个 PostgreSQL 数据库，并使用独立有效期：
 
 - 东财个股新闻：按股票缓存 30 分钟。
 - 巨潮互动易：按股票缓存 6 小时。
@@ -232,22 +238,98 @@ curl "http://127.0.0.1:8000/api/reports/${REPORT_ID}"
 curl -X POST "http://127.0.0.1:8000/api/reports/${REPORT_ID}/retry"
 ```
 
-报告完成后可以提交审阅：
+相同 `input_digest` 的 `queued` 或 `running` 请求复用同一个 job；已完成的相同输入
+返回 `200`、同一 `report_id` 和 `cached: true`。digest 覆盖股票、周期、截止日、
+三类快照、引擎与提示版本以及模型配置。
+
+## 对客研报闭环
+
+研报面向客户，交付前后各有一道关口：发布前由人工审阅质检，发布后按真实行情
+验证情景是否兑现。两者共同构成可追溯的 track record。
+
+### 审阅与发布
+
+审阅只接受 `accepted` 或 `rejected`，且只能对 `completed` 报告提交；未通过审阅
+的报告无法发布：
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/api/reports/${REPORT_ID}/reviews" \
   -H 'content-type: application/json' \
   -d '{"reviewer":"analyst","decision":"accepted","note":"结构事实可追溯"}'
+
+curl -X POST "http://127.0.0.1:8000/api/reports/${REPORT_ID}/publish"
+curl "http://127.0.0.1:8000/api/reports/published"
 ```
 
-相同 `input_digest` 的 `queued` 或 `running` 请求复用同一个 job；已完成的相同输入
-返回 `200`、同一 `report_id` 和 `cached: true`。digest 覆盖股票、周期、截止日、
-三类快照、引擎与提示版本以及模型配置。
+审阅记录追加保存，最后一次决定决定报告的 `review_status`；重复发布保持首次
+`published_at` 不变。
+
+### 情景兑现评估
+
+报告的触发与失效条件由算子和引用注册表中的事实构成，价格类条件可以按真实
+行情确定性判定：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/reports/${REPORT_ID}/outcome"
+curl "http://127.0.0.1:8000/api/reports/${REPORT_ID}/outcome"
+```
+
+判定规则固定为：`break_above` 与 `break_below` 看窗口内是否出现收盘价越过水平，
+`hold_above` 与 `hold_below` 要求窗口内每个收盘价都不越界。展望窗口取报告固化
+日之后的 20 个交易日，满 5 个交易日才给出结论，未满时返回 `pending`。
+
+窗口行情会按报告固化时的前复权基准换算后再比较。Provider 的前复权以取数窗口
+最后一个交易日为基准，事后重新取数会换基准；服务以报告最后一根 K 线为锚点做
+整体换算，避免期间分红或拆股让固化价格水平失真。
+
+结构类条件（`structure_confirmed`、`structure_invalidated`）需要重放缠论才能判定，
+当前显式返回 `structure_condition_not_replayable`，不做推测。
+
+裁决口径：触发命中且失效未命中才算该情景兑现。恰好一个情景满足记为 `realized`，
+多个同时满足记为 `ambiguous`，都不满足记为 `none_realized`，存在无法判定的条件
+且无情景兑现记为 `inconclusive`。
+
+### 质量看板
+
+```bash
+curl "http://127.0.0.1:8000/api/reports/quality"
+curl "http://127.0.0.1:8000/api/reports/quality?scope=all"
+```
+
+默认 `scope=published`，只统计 `published_at` 非空的报告：被驳回或尚未发布的
+报告不进对客 track record。`scope=all` 是内部复盘视角，包含全部报告。
+
+兑现率给出两个口径：`realized_rate_over_conclusive` 的分母只算有明确结论的
+样本（`realized` 加 `none_realized`），`realized_rate_over_evaluated` 的分母是
+全部已评估样本，把 `ambiguous` 与 `inconclusive` 也算作没兑现，是更保守、也更
+接近客户体感的口径。样本不足时两者都返回 `null`，不用推测值填充。
 
 `investment_report.v2` 固化行情、缠论、资讯、引用注册表和 AI 草稿，输出未来
 5 至 20 个交易日的上涨、基准和下跌三种情景。每个情景包含依据、触发条件和
 失效条件；服务端按注册表水合标签、数值、时间与原文链接，并附加固定免责声明
 和初始 `pending` 审阅状态。
+
+### 引用注册表的价格水平
+
+价格类条件只能引用注册表里的水平，注册表按"仍然可用"的口径筛选：
+
+- `market.latest_close` 是固化日收盘，同时充当条件校验的锚点。
+- `market.recent_high` 与 `market.recent_low` 是整个五年固化窗口的极值，
+  `occurred_at` 指向极值实际发生的那根 K 线。
+- `market.recent_high_60` 与 `market.recent_low_60` 取最近六十根固化 K 线的
+  高低点，是贴近现价、通常还没有被突破的边界。
+- `chan.center.upper` 与 `chan.center.lower` 只在仍然包含固化日收盘的中枢上
+  暴露。缠论引擎对每三笔滑窗都产出一个中枢，最新那个可能早已被价格甩开；没有
+  任何中枢包含现价时两个引用一并省略，此时模型改用近端高低价作为边界。
+
+两端校验都会拒收在固化时点就已经被解决的价格条件：`break_above` 指向已被越过
+的水平、`break_below` 指向已被跌破的水平、`hold_above` 指向已被跌破的水平、
+`hold_below` 指向已被越过的水平。这类条件在展望窗口第一根 K 线上必然命中，只是
+复述既成事实。注意收盘正好位于 `hold_above` 水平上方是正常且必要的，不算退化。
+
+资讯快照与行情固化到同一个 `as_of`：新闻与互动问答按发布时间不晚于该日东八区
+结束时刻过滤；同花顺热榜只有实时快照、没有历史序列，历史时点直接置为不可用并在
+`quality.warnings` 里说明原因，不用今天的数据冒充历史。
 
 工作台只展示完整缠论图表、三情景正文、触发与失效条件、风险边界和免责声明。
 结构结论、结构事实列表及证据引用明细保留在 Report V2 数据中，不在页面重复
@@ -255,7 +337,7 @@ curl -X POST "http://127.0.0.1:8000/api/reports/${REPORT_ID}/reviews" \
 
 ## 交易日记与周期复盘
 
-交易账户、成交记录、资金流水和每日收盘复盘都写入 SQLite，并按上海时区保存。
+交易账户、成交记录、资金流水和每日收盘复盘都写入 PostgreSQL，并按上海时区保存。
 成交记录要求填写买入或卖出理由；每日复盘可记录失效条件、次日计划、情绪和纪律
 执行情况。
 

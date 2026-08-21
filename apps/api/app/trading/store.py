@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
+
+import psycopg
 
 from app.db import Database
 
@@ -119,7 +120,7 @@ def _watermark_has_market_dependencies(value: Any, changed: set[tuple[str, str]]
 
 
 def outdate_market_snapshots_for_dependencies(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection,
     account_id: str,
     changed: Sequence[tuple[str, str]],
     market_revision: int,
@@ -133,7 +134,7 @@ def outdate_market_snapshots_for_dependencies(
         return
     rows = connection.execute(
         "SELECT snapshot_id, market_watermark, market_revision "
-        "FROM trading_review_snapshots WHERE account_id = ?",
+        "FROM trading_review_snapshots WHERE account_id = %s",
         (account_id,),
     ).fetchall()
     snapshot_ids = [
@@ -144,10 +145,10 @@ def outdate_market_snapshots_for_dependencies(
     ]
     if not snapshot_ids:
         return
-    placeholders = ", ".join("?" for _ in snapshot_ids)
+    placeholders = ", ".join("%s" for _ in snapshot_ids)
     connection.execute(
         f"UPDATE trading_review_snapshots SET is_outdated = 1 "
-        f"WHERE account_id = ? AND snapshot_id IN ({placeholders})",
+        f"WHERE account_id = %s AND snapshot_id IN ({placeholders})",
         (account_id, *snapshot_ids),
     )
 
@@ -357,7 +358,14 @@ class TradingStore:
         }
         for table, columns in migrations.items():
             with self.database.read() as connection:
-                existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+                existing = {
+                    row["column_name"]
+                    for row in connection.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = current_schema() AND table_name = %s",
+                        (table,),
+                    )
+                }
             for name, definition in columns.items():
                 if name not in existing:
                     self.database.execute_script(
@@ -389,12 +397,12 @@ class TradingStore:
                     """
                     INSERT INTO trading_account(
                         account_id, name, activated_on, initial_capital, is_active, created_at
-                    ) VALUES (?, ?, ?, ?, 1, ?)
+                    ) VALUES (%s, %s, %s, %s, 1, %s)
                     """,
                     (account_id, name, activated_on, initial_capital, now),
                 )
-                connection.execute("INSERT INTO trading_meta(account_id) VALUES (?)", (account_id,))
-        except sqlite3.Error as exc:
+                connection.execute("INSERT INTO trading_meta(account_id) VALUES (%s)", (account_id,))
+        except psycopg.Error as exc:
             raise AccountAlreadyExists("活跃交易账户创建冲突") from exc
         return self.get_account(account_id)
 
@@ -412,7 +420,7 @@ class TradingStore:
                 SELECT account.*, meta.ledger_revision, meta.daily_review_revision, meta.market_revision
                 FROM trading_account AS account
                 JOIN trading_meta AS meta ON meta.account_id = account.account_id
-                WHERE account.account_id = ?
+                WHERE account.account_id = %s
                 """,
                 (account_id,),
             ).fetchone()
@@ -444,8 +452,8 @@ class TradingStore:
                 """
                 SELECT valuation_date, open, high, low, close, volume
                 FROM trading_market_prices
-                WHERE account_id = ? AND symbol = ?
-                    AND valuation_date BETWEEN ? AND ?
+                WHERE account_id = %s AND symbol = %s
+                    AND valuation_date BETWEEN %s AND %s
                     AND open IS NOT NULL AND high IS NOT NULL AND low IS NOT NULL
                     AND chart_bar_digest = bar_digest
                 ORDER BY valuation_date
@@ -484,7 +492,7 @@ class TradingStore:
                     """
                     SELECT source_trade_date, bar_digest
                     FROM trading_market_prices
-                    WHERE account_id = ? AND symbol = ? AND valuation_date = ?
+                    WHERE account_id = %s AND symbol = %s AND valuation_date = %s
                     """,
                     (account_id, row["symbol"], row["trade_date"]),
                 ).fetchone()
@@ -494,7 +502,7 @@ class TradingStore:
             if changed:
                 revision += 1
                 connection.execute(
-                    "UPDATE trading_meta SET market_revision = ? WHERE account_id = ?",
+                    "UPDATE trading_meta SET market_revision = %s WHERE account_id = %s",
                     (revision, account_id),
                 )
                 outdate_market_snapshots_for_dependencies(
@@ -509,7 +517,7 @@ class TradingStore:
                     INSERT INTO trading_market_prices(
                         account_id, symbol, valuation_date, source_trade_date, close, bar_digest,
                         open, high, low, volume, chart_bar_digest, revision
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT(account_id, symbol, valuation_date) DO UPDATE SET
                         source_trade_date = excluded.source_trade_date,
                         close = excluded.close,
@@ -544,14 +552,14 @@ class TradingStore:
         *,
         details: Mapping[str, Any] | None = None,
         return_outcome: bool = False,
-        validation: Callable[[sqlite3.Connection], None] | None = None,
+        validation: Callable[[psycopg.Connection], None] | None = None,
     ) -> dict[str, Any] | tuple[dict[str, Any], bool]:
         value = self._execution_request(request)
         with self.database.transaction(immediate=True) as connection:
             existing = connection.execute(
                 """
                 SELECT * FROM trade_executions
-                WHERE account_id = ? AND client_idempotency_key = ?
+                WHERE account_id = %s AND client_idempotency_key = %s
                 """,
                 (value["account_id"], value["client_idempotency_key"]),
             ).fetchone()
@@ -560,7 +568,7 @@ class TradingStore:
                     if details is None or existing["request_digest"] != value["core_request_digest"]:
                         raise IdempotencyConflict("成交幂等键已被不同请求使用")
                     connection.execute(
-                        "UPDATE trade_executions SET request_digest = ? WHERE execution_id = ?",
+                        "UPDATE trade_executions SET request_digest = %s WHERE execution_id = %s",
                         (value["request_digest"], existing["execution_id"]),
                     )
                 if details is not None:
@@ -581,7 +589,7 @@ class TradingStore:
                     execution_id, account_id, client_idempotency_key, request_digest, occurred_at,
                     symbol, side, price, quantity, fee, primary_reason, revision, is_deleted,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 0, %s, %s)
                 """,
                 (
                     execution_id,
@@ -605,13 +613,13 @@ class TradingStore:
                 )
             self._outdate_ledger_snapshots_in(connection, value["account_id"], value["occurred_on"], ledger_revision)
             row = connection.execute(
-                "SELECT * FROM trade_executions WHERE execution_id = ?", (execution_id,)
+                "SELECT * FROM trade_executions WHERE execution_id = %s", (execution_id,)
             ).fetchone()
             result = self._execution_row(row, ledger_revision)
             return (result, True) if return_outcome else result
 
     def list_executions(self, account_id: str, *, include_deleted: bool = False) -> list[dict[str, Any]]:
-        query = "SELECT * FROM trade_executions WHERE account_id = ?"
+        query = "SELECT * FROM trade_executions WHERE account_id = %s"
         if not include_deleted:
             query += " AND is_deleted = 0"
         query += " ORDER BY occurred_at, created_at, execution_id"
@@ -627,7 +635,7 @@ class TradingStore:
         *,
         details: Mapping[str, Any] | None = None,
         expected_revision: int,
-        validation: Callable[[sqlite3.Connection], None] | None = None,
+        validation: Callable[[psycopg.Connection], None] | None = None,
     ) -> dict[str, Any]:
         value = self._execution_request(request)
         with self.database.transaction(immediate=True) as connection:
@@ -637,7 +645,7 @@ class TradingStore:
             if connection.execute(
                 """
                 SELECT 1 FROM trade_executions
-                WHERE account_id = ? AND client_idempotency_key = ? AND execution_id != ?
+                WHERE account_id = %s AND client_idempotency_key = %s AND execution_id != %s
                 """,
                 (value["account_id"], value["client_idempotency_key"], execution_id),
             ).fetchone() is not None:
@@ -650,9 +658,9 @@ class TradingStore:
             connection.execute(
                 """
                 UPDATE trade_executions
-                SET client_idempotency_key = ?, request_digest = ?, occurred_at = ?, symbol = ?, side = ?,
-                    price = ?, quantity = ?, fee = ?, primary_reason = ?, revision = ?, updated_at = ?
-                WHERE execution_id = ? AND revision = ? AND is_deleted = 0
+                SET client_idempotency_key = %s, request_digest = %s, occurred_at = %s, symbol = %s, side = %s,
+                    price = %s, quantity = %s, fee = %s, primary_reason = %s, revision = %s, updated_at = %s
+                WHERE execution_id = %s AND revision = %s AND is_deleted = 0
                 """,
                 (
                     value["client_idempotency_key"], value["request_digest"], value["occurred_at"],
@@ -666,7 +674,7 @@ class TradingStore:
                 )
             self._outdate_ledger_snapshots_in(connection, value["account_id"], affected_from, ledger_revision)
             row = connection.execute(
-                "SELECT * FROM trade_executions WHERE execution_id = ?", (execution_id,)
+                "SELECT * FROM trade_executions WHERE execution_id = %s", (execution_id,)
             ).fetchone()
             return self._execution_row(row, ledger_revision)
 
@@ -675,7 +683,7 @@ class TradingStore:
         execution_id: str,
         *,
         expected_revision: int,
-        validation: Callable[[sqlite3.Connection], None] | None = None,
+        validation: Callable[[psycopg.Connection], None] | None = None,
     ) -> dict[str, Any]:
         with self.database.transaction(immediate=True) as connection:
             existing = self._execution_for_update(connection, execution_id, expected_revision)
@@ -686,8 +694,8 @@ class TradingStore:
             connection.execute(
                 """
                 UPDATE trade_executions
-                SET is_deleted = 1, revision = ?, updated_at = ?
-                WHERE execution_id = ? AND revision = ? AND is_deleted = 0
+                SET is_deleted = 1, revision = %s, updated_at = %s
+                WHERE execution_id = %s AND revision = %s AND is_deleted = 0
                 """,
                 (revision, now, execution_id, expected_revision),
             )
@@ -695,7 +703,7 @@ class TradingStore:
                 connection, existing["account_id"], self._occurred_on(existing["occurred_at"]), ledger_revision
             )
             row = connection.execute(
-                "SELECT * FROM trade_executions WHERE execution_id = ?", (execution_id,)
+                "SELECT * FROM trade_executions WHERE execution_id = %s", (execution_id,)
             ).fetchone()
             return self._execution_row(row, ledger_revision)
 
@@ -705,13 +713,13 @@ class TradingStore:
         *,
         details: Mapping[str, Any] | None = None,
         return_outcome: bool = False,
-        validation: Callable[[sqlite3.Connection], None] | None = None,
+        validation: Callable[[psycopg.Connection], None] | None = None,
     ) -> dict[str, Any] | tuple[dict[str, Any], bool]:
         value = self._cash_flow_request(request)
         with self.database.transaction(immediate=True) as connection:
             existing = connection.execute(
                 """
-                SELECT * FROM cash_flows WHERE account_id = ? AND client_idempotency_key = ?
+                SELECT * FROM cash_flows WHERE account_id = %s AND client_idempotency_key = %s
                 """,
                 (value["account_id"], value["client_idempotency_key"]),
             ).fetchone()
@@ -720,7 +728,7 @@ class TradingStore:
                     if details is None or existing["request_digest"] != value["core_request_digest"]:
                         raise IdempotencyConflict("现金流幂等键已被不同请求使用")
                     connection.execute(
-                        "UPDATE cash_flows SET request_digest = ? WHERE cash_flow_id = ?",
+                        "UPDATE cash_flows SET request_digest = %s WHERE cash_flow_id = %s",
                         (value["request_digest"], existing["cash_flow_id"]),
                     )
                 if details is not None:
@@ -740,7 +748,7 @@ class TradingStore:
                 INSERT INTO cash_flows(
                     cash_flow_id, account_id, client_idempotency_key, request_digest, occurred_at, kind,
                     amount, revision, is_deleted, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, 1, 0, %s, %s)
                 """,
                 (
                     cash_flow_id, value["account_id"], value["client_idempotency_key"],
@@ -752,12 +760,12 @@ class TradingStore:
                     connection, cash_flow_id, details, value["request_digest"]
                 )
             self._outdate_ledger_snapshots_in(connection, value["account_id"], value["occurred_on"], ledger_revision)
-            row = connection.execute("SELECT * FROM cash_flows WHERE cash_flow_id = ?", (cash_flow_id,)).fetchone()
+            row = connection.execute("SELECT * FROM cash_flows WHERE cash_flow_id = %s", (cash_flow_id,)).fetchone()
             result = self._cash_flow_row(row, ledger_revision)
             return (result, True) if return_outcome else result
 
     def list_cash_flows(self, account_id: str, *, include_deleted: bool = False) -> list[dict[str, Any]]:
-        query = "SELECT * FROM cash_flows WHERE account_id = ?"
+        query = "SELECT * FROM cash_flows WHERE account_id = %s"
         if not include_deleted:
             query += " AND is_deleted = 0"
         query += " ORDER BY occurred_at, created_at, cash_flow_id"
@@ -773,7 +781,7 @@ class TradingStore:
         *,
         details: Mapping[str, Any] | None = None,
         expected_revision: int,
-        validation: Callable[[sqlite3.Connection], None] | None = None,
+        validation: Callable[[psycopg.Connection], None] | None = None,
     ) -> dict[str, Any]:
         value = self._cash_flow_request(request)
         with self.database.transaction(immediate=True) as connection:
@@ -783,7 +791,7 @@ class TradingStore:
             if connection.execute(
                 """
                 SELECT 1 FROM cash_flows
-                WHERE account_id = ? AND client_idempotency_key = ? AND cash_flow_id != ?
+                WHERE account_id = %s AND client_idempotency_key = %s AND cash_flow_id != %s
                 """,
                 (value["account_id"], value["client_idempotency_key"], cash_flow_id),
             ).fetchone() is not None:
@@ -796,9 +804,9 @@ class TradingStore:
             connection.execute(
                 """
                 UPDATE cash_flows
-                SET client_idempotency_key = ?, request_digest = ?, occurred_at = ?, kind = ?, amount = ?,
-                    revision = ?, updated_at = ?
-                WHERE cash_flow_id = ? AND revision = ? AND is_deleted = 0
+                SET client_idempotency_key = %s, request_digest = %s, occurred_at = %s, kind = %s, amount = %s,
+                    revision = %s, updated_at = %s
+                WHERE cash_flow_id = %s AND revision = %s AND is_deleted = 0
                 """,
                 (
                     value["client_idempotency_key"], value["request_digest"], value["occurred_at"],
@@ -810,7 +818,7 @@ class TradingStore:
                     connection, cash_flow_id, details, value["request_digest"]
                 )
             self._outdate_ledger_snapshots_in(connection, value["account_id"], affected_from, ledger_revision)
-            row = connection.execute("SELECT * FROM cash_flows WHERE cash_flow_id = ?", (cash_flow_id,)).fetchone()
+            row = connection.execute("SELECT * FROM cash_flows WHERE cash_flow_id = %s", (cash_flow_id,)).fetchone()
             return self._cash_flow_row(row, ledger_revision)
 
     def delete_cash_flow(
@@ -818,7 +826,7 @@ class TradingStore:
         cash_flow_id: str,
         *,
         expected_revision: int,
-        validation: Callable[[sqlite3.Connection], None] | None = None,
+        validation: Callable[[psycopg.Connection], None] | None = None,
     ) -> dict[str, Any]:
         with self.database.transaction(immediate=True) as connection:
             existing = self._cash_flow_for_update(connection, cash_flow_id, expected_revision)
@@ -828,15 +836,15 @@ class TradingStore:
             revision, now = int(existing["revision"]) + 1, self._now()
             connection.execute(
                 """
-                UPDATE cash_flows SET is_deleted = 1, revision = ?, updated_at = ?
-                WHERE cash_flow_id = ? AND revision = ? AND is_deleted = 0
+                UPDATE cash_flows SET is_deleted = 1, revision = %s, updated_at = %s
+                WHERE cash_flow_id = %s AND revision = %s AND is_deleted = 0
                 """,
                 (revision, now, cash_flow_id, expected_revision),
             )
             self._outdate_ledger_snapshots_in(
                 connection, existing["account_id"], self._occurred_on(existing["occurred_at"]), ledger_revision
             )
-            row = connection.execute("SELECT * FROM cash_flows WHERE cash_flow_id = ?", (cash_flow_id,)).fetchone()
+            row = connection.execute("SELECT * FROM cash_flows WHERE cash_flow_id = %s", (cash_flow_id,)).fetchone()
             return self._cash_flow_row(row, ledger_revision)
 
     def create_review_snapshot(self, request: Mapping[str, Any]) -> dict[str, Any]:
@@ -857,7 +865,7 @@ class TradingStore:
                         snapshot_id, account_id, period_kind, period_start, period_end, input_digest,
                         ledger_revision, daily_review_revision, market_revision, is_outdated,
                         market_watermark, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s)
                     """,
                     (
                         snapshot_id, account_id, period_kind, period_start, period_end, input_digest,
@@ -865,17 +873,17 @@ class TradingStore:
                         market_watermark, self._now(),
                     ),
                 )
-            except sqlite3.IntegrityError as exc:
+            except psycopg.errors.UniqueViolation as exc:
                 raise IdempotencyConflict("复盘快照摘要已存在") from exc
             row = connection.execute(
-                "SELECT * FROM trading_review_snapshots WHERE snapshot_id = ?", (snapshot_id,)
+                "SELECT * FROM trading_review_snapshots WHERE snapshot_id = %s", (snapshot_id,)
             ).fetchone()
             return self._snapshot_row(row)
 
     def get_review_snapshot(self, snapshot_id: str) -> dict[str, Any] | None:
         with self.database.read() as connection:
             row = connection.execute(
-                "SELECT * FROM trading_review_snapshots WHERE snapshot_id = ?", (snapshot_id,)
+                "SELECT * FROM trading_review_snapshots WHERE snapshot_id = %s", (snapshot_id,)
             ).fetchone()
         return self._snapshot_row(row) if row is not None else None
 
@@ -884,7 +892,7 @@ class TradingStore:
             raise RevisionConflict("失效快照不能直接恢复")
         with self.database.transaction(immediate=True) as connection:
             connection.execute(
-                "UPDATE trading_review_snapshots SET is_outdated = ? WHERE snapshot_id = ?",
+                "UPDATE trading_review_snapshots SET is_outdated = %s WHERE snapshot_id = %s",
                 (int(is_outdated), snapshot_id),
             )
 
@@ -912,7 +920,7 @@ class TradingStore:
                 if expected is not None and int(expected) != meta[field]:
                     raise ReviewRevisionConflict(f"报告生成期间 {field} 发生变化")
             existing = connection.execute(
-                "SELECT * FROM trading_review_jobs WHERE account_id = ? AND period_kind = ? AND input_digest = ?",
+                "SELECT * FROM trading_review_jobs WHERE account_id = %s AND period_kind = %s AND input_digest = %s",
                 (account_id, period_kind, input_digest),
             ).fetchone()
             if existing is not None:
@@ -920,7 +928,7 @@ class TradingStore:
             previous = connection.execute(
                 """
                 SELECT snapshot_id, report_version FROM trading_review_snapshots
-                WHERE account_id = ? AND period_kind = ? AND period_start = ? AND period_end = ?
+                WHERE account_id = %s AND period_kind = %s AND period_start = %s AND period_end = %s
                 ORDER BY report_version DESC, created_at DESC LIMIT 1
                 """,
                 (account_id, period_kind, period_start, period_end),
@@ -936,7 +944,7 @@ class TradingStore:
                     ledger_revision, daily_review_revision, market_revision, is_outdated,
                     report_version, supersedes_snapshot_id, data_as_of, market_watermark,
                     snapshot_status, data_quality, payload, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, 'pending', %s, %s, %s)
                 """,
                 (
                     snapshot_id, account_id, period_kind, period_start, period_end, input_digest,
@@ -953,7 +961,7 @@ class TradingStore:
                     status, snapshot_id, report_version, supersedes_snapshot_id, attempt, lease_epoch,
                     lease_expires_at, execution_id, data_quality, ai_status, frozen_input, error,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, 1, 1, NULL, NULL, ?, 'not_requested', ?, NULL, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, 1, 1, NULL, NULL, %s, 'not_requested', %s, NULL, %s, %s)
                 """,
                 (
                     job_id, account_id, period_kind, period_start, period_end, input_digest,
@@ -961,14 +969,14 @@ class TradingStore:
                 ),
             )
             row = connection.execute(
-                "SELECT * FROM trading_review_jobs WHERE review_job_id = ?", (job_id,)
+                "SELECT * FROM trading_review_jobs WHERE review_job_id = %s", (job_id,)
             ).fetchone()
             return self._review_job_row(row), True
 
     def get_review_job(self, review_job_id: str) -> dict[str, Any] | None:
         with self.database.read() as connection:
             row = connection.execute(
-                "SELECT * FROM trading_review_jobs WHERE review_job_id = ?", (review_job_id,)
+                "SELECT * FROM trading_review_jobs WHERE review_job_id = %s", (review_job_id,)
             ).fetchone()
         return self._review_job_row(row) if row is not None else None
 
@@ -984,7 +992,7 @@ class TradingStore:
             rows = connection.execute(
                 """
                 SELECT * FROM trading_review_jobs
-                WHERE account_id = ? AND period_kind = ? AND period_start = ? AND period_end = ?
+                WHERE account_id = %s AND period_kind = %s AND period_start = %s AND period_end = %s
                 ORDER BY report_version DESC, created_at DESC
                 """,
                 (account_id, period_kind, period_start, period_end),
@@ -1007,7 +1015,7 @@ class TradingStore:
         )
         with self.database.transaction(immediate=True) as connection:
             row = connection.execute(
-                "SELECT * FROM trading_review_jobs WHERE review_job_id = ?", (review_job_id,)
+                "SELECT * FROM trading_review_jobs WHERE review_job_id = %s", (review_job_id,)
             ).fetchone()
             if row is None:
                 raise ReviewJobNotFound("复盘报告不存在")
@@ -1020,11 +1028,11 @@ class TradingStore:
             updated = connection.execute(
                 """
                 UPDATE trading_review_jobs
-                SET status = 'running', execution_id = ?, lease_epoch = ?, lease_expires_at = ?, updated_at = ?
-                WHERE review_job_id = ? AND lease_epoch = ?
+                SET status = 'running', execution_id = %s, lease_epoch = %s, lease_expires_at = %s, updated_at = %s
+                WHERE review_job_id = %s AND lease_epoch = %s
                     AND (
                         status = 'pending'
-                        OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
+                        OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= %s)
                     )
                 """,
                 (
@@ -1040,11 +1048,11 @@ class TradingStore:
             if updated.rowcount != 1:
                 raise ReviewLeaseConflict("复盘报告任务 lease 已失效")
             connection.execute(
-                "UPDATE trading_review_snapshots SET snapshot_status = 'running' WHERE snapshot_id = ?",
+                "UPDATE trading_review_snapshots SET snapshot_status = 'running' WHERE snapshot_id = %s",
                 (row["snapshot_id"],),
             )
             result = connection.execute(
-                "SELECT * FROM trading_review_jobs WHERE review_job_id = ?", (review_job_id,)
+                "SELECT * FROM trading_review_jobs WHERE review_job_id = %s", (review_job_id,)
             ).fetchone()
             return self._review_job_row(result)
 
@@ -1063,14 +1071,14 @@ class TradingStore:
         timestamp = self._timestamp(now)
         with self.database.transaction(immediate=True) as connection:
             row = connection.execute(
-                "SELECT * FROM trading_review_jobs WHERE review_job_id = ?", (review_job_id,)
+                "SELECT * FROM trading_review_jobs WHERE review_job_id = %s", (review_job_id,)
             ).fetchone()
             if row is None:
                 raise ReviewJobNotFound("复盘报告不存在")
             if not row["snapshot_id"]:
                 raise InvalidReviewPayload("复盘报告缺少快照")
             snapshot = connection.execute(
-                "SELECT snapshot_id FROM trading_review_snapshots WHERE snapshot_id = ?",
+                "SELECT snapshot_id FROM trading_review_snapshots WHERE snapshot_id = %s",
                 (row["snapshot_id"],),
             ).fetchone()
             if snapshot is None:
@@ -1087,8 +1095,8 @@ class TradingStore:
             updated = connection.execute(
                 """
                 UPDATE trading_review_jobs
-                SET status = 'ready', data_quality = ?, error = NULL, updated_at = ?
-                WHERE review_job_id = ? AND status = 'running' AND lease_epoch = ? AND execution_id = ?
+                SET status = 'ready', data_quality = %s, error = NULL, updated_at = %s
+                WHERE review_job_id = %s AND status = 'running' AND lease_epoch = %s AND execution_id = %s
                 """,
                 (data_quality, timestamp, review_job_id, lease_epoch, execution_id),
             )
@@ -1097,14 +1105,14 @@ class TradingStore:
             connection.execute(
                 """
                 UPDATE trading_review_snapshots
-                SET snapshot_status = 'ready', data_quality = ?, data_as_of = COALESCE(?, data_as_of),
-                    market_watermark = COALESCE(?, market_watermark), payload = ?
-                WHERE snapshot_id = ?
+                SET snapshot_status = 'ready', data_quality = %s, data_as_of = COALESCE(%s, data_as_of),
+                    market_watermark = COALESCE(%s, market_watermark), payload = %s
+                WHERE snapshot_id = %s
                 """,
                 (data_quality, data_as_of, market_watermark, encoded, row["snapshot_id"]),
             )
             result = connection.execute(
-                "SELECT * FROM trading_review_jobs WHERE review_job_id = ?", (review_job_id,)
+                "SELECT * FROM trading_review_jobs WHERE review_job_id = %s", (review_job_id,)
             ).fetchone()
             return self._review_job_row(result)
 
@@ -1121,7 +1129,7 @@ class TradingStore:
         encoded = json.dumps(dict(error), ensure_ascii=False, default=str)
         with self.database.transaction(immediate=True) as connection:
             row = connection.execute(
-                "SELECT * FROM trading_review_jobs WHERE review_job_id = ?", (review_job_id,)
+                "SELECT * FROM trading_review_jobs WHERE review_job_id = %s", (review_job_id,)
             ).fetchone()
             if row is None:
                 raise ReviewJobNotFound("复盘报告不存在")
@@ -1135,19 +1143,19 @@ class TradingStore:
             updated = connection.execute(
                 """
                 UPDATE trading_review_jobs
-                SET status = 'failed', error = ?, updated_at = ?
-                WHERE review_job_id = ? AND status = 'running' AND lease_epoch = ? AND execution_id = ?
+                SET status = 'failed', error = %s, updated_at = %s
+                WHERE review_job_id = %s AND status = 'running' AND lease_epoch = %s AND execution_id = %s
                 """,
                 (encoded, timestamp, review_job_id, lease_epoch, execution_id),
             )
             if updated.rowcount != 1:
                 raise ReviewLeaseConflict("复盘报告任务 lease 已失效")
             connection.execute(
-                "UPDATE trading_review_snapshots SET snapshot_status = 'failed' WHERE snapshot_id = ?",
+                "UPDATE trading_review_snapshots SET snapshot_status = 'failed' WHERE snapshot_id = %s",
                 (row["snapshot_id"],),
             )
             result = connection.execute(
-                "SELECT * FROM trading_review_jobs WHERE review_job_id = ?", (review_job_id,)
+                "SELECT * FROM trading_review_jobs WHERE review_job_id = %s", (review_job_id,)
             ).fetchone()
             return self._review_job_row(result)
 
@@ -1155,7 +1163,7 @@ class TradingStore:
         timestamp = self._now()
         with self.database.transaction(immediate=True) as connection:
             row = connection.execute(
-                "SELECT * FROM trading_review_jobs WHERE review_job_id = ?", (review_job_id,)
+                "SELECT * FROM trading_review_jobs WHERE review_job_id = %s", (review_job_id,)
             ).fetchone()
             if row is None:
                 raise ReviewJobNotFound("复盘报告不存在")
@@ -1168,19 +1176,19 @@ class TradingStore:
                 """
                 UPDATE trading_review_jobs
                 SET status = 'pending', attempt = attempt + 1, lease_epoch = lease_epoch + 1,
-                    lease_expires_at = NULL, execution_id = NULL, error = NULL, updated_at = ?
-                WHERE review_job_id = ? AND status = 'failed'
+                    lease_expires_at = NULL, execution_id = NULL, error = NULL, updated_at = %s
+                WHERE review_job_id = %s AND status = 'failed'
                 """,
                 (timestamp, review_job_id),
             )
             if updated.rowcount != 1:
                 raise ReviewLeaseConflict("复盘报告重试冲突")
             connection.execute(
-                "UPDATE trading_review_snapshots SET snapshot_status = 'pending' WHERE snapshot_id = ?",
+                "UPDATE trading_review_snapshots SET snapshot_status = 'pending' WHERE snapshot_id = %s",
                 (row["snapshot_id"],),
             )
             result = connection.execute(
-                "SELECT * FROM trading_review_jobs WHERE review_job_id = ?", (review_job_id,)
+                "SELECT * FROM trading_review_jobs WHERE review_job_id = %s", (review_job_id,)
             ).fetchone()
             return self._review_job_row(result)
 
@@ -1191,7 +1199,7 @@ class TradingStore:
                 f"""
                 UPDATE trading_review_snapshots
                 SET is_outdated = 1
-                WHERE account_id = ? AND {field} < ?
+                WHERE account_id = %s AND {field} < %s
                 """,
                 (account_id, revision),
             )
@@ -1323,13 +1331,13 @@ class TradingStore:
 
     @staticmethod
     def _ensure_execution_details_in(
-        connection: sqlite3.Connection,
+        connection: psycopg.Connection,
         execution_id: str,
         details: Mapping[str, Any],
         request_digest: str,
     ) -> None:
         existing = connection.execute(
-            "SELECT request_digest FROM trading_execution_details WHERE execution_id = ?", (execution_id,)
+            "SELECT request_digest FROM trading_execution_details WHERE execution_id = %s", (execution_id,)
         ).fetchone()
         if existing is not None:
             if existing["request_digest"] != request_digest:
@@ -1338,7 +1346,7 @@ class TradingStore:
         connection.execute(
             """
             INSERT INTO trading_execution_details(execution_id, name, tags, note, request_digest)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
             """,
             (
                 execution_id,
@@ -1351,13 +1359,13 @@ class TradingStore:
 
     @staticmethod
     def _ensure_cash_flow_details_in(
-        connection: sqlite3.Connection,
+        connection: psycopg.Connection,
         cash_flow_id: str,
         details: Mapping[str, Any],
         request_digest: str,
     ) -> None:
         existing = connection.execute(
-            "SELECT request_digest FROM trading_cash_flow_details WHERE cash_flow_id = ?", (cash_flow_id,)
+            "SELECT request_digest FROM trading_cash_flow_details WHERE cash_flow_id = %s", (cash_flow_id,)
         ).fetchone()
         if existing is not None:
             if existing["request_digest"] != request_digest:
@@ -1366,14 +1374,14 @@ class TradingStore:
         connection.execute(
             """
             INSERT INTO trading_cash_flow_details(cash_flow_id, note, request_digest)
-            VALUES (?, ?, ?)
+            VALUES (%s, %s, %s)
             """,
             (cash_flow_id, TradingStore._detail_text(details, "note"), request_digest),
         )
 
     @staticmethod
     def _replace_execution_details_in(
-        connection: sqlite3.Connection,
+        connection: psycopg.Connection,
         execution_id: str,
         details: Mapping[str, Any],
         request_digest: str,
@@ -1381,7 +1389,7 @@ class TradingStore:
         connection.execute(
             """
             INSERT INTO trading_execution_details(execution_id, name, tags, note, request_digest)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT(execution_id) DO UPDATE SET name = excluded.name, tags = excluded.tags,
                 note = excluded.note, request_digest = excluded.request_digest
             """,
@@ -1396,7 +1404,7 @@ class TradingStore:
 
     @staticmethod
     def _replace_cash_flow_details_in(
-        connection: sqlite3.Connection,
+        connection: psycopg.Connection,
         cash_flow_id: str,
         details: Mapping[str, Any],
         request_digest: str,
@@ -1404,7 +1412,7 @@ class TradingStore:
         connection.execute(
             """
             INSERT INTO trading_cash_flow_details(cash_flow_id, note, request_digest)
-            VALUES (?, ?, ?)
+            VALUES (%s, %s, %s)
             ON CONFLICT(cash_flow_id) DO UPDATE SET note = excluded.note,
                 request_digest = excluded.request_digest
             """,
@@ -1475,8 +1483,8 @@ class TradingStore:
         return canonical_decimal_text(parsed)
 
     @staticmethod
-    def _meta_in(connection: sqlite3.Connection, account_id: str) -> dict[str, int]:
-        row = connection.execute("SELECT * FROM trading_meta WHERE account_id = ?", (account_id,)).fetchone()
+    def _meta_in(connection: psycopg.Connection, account_id: str) -> dict[str, int]:
+        row = connection.execute("SELECT * FROM trading_meta WHERE account_id = %s", (account_id,)).fetchone()
         if row is None:
             raise AccountNotFound("交易账户不存在")
         return {
@@ -1490,39 +1498,39 @@ class TradingStore:
             return self._meta_in(connection, account_id)
 
     @staticmethod
-    def _advance_meta_in(connection: sqlite3.Connection, account_id: str, field: str) -> int:
+    def _advance_meta_in(connection: psycopg.Connection, account_id: str, field: str) -> int:
         if field not in {"ledger_revision", "daily_review_revision", "market_revision"}:
             raise ValueError("不支持的交易版本字段")
         updated = connection.execute(
-            f"UPDATE trading_meta SET {field} = {field} + 1 WHERE account_id = ?", (account_id,)
+            f"UPDATE trading_meta SET {field} = {field} + 1 WHERE account_id = %s", (account_id,)
         )
         if updated.rowcount != 1:
             raise AccountNotFound("交易账户不存在")
         return int(
             connection.execute(
-                f"SELECT {field} FROM trading_meta WHERE account_id = ?", (account_id,)
-            ).fetchone()[0]
+                f"SELECT {field} FROM trading_meta WHERE account_id = %s", (account_id,)
+            ).fetchone()[field]
         )
 
     @staticmethod
     def _outdate_ledger_snapshots_in(
-        connection: sqlite3.Connection, account_id: str, affected_from: str, ledger_revision: int
+        connection: psycopg.Connection, account_id: str, affected_from: str, ledger_revision: int
     ) -> None:
         connection.execute(
             """
             UPDATE trading_review_snapshots
             SET is_outdated = 1
-            WHERE account_id = ? AND period_end >= ? AND ledger_revision < ?
+            WHERE account_id = %s AND period_end >= %s AND ledger_revision < %s
             """,
             (account_id, affected_from, ledger_revision),
         )
 
     @staticmethod
     def _execution_for_update(
-        connection: sqlite3.Connection, execution_id: str, expected_revision: int
-    ) -> sqlite3.Row:
+        connection: psycopg.Connection, execution_id: str, expected_revision: int
+    ) -> dict[str, Any]:
         row = connection.execute(
-            "SELECT * FROM trade_executions WHERE execution_id = ?", (execution_id,)
+            "SELECT * FROM trade_executions WHERE execution_id = %s", (execution_id,)
         ).fetchone()
         if row is None or row["is_deleted"] or int(row["revision"]) != expected_revision:
             raise RevisionConflict("成交 revision 已过期")
@@ -1530,15 +1538,15 @@ class TradingStore:
 
     @staticmethod
     def _cash_flow_for_update(
-        connection: sqlite3.Connection, cash_flow_id: str, expected_revision: int
-    ) -> sqlite3.Row:
-        row = connection.execute("SELECT * FROM cash_flows WHERE cash_flow_id = ?", (cash_flow_id,)).fetchone()
+        connection: psycopg.Connection, cash_flow_id: str, expected_revision: int
+    ) -> dict[str, Any]:
+        row = connection.execute("SELECT * FROM cash_flows WHERE cash_flow_id = %s", (cash_flow_id,)).fetchone()
         if row is None or row["is_deleted"] or int(row["revision"]) != expected_revision:
             raise RevisionConflict("现金流 revision 已过期")
         return row
 
     @staticmethod
-    def _execution_row(row: sqlite3.Row, ledger_revision: int) -> dict[str, Any]:
+    def _execution_row(row: dict[str, Any], ledger_revision: int) -> dict[str, Any]:
         result = dict(row)
         result["is_deleted"] = bool(result["is_deleted"])
         result["price"] = canonical_decimal_text(result["price"])
@@ -1547,7 +1555,7 @@ class TradingStore:
         return result
 
     @staticmethod
-    def _cash_flow_row(row: sqlite3.Row, ledger_revision: int) -> dict[str, Any]:
+    def _cash_flow_row(row: dict[str, Any], ledger_revision: int) -> dict[str, Any]:
         result = dict(row)
         result["is_deleted"] = bool(result["is_deleted"])
         result["amount"] = canonical_decimal_text(result["amount"])
@@ -1555,12 +1563,12 @@ class TradingStore:
         return result
 
     @staticmethod
-    def _snapshot_row(row: sqlite3.Row) -> dict[str, Any]:
+    def _snapshot_row(row: dict[str, Any]) -> dict[str, Any]:
         result = dict(row)
         result["is_outdated"] = bool(result["is_outdated"])
         return result
 
-    def _review_job_row(self, row: sqlite3.Row | None) -> dict[str, Any]:
+    def _review_job_row(self, row: dict[str, Any] | None) -> dict[str, Any]:
         if row is None:
             raise ReviewJobNotFound("复盘报告不存在")
         result = dict(row)
@@ -1577,7 +1585,7 @@ class TradingStore:
             result["error"] = {"code": "INTERNAL_ERROR", "message": "报告任务错误状态无效", "retryable": False}
         with self.database.read() as connection:
             snapshot = connection.execute(
-                "SELECT * FROM trading_review_snapshots WHERE snapshot_id = ?",
+                "SELECT * FROM trading_review_snapshots WHERE snapshot_id = %s",
                 (result.get("snapshot_id"),),
             ).fetchone()
         if snapshot is not None:

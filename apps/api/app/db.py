@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
-import sqlite3
+import os
 import threading
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
-from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from typing import Any
+
+import psycopg
+from psycopg import errors
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 
 
 class DatabaseBusyError(RuntimeError):
@@ -19,145 +23,192 @@ class NestedTransactionError(RuntimeError):
     code = "NESTED_TRANSACTION"
 
 
+_SCHEMA_DDL = """
+CREATE TABLE IF NOT EXISTS watchlist(symbol TEXT PRIMARY KEY, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS batches(id TEXT PRIMARY KEY, symbols TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, run_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, status TEXT NOT NULL, report_id TEXT NOT NULL, result TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS reports(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS reviews(id TEXT PRIMARY KEY, report_id TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS advisor_states(
+    run_id TEXT PRIMARY KEY,
+    state TEXT NOT NULL,
+    state_version INTEGER NOT NULL,
+    lease_epoch INTEGER NOT NULL,
+    artifacts TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS market_history_snapshots(
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    adjustment TEXT NOT NULL,
+    as_of TEXT NOT NULL,
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY(symbol, timeframe, adjustment, as_of, start_date, end_date)
+);
+CREATE TABLE IF NOT EXISTS external_information_cache(
+    cache_key TEXT NOT NULL,
+    source TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY(cache_key, source)
+);
+CREATE TABLE IF NOT EXISTS investment_report_jobs(
+    report_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE,
+    input_digest TEXT NOT NULL UNIQUE,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    as_of TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL,
+    lease_epoch INTEGER NOT NULL,
+    frozen_input TEXT NOT NULL,
+    result TEXT,
+    error TEXT,
+    execution_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    review_status TEXT NOT NULL DEFAULT 'pending',
+    reviewed_at TEXT,
+    published_at TEXT,
+    share_token TEXT UNIQUE
+);
+CREATE TABLE IF NOT EXISTS report_outcomes(
+    report_id TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    as_of TEXT NOT NULL,
+    status TEXT NOT NULL,
+    realized_case TEXT,
+    bar_count INTEGER NOT NULL,
+    window_end TEXT,
+    payload TEXT NOT NULL,
+    evaluated_at TEXT NOT NULL
+);
+"""
+
+# 已有数据库补列：与 TradingStore 一致，用 information_schema 判断后幂等 ALTER。
+_COLUMN_MIGRATIONS = {
+    "investment_report_jobs": {
+        "review_status": "TEXT NOT NULL DEFAULT 'pending'",
+        "reviewed_at": "TEXT",
+        "published_at": "TEXT",
+        "share_token": "TEXT UNIQUE",
+    },
+}
+
+# 同一 schema 内的并发建表用统一 advisory lock 序列化，避免 IF NOT EXISTS 竞态。
+_DDL_LOCK_KEY = 873201
+# immediate 写事务的全局锁：复刻 SQLite BEGIN IMMEDIATE 的单写者语义，
+# 幂等 get-or-create 与 revision 推进依赖写事务串行化。读路径仍走 MVCC 不受影响。
+_WRITE_LOCK_KEY = 873202
+
+
 class Database:
-    def __init__(self, path: str = ":memory:") -> None:
-        self.path = path
-        self._lock = threading.RLock()
+    """PostgreSQL 存储。conninfo 缺省时读取 DATABASE_URL，缺失则启动失败。"""
+
+    def __init__(self, conninfo: str | None = None) -> None:
+        value = conninfo or os.getenv("DATABASE_URL")
+        if not value:
+            raise RuntimeError("缺少 DATABASE_URL：必须配置 PostgreSQL 连接串，不支持内存数据库")
+        self.conninfo = value
         self._transaction_state = threading.local()
-        if path != ":memory:":
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys = ON")
+        self.pool = ConnectionPool(
+            value,
+            min_size=1,
+            max_size=10,
+            open=True,
+            kwargs={"row_factory": dict_row},
+        )
         self.init()
 
     def init(self) -> None:
-        with self.conn:
-            self.conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS watchlist(symbol TEXT PRIMARY KEY, created_at TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS batches(id TEXT PRIMARY KEY, symbols TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, run_id TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, status TEXT NOT NULL, report_id TEXT NOT NULL, result TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS reports(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, payload TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS reviews(id TEXT PRIMARY KEY, report_id TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS advisor_states(
-                    run_id TEXT PRIMARY KEY,
-                    state TEXT NOT NULL,
-                    state_version INTEGER NOT NULL,
-                    lease_epoch INTEGER NOT NULL,
-                    artifacts TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS market_history_snapshots(
-                    symbol TEXT NOT NULL,
-                    timeframe TEXT NOT NULL,
-                    adjustment TEXT NOT NULL,
-                    as_of TEXT NOT NULL,
-                    start_date TEXT NOT NULL,
-                    end_date TEXT NOT NULL,
-                    payload TEXT NOT NULL,
-                    fetched_at TEXT NOT NULL,
-                    PRIMARY KEY(symbol, timeframe, adjustment, as_of, start_date, end_date)
-                );
-                CREATE TABLE IF NOT EXISTS external_information_cache(
-                    cache_key TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    payload TEXT NOT NULL,
-                    fetched_at TEXT NOT NULL,
-                    expires_at TEXT NOT NULL,
-                    PRIMARY KEY(cache_key, source)
-                );
-                CREATE TABLE IF NOT EXISTS investment_report_jobs(
-                    report_id TEXT PRIMARY KEY,
-                    run_id TEXT NOT NULL UNIQUE,
-                    input_digest TEXT NOT NULL UNIQUE,
-                    symbol TEXT NOT NULL,
-                    timeframe TEXT NOT NULL,
-                    as_of TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    attempt_count INTEGER NOT NULL,
-                    lease_epoch INTEGER NOT NULL,
-                    frozen_input TEXT NOT NULL,
-                    result TEXT,
-                    error TEXT,
-                    execution_id TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    started_at TEXT,
-                    completed_at TEXT
-                );
-                """
-            )
+        with self.pool.connection() as conn:
+            conn.execute(f"SELECT pg_advisory_xact_lock({_DDL_LOCK_KEY})")
+            conn.execute(_SCHEMA_DDL)
+            for table, columns in _COLUMN_MIGRATIONS.items():
+                existing = {
+                    row["column_name"]
+                    for row in conn.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = current_schema() AND table_name = %s",
+                        (table,),
+                    )
+                }
+                for name, definition in columns.items():
+                    if name not in existing:
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+    def close(self) -> None:
+        self.pool.close()
 
     @staticmethod
     def _now() -> str:
         return datetime.now(UTC).isoformat()
 
     @contextmanager
-    def transaction(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
+    def transaction(self, *, immediate: bool = False) -> Iterator[psycopg.Connection]:
         self._assert_no_nested_transaction()
-        with self._lock:
-            try:
-                self.conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
-            except sqlite3.OperationalError as exc:
-                self._raise_busy_error(exc)
-            self._transaction_state.active = True
-            try:
-                yield self.conn
-            except BaseException as exc:
-                self.conn.rollback()
-                if isinstance(exc, sqlite3.OperationalError):
-                    self._raise_busy_error(exc)
-                raise
-            else:
+        try:
+            with self.pool.connection() as conn:
+                if immediate:
+                    conn.execute(f"SELECT pg_advisory_xact_lock({_WRITE_LOCK_KEY})")
+                self._transaction_state.active = True
+                self._transaction_state.conn = conn
                 try:
-                    self.conn.commit()
-                except sqlite3.OperationalError as exc:
-                    self.conn.rollback()
-                    self._raise_busy_error(exc)
-            finally:
-                self._transaction_state.active = False
+                    yield conn
+                finally:
+                    self._transaction_state.active = False
+                    self._transaction_state.conn = None
+        except (errors.LockNotAvailable, errors.DeadlockDetected, errors.SerializationFailure) as exc:
+            raise DatabaseBusyError("数据库写事务繁忙") from exc
 
     @contextmanager
-    def read(self) -> Iterator[sqlite3.Connection]:
-        with self._lock:
-            yield self.conn
+    def read(self) -> Iterator[psycopg.Connection]:
+        # 事务内的读取必须复用事务连接，才能看到未提交数据（与旧单连接语义一致）。
+        current = getattr(self._transaction_state, "conn", None)
+        if current is not None:
+            yield current
+            return
+        with self.pool.connection() as conn:
+            yield conn
 
     def execute_script(self, script: str) -> None:
         self._assert_no_nested_transaction()
-        with self._lock, self.conn:
-            self.conn.executescript(script)
+        with self.pool.connection() as conn:
+            conn.execute(f"SELECT pg_advisory_xact_lock({_DDL_LOCK_KEY})")
+            conn.execute(script)
 
     def _assert_no_nested_transaction(self) -> None:
         if getattr(self._transaction_state, "active", False):
             raise NestedTransactionError("事务内不能调用数据库公共写方法")
 
-    @staticmethod
-    def _raise_busy_error(error: sqlite3.OperationalError) -> None:
-        if "locked" in str(error).lower() or "busy" in str(error).lower():
-            raise DatabaseBusyError("SQLite 写事务繁忙") from error
-        raise error
-
     def add_watch(self, symbol: str) -> dict[str, Any]:
         self._assert_no_nested_transaction()
-        with self._lock, self.conn:
-            if self.conn.execute("SELECT 1 FROM watchlist WHERE symbol = ?", (symbol,)).fetchone():
+        with self.pool.connection() as conn:
+            if conn.execute("SELECT 1 FROM watchlist WHERE symbol = %s", (symbol,)).fetchone():
                 return {"symbol": symbol}
-            if self.conn.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0] >= 50:
+            count_row = conn.execute("SELECT COUNT(*) AS n FROM watchlist").fetchone()
+            if count_row["n"] >= 50:
                 raise ValueError("watchlist 最多 50 只股票")
-            self.conn.execute("INSERT INTO watchlist VALUES (?, ?)", (symbol, self._now()))
+            conn.execute("INSERT INTO watchlist VALUES (%s, %s)", (symbol, self._now()))
         return {"symbol": symbol}
 
     def list_watch(self) -> list[dict[str, Any]]:
-        with self._lock:
+        with self.pool.connection() as conn:
             return [
                 dict(row)
-                for row in self.conn.execute("SELECT symbol, created_at FROM watchlist ORDER BY created_at")
+                for row in conn.execute("SELECT symbol, created_at FROM watchlist ORDER BY created_at")
             ]
 
     def remove_watch(self, symbol: str) -> bool:
         self._assert_no_nested_transaction()
-        with self._lock, self.conn:
-            result = self.conn.execute("DELETE FROM watchlist WHERE symbol = ?", (symbol,))
+        with self.pool.connection() as conn:
+            result = conn.execute("DELETE FROM watchlist WHERE symbol = %s", (symbol,))
         return result.rowcount > 0
 
     def get_market_history(
@@ -169,12 +220,12 @@ class Database:
         start_date: str,
         end_date: str,
     ) -> list[dict[str, Any]] | None:
-        with self._lock:
-            row = self.conn.execute(
+        with self.pool.connection() as conn:
+            row = conn.execute(
                 """
                 SELECT payload FROM market_history_snapshots
-                WHERE symbol = ? AND timeframe = ? AND adjustment = ?
-                  AND as_of = ? AND start_date = ? AND end_date = ?
+                WHERE symbol = %s AND timeframe = %s AND adjustment = %s
+                  AND as_of = %s AND start_date = %s AND end_date = %s
                 """,
                 (symbol, timeframe, adjustment, as_of, start_date, end_date),
             ).fetchone()
@@ -191,12 +242,12 @@ class Database:
         rows: list[dict[str, Any]],
     ) -> None:
         self._assert_no_nested_transaction()
-        with self._lock, self.conn:
-            self.conn.execute(
+        with self.pool.connection() as conn:
+            conn.execute(
                 """
                 INSERT INTO market_history_snapshots
                     (symbol, timeframe, adjustment, as_of, start_date, end_date, payload, fetched_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(symbol, timeframe, adjustment, as_of, start_date, end_date)
                 DO UPDATE SET payload = excluded.payload, fetched_at = excluded.fetched_at
                 """,
@@ -219,12 +270,12 @@ class Database:
         *,
         now: datetime,
     ) -> dict[str, Any] | None:
-        with self._lock:
-            row = self.conn.execute(
+        with self.pool.connection() as conn:
+            row = conn.execute(
                 """
                 SELECT payload, fetched_at, expires_at
                 FROM external_information_cache
-                WHERE cache_key = ? AND source = ?
+                WHERE cache_key = %s AND source = %s
                 """,
                 (cache_key, source),
             ).fetchone()
@@ -247,12 +298,12 @@ class Database:
         expires_at: datetime,
     ) -> None:
         self._assert_no_nested_transaction()
-        with self._lock, self.conn:
-            self.conn.execute(
+        with self.pool.connection() as conn:
+            conn.execute(
                 """
                 INSERT INTO external_information_cache
                     (cache_key, source, payload, fetched_at, expires_at)
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT(cache_key, source)
                 DO UPDATE SET
                     payload = excluded.payload,
@@ -277,71 +328,77 @@ class Database:
     ) -> tuple[dict[str, Any], bool]:
         self._assert_no_nested_transaction()
         timestamp = (now or datetime.now(UTC)).isoformat()
-        with self._lock, self._immediate_transaction():
-            row = self.conn.execute(
-                "SELECT * FROM investment_report_jobs WHERE input_digest = ?",
-                (input_digest,),
-            ).fetchone()
-            if row is not None:
-                if row["status"] == "failed":
-                    lease_epoch = int(row["lease_epoch"]) + 1
-                    attempt_count = int(row["attempt_count"]) + 1
-                    updated = self.conn.execute(
-                        """
-                        UPDATE investment_report_jobs
-                        SET status = 'queued', attempt_count = ?, lease_epoch = ?, error = NULL,
-                            execution_id = NULL, updated_at = ?, started_at = NULL, completed_at = NULL
-                        WHERE report_id = ? AND status = 'failed'
-                        """,
-                        (attempt_count, lease_epoch, timestamp, row["report_id"]),
-                    )
-                    if updated.rowcount != 1:
-                        raise ValueError("报告任务不可重新排队")
-                    self.conn.execute(
-                        "UPDATE advisor_states SET lease_epoch = ? WHERE run_id = ?",
-                        (lease_epoch, row["run_id"]),
-                    )
-                    refreshed = self.conn.execute(
-                        "SELECT * FROM investment_report_jobs WHERE report_id = ?",
-                        (row["report_id"],),
+        # 并发创建相同 digest 时，先到者插入成功，后到者撞唯一约束后重读既有任务。
+        for _ in range(2):
+            try:
+                with self.pool.connection() as conn:
+                    row = conn.execute(
+                        "SELECT * FROM investment_report_jobs WHERE input_digest = %s FOR UPDATE",
+                        (input_digest,),
                     ).fetchone()
-                    return self._investment_job(refreshed), True
-                job = self._investment_job(row)
-                job["cached"] = row["status"] == "completed"
-                return job, False
+                    if row is not None:
+                        if row["status"] == "failed":
+                            lease_epoch = int(row["lease_epoch"]) + 1
+                            attempt_count = int(row["attempt_count"]) + 1
+                            updated = conn.execute(
+                                """
+                                UPDATE investment_report_jobs
+                                SET status = 'queued', attempt_count = %s, lease_epoch = %s, error = NULL,
+                                    execution_id = NULL, updated_at = %s, started_at = NULL, completed_at = NULL
+                                WHERE report_id = %s AND status = 'failed'
+                                """,
+                                (attempt_count, lease_epoch, timestamp, row["report_id"]),
+                            )
+                            if updated.rowcount != 1:
+                                raise ValueError("报告任务不可重新排队")
+                            conn.execute(
+                                "UPDATE advisor_states SET lease_epoch = %s WHERE run_id = %s",
+                                (lease_epoch, row["run_id"]),
+                            )
+                            refreshed = conn.execute(
+                                "SELECT * FROM investment_report_jobs WHERE report_id = %s",
+                                (row["report_id"],),
+                            ).fetchone()
+                            return self._investment_job(refreshed), True
+                        job = self._investment_job(row)
+                        job["cached"] = row["status"] == "completed"
+                        return job, False
 
-            report_id, run_id = str(uuid.uuid4()), str(uuid.uuid4())
-            encoded_input = json.dumps(frozen_input, ensure_ascii=False, default=str)
-            self.conn.execute(
-                """
-                INSERT INTO investment_report_jobs(
-                    report_id, run_id, input_digest, symbol, timeframe, as_of, status,
-                    attempt_count, lease_epoch, frozen_input, result, error, execution_id,
-                    created_at, updated_at, started_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 1, 1, ?, NULL, NULL, NULL, ?, ?, NULL, NULL)
-                """,
-                (
-                    report_id,
-                    run_id,
-                    input_digest,
-                    frozen_input["symbol"],
-                    frozen_input["timeframe"],
-                    frozen_input["as_of"],
-                    encoded_input,
-                    timestamp,
-                    timestamp,
-                ),
-            )
-            artifacts = self._initial_report_artifacts(frozen_input, report_id)
-            self.conn.execute(
-                "INSERT INTO advisor_states VALUES (?, 'QUEUED', 0, 1, ?)",
-                (run_id, json.dumps(artifacts, ensure_ascii=False, default=str)),
-            )
-            row = self.conn.execute(
-                "SELECT * FROM investment_report_jobs WHERE report_id = ?",
-                (report_id,),
-            ).fetchone()
-            return self._investment_job(row), True
+                    report_id, run_id = str(uuid.uuid4()), str(uuid.uuid4())
+                    encoded_input = json.dumps(frozen_input, ensure_ascii=False, default=str)
+                    conn.execute(
+                        """
+                        INSERT INTO investment_report_jobs(
+                            report_id, run_id, input_digest, symbol, timeframe, as_of, status,
+                            attempt_count, lease_epoch, frozen_input, result, error, execution_id,
+                            created_at, updated_at, started_at, completed_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, 'queued', 1, 1, %s, NULL, NULL, NULL, %s, %s, NULL, NULL)
+                        """,
+                        (
+                            report_id,
+                            run_id,
+                            input_digest,
+                            frozen_input["symbol"],
+                            frozen_input["timeframe"],
+                            frozen_input["as_of"],
+                            encoded_input,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    artifacts = self._initial_report_artifacts(frozen_input, report_id)
+                    conn.execute(
+                        "INSERT INTO advisor_states VALUES (%s, 'QUEUED', 0, 1, %s)",
+                        (run_id, json.dumps(artifacts, ensure_ascii=False, default=str)),
+                    )
+                    row = conn.execute(
+                        "SELECT * FROM investment_report_jobs WHERE report_id = %s",
+                        (report_id,),
+                    ).fetchone()
+                    return self._investment_job(row), True
+            except errors.UniqueViolation:
+                continue
+        raise DatabaseBusyError("报告任务创建冲突")
 
     def get_investment_report_job(
         self,
@@ -356,20 +413,20 @@ class Database:
             "message": "报告生成进程已中断",
             "retryable": True,
         }
-        with self._lock, self._immediate_transaction():
-            row = self.conn.execute(
-                "SELECT * FROM investment_report_jobs WHERE report_id = ?",
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM investment_report_jobs WHERE report_id = %s FOR UPDATE",
                 (report_id,),
             ).fetchone()
             if row is None:
                 return None
             updated_at = datetime.fromisoformat(row["updated_at"])
-            if row["status"] == "running" and current - updated_at > __import__("datetime").timedelta(seconds=300):
-                self.conn.execute(
+            if row["status"] == "running" and current - updated_at > timedelta(seconds=300):
+                conn.execute(
                     """
                     UPDATE investment_report_jobs
-                    SET status = 'failed', error = ?, updated_at = ?, completed_at = ?
-                    WHERE report_id = ? AND status = 'running' AND updated_at = ?
+                    SET status = 'failed', error = %s, updated_at = %s, completed_at = %s
+                    WHERE report_id = %s AND status = 'running' AND updated_at = %s
                     """,
                     (
                         json.dumps(interrupted_error, ensure_ascii=False),
@@ -379,8 +436,8 @@ class Database:
                         row["updated_at"],
                     ),
                 )
-                row = self.conn.execute(
-                    "SELECT * FROM investment_report_jobs WHERE report_id = ?",
+                row = conn.execute(
+                    "SELECT * FROM investment_report_jobs WHERE report_id = %s",
                     (report_id,),
                 ).fetchone()
             return self._investment_job(row)
@@ -394,19 +451,19 @@ class Database:
     ) -> dict[str, Any]:
         self._assert_no_nested_transaction()
         timestamp = (now or datetime.now(UTC)).isoformat()
-        with self._lock, self.conn:
-            result = self.conn.execute(
+        with self.pool.connection() as conn:
+            result = conn.execute(
                 """
                 UPDATE investment_report_jobs
-                SET status = 'running', execution_id = ?, started_at = ?, updated_at = ?
-                WHERE report_id = ? AND status = 'queued'
+                SET status = 'running', execution_id = %s, started_at = %s, updated_at = %s
+                WHERE report_id = %s AND status = 'queued'
                 """,
                 (execution_id, timestamp, timestamp, report_id),
             )
             if result.rowcount != 1:
                 raise ValueError("报告任务不可执行")
-            row = self.conn.execute(
-                "SELECT * FROM investment_report_jobs WHERE report_id = ?",
+            row = conn.execute(
+                "SELECT * FROM investment_report_jobs WHERE report_id = %s",
                 (report_id,),
             ).fetchone()
             return self._investment_job(row)
@@ -419,9 +476,9 @@ class Database:
     ) -> dict[str, Any]:
         self._assert_no_nested_transaction()
         timestamp = (now or datetime.now(UTC)).isoformat()
-        with self._lock, self._immediate_transaction():
-            row = self.conn.execute(
-                "SELECT * FROM investment_report_jobs WHERE report_id = ?",
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM investment_report_jobs WHERE report_id = %s FOR UPDATE",
                 (report_id,),
             ).fetchone()
             if row is None:
@@ -431,23 +488,23 @@ class Database:
                 raise ValueError("报告任务不可重试")
             lease_epoch = int(row["lease_epoch"]) + 1
             attempt_count = int(row["attempt_count"]) + 1
-            updated = self.conn.execute(
+            updated = conn.execute(
                 """
                 UPDATE investment_report_jobs
-                SET status = 'queued', attempt_count = ?, lease_epoch = ?, error = NULL,
-                    execution_id = NULL, updated_at = ?, started_at = NULL, completed_at = NULL
-                WHERE report_id = ? AND status = 'failed'
+                SET status = 'queued', attempt_count = %s, lease_epoch = %s, error = NULL,
+                    execution_id = NULL, updated_at = %s, started_at = NULL, completed_at = NULL
+                WHERE report_id = %s AND status = 'failed'
                 """,
                 (attempt_count, lease_epoch, timestamp, report_id),
             )
             if updated.rowcount != 1:
                 raise ValueError("报告任务不可重试")
-            self.conn.execute(
-                "UPDATE advisor_states SET lease_epoch = ? WHERE run_id = ?",
+            conn.execute(
+                "UPDATE advisor_states SET lease_epoch = %s WHERE run_id = %s",
                 (lease_epoch, row["run_id"]),
             )
-            refreshed = self.conn.execute(
-                "SELECT * FROM investment_report_jobs WHERE report_id = ?",
+            refreshed = conn.execute(
+                "SELECT * FROM investment_report_jobs WHERE report_id = %s",
                 (report_id,),
             ).fetchone()
             return self._investment_job(refreshed)
@@ -458,12 +515,12 @@ class Database:
         lease_epoch: int,
         execution_id: str | None = None,
     ) -> bool:
-        with self._lock:
-            row = self.conn.execute(
+        with self.pool.connection() as conn:
+            row = conn.execute(
                 """
                 SELECT status, lease_epoch, execution_id
                 FROM investment_report_jobs
-                WHERE run_id = ?
+                WHERE run_id = %s
                 """,
                 (run_id,),
             ).fetchone()
@@ -485,12 +542,12 @@ class Database:
     ) -> None:
         self._assert_no_nested_transaction()
         timestamp = (now or datetime.now(UTC)).isoformat()
-        with self._lock, self.conn:
-            updated = self.conn.execute(
+        with self.pool.connection() as conn:
+            updated = conn.execute(
                 """
                 UPDATE investment_report_jobs
-                SET status = 'completed', result = ?, error = NULL, updated_at = ?, completed_at = ?
-                WHERE report_id = ? AND status = 'running' AND lease_epoch = ?
+                SET status = 'completed', result = %s, error = NULL, updated_at = %s, completed_at = %s
+                WHERE report_id = %s AND status = 'running' AND lease_epoch = %s
                 """,
                 (json.dumps(result, ensure_ascii=False, default=str), timestamp, timestamp, report_id, lease_epoch),
             )
@@ -507,12 +564,12 @@ class Database:
     ) -> None:
         self._assert_no_nested_transaction()
         timestamp = (now or datetime.now(UTC)).isoformat()
-        with self._lock, self.conn:
-            updated = self.conn.execute(
+        with self.pool.connection() as conn:
+            updated = conn.execute(
                 """
                 UPDATE investment_report_jobs
-                SET status = 'failed', error = ?, updated_at = ?, completed_at = ?
-                WHERE report_id = ? AND status = 'running' AND lease_epoch = ?
+                SET status = 'failed', error = %s, updated_at = %s, completed_at = %s
+                WHERE report_id = %s AND status = 'running' AND lease_epoch = %s
                 """,
                 (json.dumps(error, ensure_ascii=False), timestamp, timestamp, report_id, lease_epoch),
             )
@@ -520,7 +577,7 @@ class Database:
                 raise ValueError("报告任务 lease 已失效")
 
     @staticmethod
-    def _investment_job(row: sqlite3.Row) -> dict[str, Any]:
+    def _investment_job(row: dict[str, Any]) -> dict[str, Any]:
         return {
             "report_id": row["report_id"],
             "run_id": row["run_id"],
@@ -540,6 +597,10 @@ class Database:
             "started_at": row["started_at"],
             "completed_at": row["completed_at"],
             "cached": row["status"] == "completed",
+            "review_status": row.get("review_status") or "pending",
+            "reviewed_at": row.get("reviewed_at"),
+            "published_at": row.get("published_at"),
+            "share_token": row.get("share_token"),
         }
 
     @staticmethod
@@ -565,19 +626,19 @@ class Database:
             "items": [{"symbol": symbol, "status": "queued", "bars": []} for symbol in symbols],
         }
         run = {"id": run_id, "batch_id": batch_id, "status": "queued", "report_id": report_id, "result": {"symbols": symbols}}
-        with self._lock, self.conn:
-            self.conn.execute("INSERT INTO batches VALUES (?, ?, ?, ?, ?)", (batch_id, json.dumps(symbols), "queued", now, run_id))
-            self.conn.execute("INSERT INTO runs VALUES (?, ?, ?, ?, ?)", (run_id, batch_id, "queued", report_id, json.dumps(run["result"])))
-            self.conn.execute("INSERT INTO reports VALUES (?, ?, ?)", (report_id, run_id, json.dumps(report)))
-            self.conn.execute(
-                "INSERT INTO advisor_states VALUES (?, ?, ?, ?, ?)",
+        with self.pool.connection() as conn:
+            conn.execute("INSERT INTO batches VALUES (%s, %s, %s, %s, %s)", (batch_id, json.dumps(symbols), "queued", now, run_id))
+            conn.execute("INSERT INTO runs VALUES (%s, %s, %s, %s, %s)", (run_id, batch_id, "queued", report_id, json.dumps(run["result"])))
+            conn.execute("INSERT INTO reports VALUES (%s, %s, %s)", (report_id, run_id, json.dumps(report)))
+            conn.execute(
+                "INSERT INTO advisor_states VALUES (%s, %s, %s, %s, %s)",
                 (run_id, "QUEUED", 0, 1, json.dumps({"symbols": symbols, "symbol": symbols[0], "report_id": report_id})),
             )
         return {"id": batch_id, "run_id": run_id, "status": "queued"}
 
     def get_batch(self, batch_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            row = self.conn.execute("SELECT * FROM batches WHERE id = ?", (batch_id,)).fetchone()
+        with self.pool.connection() as conn:
+            row = conn.execute("SELECT * FROM batches WHERE id = %s", (batch_id,)).fetchone()
         if not row:
             return None
         result = dict(row)
@@ -585,8 +646,8 @@ class Database:
         return result
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            row = self.conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+        with self.pool.connection() as conn:
+            row = conn.execute("SELECT * FROM runs WHERE id = %s", (run_id,)).fetchone()
         if not row:
             return None
         result = dict(row)
@@ -594,22 +655,203 @@ class Database:
         return result
 
     def get_report(self, report_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            row = self.conn.execute("SELECT payload FROM reports WHERE id = ?", (report_id,)).fetchone()
-        return json.loads(row[0]) if row else None
+        with self.pool.connection() as conn:
+            row = conn.execute("SELECT payload FROM reports WHERE id = %s", (report_id,)).fetchone()
+        return json.loads(row["payload"]) if row else None
 
     def add_review(self, report_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        """记录一次审阅决定；对 V2 报告同时推进其审阅状态（发布门）。"""
         self._assert_no_nested_transaction()
         review = {"id": str(uuid.uuid4()), "report_id": report_id, **payload, "created_at": self._now()}
-        with self._lock, self.conn:
-            if not self.conn.execute("SELECT 1 FROM reports WHERE id = ?", (report_id,)).fetchone():
+        decision = str(payload.get("decision") or "")
+        with self.pool.connection() as conn:
+            job = conn.execute(
+                "SELECT status, published_at FROM investment_report_jobs WHERE report_id = %s FOR UPDATE",
+                (report_id,),
+            ).fetchone()
+            if job is None and not conn.execute(
+                "SELECT 1 FROM reports WHERE id = %s", (report_id,)
+            ).fetchone():
                 return None
-            self.conn.execute("INSERT INTO reviews VALUES (?, ?, ?, ?)", (review["id"], report_id, json.dumps(review), review["created_at"]))
+            if job is not None:
+                if job["status"] != "completed":
+                    raise ValueError("只有已完成的报告可以审阅")
+                # 发布是对客交付动作：已发布报告不能再翻转审阅结论，
+                # 否则 review_status=rejected 的报告会继续留在已发布列表上。
+                if job["published_at"]:
+                    raise ValueError("已发布的报告不可再次审阅")
+                if decision in ("accepted", "rejected"):
+                    conn.execute(
+                        "UPDATE investment_report_jobs SET review_status = %s, reviewed_at = %s "
+                        "WHERE report_id = %s",
+                        (decision, review["created_at"], report_id),
+                    )
+            conn.execute("INSERT INTO reviews VALUES (%s, %s, %s, %s)", (review["id"], report_id, json.dumps(review), review["created_at"]))
         return review
 
+    def publish_investment_report(
+        self,
+        report_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """发布已通过审阅的报告；重复发布保持原发布时间。"""
+        self._assert_no_nested_transaction()
+        timestamp = (now or datetime.now(UTC)).isoformat()
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM investment_report_jobs WHERE report_id = %s FOR UPDATE",
+                (report_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("报告任务不存在")
+            if row["status"] != "completed":
+                raise ValueError("只有已完成的报告可以发布")
+            if (row.get("review_status") or "pending") != "accepted":
+                raise ValueError("报告需通过审阅后才能发布")
+            if row.get("published_at"):
+                return self._investment_job(row)
+            conn.execute(
+                "UPDATE investment_report_jobs SET published_at = %s WHERE report_id = %s",
+                (timestamp, report_id),
+            )
+            refreshed = conn.execute(
+                "SELECT * FROM investment_report_jobs WHERE report_id = %s",
+                (report_id,),
+            ).fetchone()
+            return self._investment_job(refreshed)
+
+    def list_published_reports(self) -> list[dict[str, Any]]:
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM investment_report_jobs WHERE published_at IS NOT NULL "
+                "ORDER BY published_at DESC"
+            ).fetchall()
+        return [self._investment_job(row) for row in rows]
+
+    def create_report_share(self, report_id: str) -> tuple[dict[str, Any], bool]:
+        """为已发布报告签发分享 token；重复调用幂等返回同一个 token。"""
+        self._assert_no_nested_transaction()
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                "SELECT report_id, status, published_at, share_token "
+                "FROM investment_report_jobs WHERE report_id = %s FOR UPDATE",
+                (report_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("报告任务不存在")
+            if row["status"] != "completed" or not row["published_at"]:
+                raise ValueError("只有已发布的报告可以分享")
+            if row["share_token"]:
+                return {"report_id": report_id, "share_token": row["share_token"]}, False
+            token = str(uuid.uuid4())
+            conn.execute(
+                "UPDATE investment_report_jobs SET share_token = %s WHERE report_id = %s",
+                (token, report_id),
+            )
+            return {"report_id": report_id, "share_token": token}, True
+
+    def revoke_report_share(self, report_id: str) -> None:
+        """撤销分享：置空 token，报告不存在或未分享时同样静默成功（幂等）。"""
+        self._assert_no_nested_transaction()
+        with self.pool.connection() as conn:
+            conn.execute(
+                "UPDATE investment_report_jobs SET share_token = NULL WHERE report_id = %s",
+                (report_id,),
+            )
+
+    def get_report_by_share_token(self, share_token: str) -> dict[str, Any] | None:
+        """按分享 token 取报告任务；只命中仍处于已发布状态的报告。"""
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM investment_report_jobs "
+                "WHERE share_token = %s AND published_at IS NOT NULL AND status = 'completed'",
+                (share_token,),
+            ).fetchone()
+        return self._investment_job(row) if row else None
+
+    def save_report_outcome(self, report_id: str, outcome: dict[str, Any]) -> dict[str, Any]:
+        self._assert_no_nested_transaction()
+        with self.pool.connection() as conn:
+            if conn.execute(
+                "SELECT 1 FROM investment_report_jobs WHERE report_id = %s", (report_id,)
+            ).fetchone() is None:
+                raise KeyError("报告任务不存在")
+            window = outcome.get("window") if isinstance(outcome.get("window"), dict) else {}
+            conn.execute(
+                """
+                INSERT INTO report_outcomes(
+                    report_id, symbol, as_of, status, realized_case, bar_count, window_end,
+                    payload, evaluated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(report_id) DO UPDATE SET
+                    status = excluded.status,
+                    realized_case = excluded.realized_case,
+                    bar_count = excluded.bar_count,
+                    window_end = excluded.window_end,
+                    payload = excluded.payload,
+                    evaluated_at = excluded.evaluated_at
+                """,
+                (
+                    report_id,
+                    str(outcome.get("symbol") or ""),
+                    str(outcome.get("as_of") or ""),
+                    str(outcome.get("status") or "pending"),
+                    outcome.get("realized_case"),
+                    int(window.get("bar_count") or 0),
+                    window.get("end"),
+                    json.dumps(outcome, ensure_ascii=False, default=str),
+                    str(outcome.get("evaluated_at") or self._now()),
+                ),
+            )
+        return outcome
+
+    def get_report_outcome(self, report_id: str) -> dict[str, Any] | None:
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                "SELECT payload FROM report_outcomes WHERE report_id = %s", (report_id,)
+            ).fetchone()
+        return json.loads(row["payload"]) if row else None
+
+    def list_report_outcomes(self, *, published_only: bool = False) -> list[dict[str, Any]]:
+        """兑现结果列表；``published_only`` 只保留已发布报告，用于对客 track record。"""
+        query = (
+            "SELECT outcomes.payload FROM report_outcomes AS outcomes "
+            "JOIN investment_report_jobs AS jobs ON jobs.report_id = outcomes.report_id "
+            "WHERE jobs.published_at IS NOT NULL "
+            "ORDER BY outcomes.evaluated_at DESC"
+            if published_only
+            else "SELECT payload FROM report_outcomes ORDER BY evaluated_at DESC"
+        )
+        with self.pool.connection() as conn:
+            rows = conn.execute(query).fetchall()
+        return [json.loads(row["payload"]) for row in rows]
+
+    def list_reviews(
+        self,
+        report_id: str | None = None,
+        *,
+        published_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT reviews.payload FROM reviews"
+        params: tuple[Any, ...] = ()
+        conditions: list[str] = []
+        if published_only:
+            query += " JOIN investment_report_jobs AS jobs ON jobs.report_id = reviews.report_id"
+            conditions.append("jobs.published_at IS NOT NULL")
+        if report_id is not None:
+            conditions.append("reviews.report_id = %s")
+            params = (report_id,)
+        if conditions:
+            query += f" WHERE {' AND '.join(conditions)}"
+        query += " ORDER BY reviews.created_at"
+        with self.pool.connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [json.loads(row["payload"]) for row in rows]
+
     def get_advisor_state(self, run_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            row = self.conn.execute("SELECT * FROM advisor_states WHERE run_id = ?", (run_id,)).fetchone()
+        with self.pool.connection() as conn:
+            row = conn.execute("SELECT * FROM advisor_states WHERE run_id = %s", (run_id,)).fetchone()
         if row is None:
             return None
         return {
@@ -623,18 +865,18 @@ class Database:
     def save_advisor_state(self, state: dict[str, Any]) -> None:
         self._assert_no_nested_transaction()
         run_id = str(state["run_id"])
-        with self._lock, self._immediate_transaction():
-            current = self.conn.execute(
-                "SELECT state, state_version, lease_epoch, artifacts FROM advisor_states WHERE run_id = ?",
+        with self.pool.connection() as conn:
+            current = conn.execute(
+                "SELECT state, state_version, lease_epoch, artifacts FROM advisor_states WHERE run_id = %s FOR UPDATE",
                 (run_id,),
             ).fetchone()
             if current is None:
                 raise KeyError("advisor run 不存在")
-            investment_job = self.conn.execute(
+            investment_job = conn.execute(
                 """
                 SELECT status, lease_epoch
                 FROM investment_report_jobs
-                WHERE run_id = ?
+                WHERE run_id = %s
                 """,
                 (run_id,),
             ).fetchone()
@@ -654,35 +896,24 @@ class Database:
                 raise ValueError("state version 冲突")
             if version != current_version + 1:
                 raise ValueError("state version 冲突")
-            self.conn.execute(
-                "UPDATE advisor_states SET state = ?, state_version = ?, artifacts = ? WHERE run_id = ?",
+            conn.execute(
+                "UPDATE advisor_states SET state = %s, state_version = %s, artifacts = %s WHERE run_id = %s",
                 (state["state"], version, json.dumps(artifacts), run_id),
             )
 
-    @contextmanager
-    def _immediate_transaction(self):
-        self.conn.execute("BEGIN IMMEDIATE")
-        try:
-            yield
-        except BaseException:
-            self.conn.rollback()
-            raise
-        else:
-            self.conn.commit()
-
     def update_report_payload(self, report_id: str, payload: dict[str, Any]) -> None:
         self._assert_no_nested_transaction()
-        with self._lock, self.conn:
-            self.conn.execute(
-                "UPDATE reports SET payload = ? WHERE id = ?",
+        with self.pool.connection() as conn:
+            conn.execute(
+                "UPDATE reports SET payload = %s WHERE id = %s",
                 (json.dumps(payload, ensure_ascii=False), report_id),
             )
 
     def update_run_status(self, run_id: str, status: str) -> None:
         self._assert_no_nested_transaction()
-        with self._lock, self.conn:
-            run = self.conn.execute("SELECT batch_id FROM runs WHERE id = ?", (run_id,)).fetchone()
+        with self.pool.connection() as conn:
+            run = conn.execute("SELECT batch_id FROM runs WHERE id = %s", (run_id,)).fetchone()
             if run is None:
                 raise KeyError("run 不存在")
-            self.conn.execute("UPDATE runs SET status = ? WHERE id = ?", (status, run_id))
-            self.conn.execute("UPDATE batches SET status = ? WHERE id = ?", (status, run["batch_id"]))
+            conn.execute("UPDATE runs SET status = %s WHERE id = %s", (status, run_id))
+            conn.execute("UPDATE batches SET status = %s WHERE id = %s", (status, run["batch_id"]))

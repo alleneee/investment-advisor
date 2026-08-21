@@ -726,7 +726,7 @@ def _candidate_price(rows: Sequence[Mapping[str, Any]], valuation_date: date) ->
 def _cached_market_rows(database: Any, account_id: str, symbol: str) -> dict[date, dict[str, Any]]:
     with database.read() as connection:
         rows = connection.execute(
-            "SELECT * FROM trading_market_prices WHERE account_id = ? AND symbol = ?",
+            "SELECT * FROM trading_market_prices WHERE account_id = %s AND symbol = %s",
             (account_id, symbol),
         ).fetchall()
     return {_business_date(row["valuation_date"]): dict(row) for row in rows}
@@ -739,7 +739,7 @@ def _persist_market_rows(
 ) -> int:
     with database.transaction(immediate=True) as connection:
         meta = connection.execute(
-            "SELECT market_revision FROM trading_meta WHERE account_id = ?", (account_id,)
+            "SELECT market_revision FROM trading_meta WHERE account_id = %s", (account_id,)
         ).fetchone()
         if meta is None:
             raise ValueError("交易账户不存在")
@@ -751,7 +751,7 @@ def _persist_market_rows(
                 """
                 SELECT source_trade_date, close, bar_digest
                 FROM trading_market_prices
-                WHERE account_id = ? AND symbol = ? AND valuation_date = ?
+                WHERE account_id = %s AND symbol = %s AND valuation_date = %s
                 """,
                 (account_id, symbol, valuation_date.isoformat()),
             ).fetchone()
@@ -766,7 +766,7 @@ def _persist_market_rows(
         if changed:
             revision += 1
             connection.execute(
-                "UPDATE trading_meta SET market_revision = ? WHERE account_id = ?",
+                "UPDATE trading_meta SET market_revision = %s WHERE account_id = %s",
                 (revision, account_id),
             )
             outdate_market_snapshots_for_dependencies(
@@ -780,7 +780,7 @@ def _persist_market_rows(
                 """
                 INSERT INTO trading_market_prices(
                     account_id, symbol, valuation_date, source_trade_date, close, bar_digest, revision
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(account_id, symbol, valuation_date) DO UPDATE SET
                     source_trade_date = excluded.source_trade_date,
                     close = excluded.close,
@@ -924,8 +924,8 @@ class AccountValuationService:
     ) -> int:
         self._market_prices(account_id, symbols, valuation_dates, force_refresh=True)
         with self.database.read() as connection:
-            row = connection.execute("SELECT market_revision FROM trading_meta WHERE account_id = ?", (account_id,)).fetchone()
-        return int(row[0]) if row else 0
+            row = connection.execute("SELECT market_revision FROM trading_meta WHERE account_id = %s", (account_id,)).fetchone()
+        return int(row["market_revision"]) if row else 0
 
     def account_summary(
         self,

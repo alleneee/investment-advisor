@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 import threading
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -10,6 +9,8 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
+
+import psycopg
 
 from .contracts import LedgerEvent
 from .metrics import (
@@ -253,7 +254,7 @@ class TradingReportService:
                 market_watermark=job.get("market_watermark"),
                 now=self._now(),
             )
-        except (KeyError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
+        except (KeyError, RuntimeError, TypeError, ValueError, psycopg.Error) as exc:
             try:
                 self.store.fail_review_job(
                     report_id,
@@ -262,7 +263,7 @@ class TradingReportService:
                     error={"code": "INTERNAL_ERROR", "message": str(exc), "retryable": True},
                     now=self._now(),
                 )
-            except (KeyError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+            except (KeyError, RuntimeError, TypeError, ValueError, psycopg.Error):
                 return
 
     def _prepare(
@@ -668,7 +669,7 @@ class TradingReportService:
         with self.database.read() as connection:
             for row in rows:
                 detail = connection.execute(
-                    "SELECT name, tags, note FROM trading_execution_details WHERE execution_id = ?",
+                    "SELECT name, tags, note FROM trading_execution_details WHERE execution_id = %s",
                     (row["execution_id"],),
                 ).fetchone()
                 if detail is not None:
@@ -691,11 +692,11 @@ class TradingReportService:
             raise ValueError("period_start 与 period_end 必须成对提供")
         query = (
             "SELECT daily_review_id, trade_date, payload, revision FROM daily_reviews "
-            "WHERE account_id = ? AND is_deleted = 0"
+            "WHERE account_id = %s AND is_deleted = 0"
         )
         params: list[Any] = [database_account_id]
         if period_start is not None and period_end is not None:
-            query += " AND trade_date BETWEEN ? AND ?"
+            query += " AND trade_date BETWEEN %s AND %s"
             params.extend([period_start.isoformat(), period_end.isoformat()])
         with database.read() as connection:
             rows = connection.execute(query, params).fetchall()
@@ -736,8 +737,8 @@ class TradingReportService:
                     snapshot.market_revision AS snap_market_revision
                 FROM trading_review_jobs AS job
                 JOIN trading_review_snapshots AS snapshot ON snapshot.snapshot_id = job.snapshot_id
-                WHERE job.account_id = ? AND job.period_kind = ?
-                    AND snapshot.period_start = ? AND snapshot.period_end = ?
+                WHERE job.account_id = %s AND job.period_kind = %s
+                    AND snapshot.period_start = %s AND snapshot.period_end = %s
                     AND job.status = 'ready' AND snapshot.snapshot_status = 'ready'
                     AND snapshot.is_outdated = 0
                 ORDER BY snapshot.period_end DESC, job.report_version DESC

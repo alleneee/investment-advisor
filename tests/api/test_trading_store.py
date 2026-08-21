@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
 from threading import Barrier, Event
 
+import psycopg
 import pytest
-from app.db import Database, DatabaseBusyError, NestedTransactionError
+from app.db import Database, NestedTransactionError
 from app.trading.store import (
     AccountAlreadyExists,
     AccountNotFound,
@@ -20,7 +20,7 @@ from app.trading.store import (
 
 
 def _store(path: Path) -> TradingStore:
-    return TradingStore(Database(str(path)))
+    return TradingStore(Database())
 
 
 def _account(store: TradingStore) -> dict:
@@ -198,18 +198,17 @@ def test_tombstone_delete_advances_revision_and_rejects_stale_if_match(tmp_path:
     assert error.value.code == "REVISION_CONFLICT"
 
 
-def test_database_transaction_rolls_back_and_immediate_cross_connection_is_domain_safe(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "ledger.sqlite"
-    first, second = Database(str(path)), Database(str(path))
+def test_database_transaction_rolls_back_and_immediate_cross_connection_is_domain_safe() -> None:
+    first, second = Database(), Database()
     with pytest.raises(RuntimeError), first.transaction(immediate=True) as connection:
         connection.execute("CREATE TABLE rollback_probe(value TEXT)")
         connection.execute("INSERT INTO rollback_probe VALUES ('discard')")
         raise RuntimeError("rollback")
-    assert first.conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rollback_probe'"
-    ).fetchone() is None
+    with first.read() as connection:
+        assert connection.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = current_schema() AND table_name = 'rollback_probe'"
+        ).fetchone() is None
 
     first_store, second_store = TradingStore(first), TradingStore(second)
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -217,28 +216,24 @@ def test_database_transaction_rolls_back_and_immediate_cross_connection_is_domai
     assert sorted(results) == ["conflict", "created"]
 
 
-def test_transaction_hides_uncommitted_rows_from_other_thread_reads(tmp_path: Path) -> None:
-    database = Database(str(tmp_path / "database.sqlite"))
-    started = Event()
+def test_transaction_hides_uncommitted_rows_from_other_thread_reads() -> None:
+    database = Database()
 
     def read_watchlist() -> list[dict]:
-        started.set()
         return database.list_watch()
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         with pytest.raises(RuntimeError), database.transaction() as connection:
             connection.execute("INSERT INTO watchlist VALUES ('600000.SH', '2026-01-01T00:00:00+00:00')")
+            # PG MVCC：其他连接的读取不阻塞，且看不到未提交数据。
             future = executor.submit(read_watchlist)
-            assert started.wait(timeout=1)
-            assert future.done() is False
+            assert future.result(timeout=2) == []
             raise RuntimeError("rollback")
-        assert future.result(timeout=1) == []
+        assert database.list_watch() == []
 
 
-def test_existing_write_inside_transaction_fails_immediately_without_committing_outer_transaction(
-    tmp_path: Path,
-) -> None:
-    database = Database(str(tmp_path / "database.sqlite"))
+def test_existing_write_inside_transaction_fails_immediately_without_committing_outer_transaction() -> None:
+    database = Database()
 
     with database.transaction() as connection:
         connection.execute("INSERT INTO watchlist VALUES ('600000.SH', '2026-01-01T00:00:00+00:00')")
@@ -249,27 +244,27 @@ def test_existing_write_inside_transaction_fails_immediately_without_committing_
     assert database.list_watch() == [{"symbol": "600000.SH", "created_at": "2026-01-01T00:00:00+00:00"}]
 
 
-def test_busy_immediate_transaction_and_store_write_raise_domain_error_not_sqlite(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "ledger.sqlite"
-    first, second = Database(str(path)), Database(str(path))
-    second_store = TradingStore(second)
-    second.conn.execute("PRAGMA busy_timeout = 1")
+def test_immediate_transactions_serialize_writers_across_connections() -> None:
+    # immediate 写事务通过 advisory lock 串行化：后来的写事务阻塞等待，而不是报错。
+    first, second = Database(), Database()
+    entered = Event()
 
-    with first.transaction(immediate=True):
-        with pytest.raises(DatabaseBusyError) as transaction_error:
-            _begin_immediate_transaction(second)
-        with pytest.raises(DatabaseBusyError) as store_error:
-            _account(second_store)
+    def second_writer() -> str:
+        entered.set()
+        with second.transaction(immediate=True) as connection:
+            connection.execute("INSERT INTO watchlist VALUES ('000001.SZ', '2026-01-02T00:00:00+00:00')")
+        return "committed"
 
-    assert transaction_error.value.code == "DATABASE_BUSY"
-    assert store_error.value.code == "DATABASE_BUSY"
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with first.transaction(immediate=True) as connection:
+            connection.execute("INSERT INTO watchlist VALUES ('600000.SH', '2026-01-01T00:00:00+00:00')")
+            future = executor.submit(second_writer)
+            assert entered.wait(timeout=2)
+            with pytest.raises(TimeoutError):
+                future.result(timeout=0.5)
+        assert future.result(timeout=5) == "committed"
 
-
-def _begin_immediate_transaction(database: Database) -> None:
-    with database.transaction(immediate=True):
-        pass
+    assert [row["symbol"] for row in first.list_watch()] == ["600000.SH", "000001.SZ"]
 
 
 @pytest.mark.parametrize("entry", ["execution", "cash_flow"])
@@ -440,12 +435,11 @@ def test_store_returns_canonical_sub_cent_amounts_that_can_be_replayed(tmp_path:
     assert store.create_cash_flow(_cash_flow(account["account_id"], "fractional-amount", amount=cash_flow["amount"])) == cash_flow
 
 
-def test_invalid_account_child_write_is_foreign_key_checked_and_domain_mapped(tmp_path: Path) -> None:
-    database = Database(str(tmp_path / "ledger.sqlite"))
+def test_invalid_account_child_write_is_foreign_key_checked_and_domain_mapped() -> None:
+    database = Database()
     store = TradingStore(database)
 
-    assert database.conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-    with pytest.raises(sqlite3.IntegrityError), database.transaction() as connection:
+    with pytest.raises(psycopg.errors.ForeignKeyViolation), database.transaction() as connection:
         connection.execute(
             """
             INSERT INTO cash_flows(
@@ -462,7 +456,7 @@ def test_invalid_account_child_write_is_foreign_key_checked_and_domain_mapped(tm
 
 @pytest.mark.parametrize("entry", ["execution", "cash_flow"])
 def test_list_reads_rows_and_ledger_revision_under_one_read_lock(tmp_path: Path, entry: str) -> None:
-    database = _InterleavingReadDatabase(str(tmp_path / f"{entry}.sqlite"))
+    database = _InterleavingReadDatabase()
     store = TradingStore(database)
     account = _account(store)
     account_id = account["account_id"]
@@ -494,8 +488,8 @@ def _write_after_read_release(database: _InterleavingReadDatabase, write) -> Non
 
 
 class _InterleavingReadDatabase(Database):
-    def __init__(self, path: str) -> None:
-        super().__init__(path)
+    def __init__(self) -> None:
+        super().__init__()
         self.interleave_next_read = False
         self.read_released = Event()
         self.writer_done = Event()

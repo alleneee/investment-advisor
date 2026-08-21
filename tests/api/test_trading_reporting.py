@@ -94,7 +94,9 @@ async def _seed_account_and_position(client: AsyncClient, *, activated_on: str =
 
 
 @pytest.mark.anyio
-async def test_report_rejects_before_period_close_and_waits_for_market_watermark():
+async def test_report_rejects_before_period_close_and_waits_for_market_watermark(
+    make_isolated_database,
+):
     scheduled = []
     app = _app(datetime(2026, 1, 9, 14, 59, 59, tzinfo=SHANGHAI), scheduled.append)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -117,6 +119,7 @@ async def test_report_rejects_before_period_close_and_waits_for_market_watermark
         datetime(2026, 1, 9, 15, 0, tzinfo=SHANGHAI),
         scheduled.append,
         market=EmptyMarket([]),
+        database=make_isolated_database(),
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await _seed_account_and_position(client)
@@ -521,7 +524,7 @@ async def test_frozen_input_contains_all_normalized_dependencies():
 
     with database.read() as connection:
         row = connection.execute(
-            "SELECT frozen_input FROM trading_review_jobs WHERE review_job_id = ?",
+            "SELECT frozen_input FROM trading_review_jobs WHERE review_job_id = %s",
             (created.json()["report_id"],),
         ).fetchone()
     frozen = json.loads(row["frozen_input"])
@@ -569,12 +572,12 @@ async def test_period_external_daily_review_revision_reuses_same_report_digest()
 
 
 def test_cross_connection_same_digest_has_one_report_owner(tmp_path):
-    path = str(tmp_path / "reports.sqlite")
-    first_store = TradingStore(Database(path))
+    str(tmp_path / "reports.sqlite")
+    first_store = TradingStore(Database())
     account = first_store.create_account(
         {"name": "主账户", "activated_on": "2026-01-01", "initial_capital": "100000"}
     )
-    second_store = TradingStore(Database(path))
+    second_store = TradingStore(Database())
     request = {
         "account_id": account["account_id"],
         "period_kind": "week",
@@ -632,7 +635,7 @@ def test_get_or_create_review_job_rejects_stale_source_revisions():
 
 
 def test_old_review_schema_migrates_lease_epoch_and_snapshot_payload(tmp_path):
-    database = Database(str(tmp_path / "old-review.sqlite"))
+    database = Database()
     database.execute_script(
         """
         CREATE TABLE trading_account(
@@ -690,8 +693,20 @@ def test_old_review_schema_migrates_lease_epoch_and_snapshot_payload(tmp_path):
     assert created is True
     assert job["lease_epoch"] == 1
     with database.read() as connection:
-        job_columns = {row["name"] for row in connection.execute("PRAGMA table_info(trading_review_jobs)")}
-        snapshot_columns = {row["name"] for row in connection.execute("PRAGMA table_info(trading_review_snapshots)")}
+        job_columns = {
+            row["column_name"]
+            for row in connection.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'trading_review_jobs'"
+            )
+        }
+        snapshot_columns = {
+            row["column_name"]
+            for row in connection.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'trading_review_snapshots'"
+            )
+        }
     assert {"lease_epoch", "lease_expires_at"} <= job_columns
     assert "payload" in snapshot_columns
 
@@ -832,12 +847,12 @@ def test_new_digest_creates_successor_snapshot_version():
 
 
 def test_expired_running_lease_can_be_taken_over_across_connections(tmp_path):
-    database_path = str(tmp_path / "lease.sqlite")
-    first_store = TradingStore(Database(database_path))
+    str(tmp_path / "lease.sqlite")
+    first_store = TradingStore(Database())
     account = first_store.create_account(
         {"name": "主账户", "activated_on": "2026-01-01", "initial_capital": "100000"}
     )
-    second_store = TradingStore(Database(database_path))
+    second_store = TradingStore(Database())
     job, _ = first_store.get_or_create_review_job(
         {
             "account_id": account["account_id"],
@@ -1165,7 +1180,7 @@ async def test_chart_cache_does_not_overwrite_interleaved_market_revision():
     assert response.json()["error"]["code"] == "REPORT_INPUT_CHANGED"
     with database.read() as connection:
         cached = connection.execute(
-            "SELECT high FROM trading_market_prices WHERE account_id = ? AND symbol = ? AND valuation_date = ?",
+            "SELECT high FROM trading_market_prices WHERE account_id = %s AND symbol = %s AND valuation_date = %s",
             (market.account_id, "600000.SH", "2026-01-05"),
         ).fetchone()
     assert cached["high"] == "12"

@@ -511,8 +511,8 @@ def test_concurrent_same_market_dependency_advances_revision_once(tmp_path) -> N
             self.barrier.wait(timeout=5)
             return [{"trade_date": "20260105", "open": "10", "high": "10", "low": "10", "close": "10", "vol": "1000"}]
 
-    database_path = str(tmp_path / "trading.sqlite")
-    first_database = Database(database_path)
+    str(tmp_path / "trading.sqlite")
+    first_database = Database()
     first_service = TradingService(
         TradingStore(first_database),
         market_provider=BarrierMarketProvider(),
@@ -536,7 +536,7 @@ def test_concurrent_same_market_dependency_advances_revision_once(tmp_path) -> N
     provider = BarrierMarketProvider()
     services = [
         TradingService(
-            TradingStore(Database(database_path)),
+            TradingStore(Database()),
             market_provider=provider,
             clock=lambda: datetime(2026, 1, 5, 16, tzinfo=SHANGHAI),
         )
@@ -583,7 +583,7 @@ async def test_refresh_market_prices_rechecks_cached_historical_valuation_dates(
     assert service.refresh_market_prices() == 2
     with database.read() as connection:
         cached = connection.execute(
-            "SELECT close FROM trading_market_prices WHERE valuation_date = ?",
+            "SELECT close FROM trading_market_prices WHERE valuation_date = %s",
             ("2026-01-05",),
         ).fetchone()
     assert cached is not None
@@ -661,7 +661,7 @@ async def test_cached_previous_close_is_carried_to_new_valuation_date_when_provi
     assert account.json()["data_quality"] == "degraded"
     with database.read() as connection:
         cached = connection.execute(
-            "SELECT source_trade_date FROM trading_market_prices WHERE valuation_date = ?",
+            "SELECT source_trade_date FROM trading_market_prices WHERE valuation_date = %s",
             ("2026-01-06",),
         ).fetchone()
     assert cached is not None
