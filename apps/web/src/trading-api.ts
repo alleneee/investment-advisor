@@ -7,6 +7,9 @@ import type {
   DailyReview,
   ReviewPeriodKind,
   SaveDailyReviewRequest,
+  StructureAttribution,
+  StructureAttributionCategory,
+  StructureAttributionReason,
   TradingAccount,
   TradingAiStatus,
   TradingChartBundle,
@@ -32,6 +35,7 @@ export interface TradingApi {
   deleteCashFlow(cashFlowId: string, revision: number): Promise<void>;
   getDailyReview(tradeDate: string): Promise<DailyReview | null>;
   saveDailyReview(tradeDate: string, request: SaveDailyReviewRequest): Promise<DailyReview>;
+  getStructureAttribution(): Promise<StructureAttribution>;
   getReviewPreview(periodKind: ReviewPeriodKind, start: string, end: string): Promise<TradingReviewReport>;
   createReviewReport(periodKind: ReviewPeriodKind, start: string, end: string): Promise<TradingReviewReport>;
   listReviewReports(periodKind: ReviewPeriodKind, start: string, end: string): Promise<TradingReviewReport[]>;
@@ -50,6 +54,8 @@ const AI_STATUSES = ["not_requested", "pending", "running", "ready", "failed"] a
 const BUY_REASONS = ["structure_breakout", "pullback_confirmation", "trend_continuation", "reversal_expectation", "event_driven", "valuation_recovery", "oversold_rebound", "planned_add", "other"] as const;
 const SELL_REASONS = ["stop_loss", "take_profit", "structure_invalidated", "target_reached", "planned_reduce", "thesis_invalidated", "capital_reallocation", "discipline_violation", "other"] as const;
 const REASONS = [...BUY_REASONS, ...SELL_REASONS] as const;
+const ATTRIBUTION_CATEGORIES = ["above_center", "inside_center", "below_center", "no_center", "unclassified"] as const;
+const ATTRIBUTION_REASONS = ["missing_market_data", "missing_bar_on_execution_date", "adjustment_unavailable"] as const;
 
 export const buyReasons = BUY_REASONS;
 export const sellReasons = SELL_REASONS;
@@ -72,6 +78,20 @@ export const reasonLabels: Record<TradingReasonCode, string> = {
   thesis_invalidated: "逻辑失效",
   capital_reallocation: "资金调配",
   discipline_violation: "纪律违规",
+};
+
+export const attributionCategoryLabels: Record<StructureAttributionCategory, string> = {
+  above_center: "中枢上方买入",
+  inside_center: "中枢内买入",
+  below_center: "中枢下方买入",
+  no_center: "无中枢",
+  unclassified: "无法归因",
+};
+
+export const attributionReasonLabels: Record<StructureAttributionReason, string> = {
+  missing_market_data: "行情缺失",
+  missing_bar_on_execution_date: "成交日无 K 线",
+  adjustment_unavailable: "复权换算不可行",
 };
 
 export function createTradingApi(baseUrl: string): TradingApi {
@@ -178,6 +198,9 @@ export function createTradingApi(baseUrl: string): TradingApi {
         }),
       }));
     },
+    async getStructureAttribution() {
+      return toStructureAttribution(await request<unknown>("/api/trading/structure-attribution"));
+    },
     async getReviewPreview(periodKind, start, end) {
       return toReviewReport(await request<unknown>(`/api/trading/reviews/preview?period_kind=${periodKind}&start=${start}&end=${end}`));
     },
@@ -277,6 +300,15 @@ export function createMockTradingApi(): TradingApi {
       };
       dailyReviews.set(tradeDate, next);
       return next;
+    },
+    async getStructureAttribution() {
+      return {
+        summary: ATTRIBUTION_CATEGORIES.map((category) => ({
+          category, closedCycles: 0, openCycles: 0, won: 0, winRate: null, totalPnl: "0", avgPnl: null,
+        })),
+        executions: [],
+        quality: { unclassifiedExecutions: [], symbolsMissingMarketData: [] },
+      };
     },
     getReviewPreview: unavailable,
     createReviewReport: unavailable,
@@ -590,6 +622,54 @@ function toChartBundle(payload: unknown, index: number): TradingChartBundle {
       };
     }),
     quality: { warnings: stringArray(exactRecord(value.quality, ["warnings"], "图表质量").warnings, "图表质量警告") },
+  };
+}
+
+export function toStructureAttribution(payload: unknown): StructureAttribution {
+  const value = exactRecord(payload, ["summary", "executions", "quality"], "结构位置归因");
+  const quality = exactRecord(value.quality, ["unclassified_executions", "symbols_missing_market_data"], "归因质量");
+  return {
+    summary: array(value.summary, "归因聚合").map((item, index) => {
+      const entry = exactRecord(item, ["category", "closed_cycles", "open_cycles", "won", "win_rate", "total_pnl", "avg_pnl"], `归因聚合 ${index + 1}`);
+      return {
+        category: enumText(entry.category, ATTRIBUTION_CATEGORIES, "归因类别"),
+        closedCycles: nonNegativeInteger(entry.closed_cycles, "已结周期数"),
+        openCycles: nonNegativeInteger(entry.open_cycles, "开放周期数"),
+        won: nonNegativeInteger(entry.won, "盈利周期数"),
+        winRate: nullableDecimal(entry.win_rate, "归因胜率"),
+        totalPnl: decimalText(entry.total_pnl, "归因合计盈亏"),
+        avgPnl: nullableDecimal(entry.avg_pnl, "归因平均盈亏"),
+      };
+    }),
+    executions: array(value.executions, "归因明细").map((item, index) => {
+      const entry = exactRecord(item, ["execution_id", "symbol", "trade_date", "executed_at", "side", "price", "quantity", "adjusted_price", "center_lower", "center_upper", "category", "reason"], `归因明细 ${index + 1}`);
+      return {
+        executionId: text(entry.execution_id, "归因成交编号"),
+        symbol: text(entry.symbol, "归因股票"),
+        tradeDate: dateText(entry.trade_date, "归因成交日"),
+        executedAt: dateTime(entry.executed_at, "归因成交时间"),
+        side: enumText(entry.side, SIDES, "归因成交方向"),
+        price: decimalText(entry.price, "归因成交价"),
+        quantity: positiveInteger(entry.quantity, "归因成交股数"),
+        adjustedPrice: nullableDecimal(entry.adjusted_price, "归因换算价"),
+        centerLower: nullableDecimal(entry.center_lower, "归因中枢下沿"),
+        centerUpper: nullableDecimal(entry.center_upper, "归因中枢上沿"),
+        category: enumText(entry.category, ATTRIBUTION_CATEGORIES, "归因类别"),
+        reason: nullableEnum(entry.reason, ATTRIBUTION_REASONS, "归因不可用原因"),
+      };
+    }),
+    quality: {
+      unclassifiedExecutions: array(quality.unclassified_executions, "无法归因明细").map((item, index) => {
+        const entry = exactRecord(item, ["execution_id", "symbol", "trade_date", "reason"], `无法归因明细 ${index + 1}`);
+        return {
+          executionId: text(entry.execution_id, "无法归因成交编号"),
+          symbol: text(entry.symbol, "无法归因股票"),
+          tradeDate: dateText(entry.trade_date, "无法归因成交日"),
+          reason: enumText(entry.reason, ATTRIBUTION_REASONS, "无法归因原因"),
+        };
+      }),
+      symbolsMissingMarketData: stringArray(quality.symbols_missing_market_data, "行情缺失股票"),
+    },
   };
 }
 

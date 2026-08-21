@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import re
-import sqlite3
 from datetime import date
 from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
+import psycopg
 from fastapi import APIRouter, Header, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -22,6 +22,7 @@ from pydantic import (
     model_validator,
 )
 
+from .attribution import StructureAttributionService
 from .reporting import TradingReportService
 from .service import TradingService, TradingServiceError, error_code, error_status
 from .store import TradingStore
@@ -60,7 +61,7 @@ class TradingRoute(APIRoute):
                 LookupError,
                 OSError,
                 RuntimeError,
-                sqlite3.Error,
+                psycopg.Error,
                 TypeError,
                 ValueError,
             ):
@@ -195,6 +196,7 @@ def create_trading_router(
         scheduler=report_scheduler,
         clock=clock,
     )
+    attribution_service = StructureAttributionService(store, market_provider=market_provider)
     router = APIRouter(prefix="/api/trading", route_class=TradingRoute)
 
     @router.get("/account")
@@ -265,6 +267,12 @@ def create_trading_router(
     @router.put("/daily-reviews/{trade_date}")
     def put_daily_review(trade_date: date, payload: PutDailyReviewRequest) -> dict:
         return service.put_daily_review(trade_date, payload.model_dump(mode="json"))
+
+    @router.get("/structure-attribution")
+    def structure_attribution(
+        period_start: date | None = None, period_end: date | None = None
+    ) -> dict:
+        return attribution_service.attribution(period_start=period_start, period_end=period_end)
 
     @router.get("/reviews/preview")
     def preview_review(

@@ -246,6 +246,59 @@ export interface TradingReviewReport {
   error: { code: string; message: string } | null;
 }
 
+export type StructureAttributionCategory =
+  | "above_center"
+  | "inside_center"
+  | "below_center"
+  | "no_center"
+  | "unclassified";
+
+export type StructureAttributionReason =
+  | "missing_market_data"
+  | "missing_bar_on_execution_date"
+  | "adjustment_unavailable";
+
+export interface StructureAttributionSummary {
+  category: StructureAttributionCategory;
+  closedCycles: number;
+  openCycles: number;
+  won: number;
+  winRate: string | null;
+  totalPnl: string;
+  avgPnl: string | null;
+}
+
+export interface StructureAttributionExecution {
+  executionId: string;
+  symbol: string;
+  tradeDate: string;
+  executedAt: string;
+  side: TradingSide;
+  price: string;
+  quantity: number;
+  adjustedPrice: string | null;
+  centerLower: string | null;
+  centerUpper: string | null;
+  category: StructureAttributionCategory;
+  reason: StructureAttributionReason | null;
+}
+
+export interface StructureAttributionQuality {
+  unclassifiedExecutions: Array<{
+    executionId: string;
+    symbol: string;
+    tradeDate: string;
+    reason: StructureAttributionReason;
+  }>;
+  symbolsMissingMarketData: string[];
+}
+
+export interface StructureAttribution {
+  summary: StructureAttributionSummary[];
+  executions: StructureAttributionExecution[];
+  quality: StructureAttributionQuality;
+}
+
 export interface CreateTradingAccountRequest {
   name: string;
   activatedOn: string;

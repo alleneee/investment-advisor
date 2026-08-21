@@ -42,6 +42,42 @@ describe("trading API", () => {
     });
   });
 
+  it("parses the structure attribution report and keeps decimal text untouched", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({
+      summary: [{
+        category: "inside_center",
+        closed_cycles: 1,
+        open_cycles: 1,
+        won: 1,
+        win_rate: "1",
+        total_pnl: "200",
+        avg_pnl: "200.00",
+      }],
+      executions: [{
+        execution_id: "execution-1",
+        symbol: "600156.SH",
+        trade_date: "2026-08-11",
+        executed_at: "2026-08-11T10:00:00+08:00",
+        side: "buy",
+        price: "21.6",
+        quantity: 100,
+        adjusted_price: "10.8",
+        center_lower: "7.5",
+        center_upper: "10.8",
+        category: "inside_center",
+        reason: null,
+      }],
+      quality: { unclassified_executions: [], symbols_missing_market_data: [] },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const attribution = await createTradingApi("").getStructureAttribution();
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/trading/structure-attribution", expect.anything());
+    expect(attribution.summary[0]).toMatchObject({ category: "inside_center", winRate: "1", avgPnl: "200.00" });
+    expect(attribution.executions[0]).toMatchObject({ adjustedPrice: "10.8", centerLower: "7.5", centerUpper: "10.8" });
+  });
+
   it("turns a missing account into the onboarding state but preserves other failures", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({
       status: "failed",

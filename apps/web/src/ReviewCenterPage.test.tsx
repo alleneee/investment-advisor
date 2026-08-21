@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ReviewCenterPage } from "./ReviewCenterPage";
 import type { TradingApi } from "./trading-api";
-import type { TradingReviewReport } from "./trading-types";
+import type { StructureAttribution, TradingReviewReport } from "./trading-types";
 
 vi.mock("./TradingReviewChart", () => ({
   TradingReviewChart: ({ bundle }: { bundle: { symbol: string } }) => <div role="img" aria-label={`${bundle.symbol} 交易复盘图`} />,
@@ -58,9 +58,25 @@ const report: TradingReviewReport = {
   error: null,
 };
 
+const attribution: StructureAttribution = {
+  summary: [
+    { category: "above_center", closedCycles: 2, openCycles: 0, won: 1, winRate: "0.5", totalPnl: "120", avgPnl: "60.00" },
+    { category: "inside_center", closedCycles: 0, openCycles: 1, won: 0, winRate: null, totalPnl: "0", avgPnl: null },
+    { category: "below_center", closedCycles: 0, openCycles: 0, won: 0, winRate: null, totalPnl: "0", avgPnl: null },
+    { category: "no_center", closedCycles: 0, openCycles: 0, won: 0, winRate: null, totalPnl: "0", avgPnl: null },
+    { category: "unclassified", closedCycles: 0, openCycles: 0, won: 0, winRate: null, totalPnl: "0", avgPnl: null },
+  ],
+  executions: [
+    { executionId: "execution-1", symbol: "600156.SH", tradeDate: "2026-08-11", executedAt: "2026-08-11T10:00:00+08:00", side: "buy", price: "21.6", quantity: 100, adjustedPrice: "10.8", centerLower: "7.5", centerUpper: "10.8", category: "inside_center", reason: null },
+    { executionId: "execution-2", symbol: "600156.SH", tradeDate: "2026-08-12", executedAt: "2026-08-12T10:00:00+08:00", side: "buy", price: "11", quantity: 100, adjustedPrice: null, centerLower: null, centerUpper: null, category: "unclassified", reason: "missing_bar_on_execution_date" },
+  ],
+  quality: { unclassifiedExecutions: [{ executionId: "execution-2", symbol: "600156.SH", tradeDate: "2026-08-12", reason: "missing_bar_on_execution_date" }], symbolsMissingMarketData: [] },
+};
+
 function apiForReview(overrides: Partial<TradingApi> = {}): TradingApi {
   return {
     getAccount: vi.fn(), createAccount: vi.fn(), listExecutions: vi.fn(), createExecution: vi.fn(), updateExecution: vi.fn(), deleteExecution: vi.fn(), listCashFlows: vi.fn(), createCashFlow: vi.fn(), deleteCashFlow: vi.fn(), getDailyReview: vi.fn(), saveDailyReview: vi.fn(),
+    getStructureAttribution: vi.fn(async () => attribution),
     getReviewPreview: vi.fn(async () => report),
     createReviewReport: vi.fn(async () => report),
     listReviewReports: vi.fn(async () => [report]),
@@ -86,5 +102,22 @@ describe("复盘中心", () => {
     expect(screen.getByText("交易周期")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "002940.SZ 交易复盘图" })).toBeInTheDocument();
     expect(screen.getByText("Pi 总结尚未请求")).toBeInTheDocument();
+  });
+
+  it("展示结构位置归因：类别聚合、样本不足文案与逐笔明细", async () => {
+    const api = apiForReview();
+    render(<ReviewCenterPage api={api} today="2026-08-18" />);
+
+    expect(await screen.findByRole("heading", { name: "结构位置归因" })).toBeInTheDocument();
+    await waitFor(() => expect(api.getStructureAttribution).toHaveBeenCalled());
+    const summaryTable = await screen.findByRole("table", { name: "买点结构类别聚合" });
+    expect(summaryTable).toHaveTextContent("中枢上方买入");
+    expect(summaryTable).toHaveTextContent("50.00%");
+    expect(summaryTable).toHaveTextContent("中枢内买入");
+    expect(summaryTable).toHaveTextContent("样本不足");
+    const detailTable = screen.getByRole("table", { name: "逐笔成交归因明细" });
+    expect(detailTable).toHaveTextContent("7.5 ~ 10.8");
+    expect(detailTable).toHaveTextContent("10.8");
+    expect(detailTable).toHaveTextContent("无法归因（成交日无 K 线）");
   });
 });

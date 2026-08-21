@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { reasonLabels } from "./trading-api";
+import { attributionCategoryLabels, attributionReasonLabels, reasonLabels } from "./trading-api";
 import type { TradingApi } from "./trading-api";
 import { TradingReviewChart } from "./TradingReviewChart";
-import type { ReviewPeriodKind, TradingReviewDeterministicReport, TradingReviewReport } from "./trading-types";
+import type {
+  ReviewPeriodKind,
+  StructureAttribution,
+  StructureAttributionExecution,
+  TradingReviewDeterministicReport,
+  TradingReviewReport,
+} from "./trading-types";
 
 interface ReviewCenterPageProps {
   api: TradingApi;
@@ -152,7 +158,65 @@ export function ReviewCenterPage({ api, today = currentShanghaiDate() }: ReviewC
         {report?.aiStatus === "not_requested" ? <p><strong>Pi 总结尚未请求</strong><span>本版先展示可审计的确定性统计，不用模型替代交易事实。</span></p> : <p><strong>{aiStatusLabel(report!.aiStatus)}</strong><span>交易复盘文字状态独立于确定性快照；当前页面只展示服务端返回的真实状态。</span></p>}
       </section>
     </section>}
+    <StructureAttributionSection api={api} />
   </section>;
+}
+
+function StructureAttributionSection({ api }: { api: TradingApi }) {
+  const [attribution, setAttribution] = useState<StructureAttribution | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void api.getStructureAttribution().then((next) => {
+      if (active) setAttribution(next);
+    }).catch((reason: unknown) => {
+      if (active) setError(messageOf(reason));
+    });
+    return () => { active = false; };
+  }, [api]);
+
+  return <section className="journal-card structure-attribution" aria-label="结构位置归因">
+    <div className="journal-card-heading"><span className="section-index">09</span><h3>结构位置归因</h3></div>
+    <p className="journal-muted">每个交易周期按其首笔买入成交时点的缠论结构位置归类；成交价先换算到行情前复权基准再与中枢比较；开放周期不参与胜率。</p>
+    {error && <p className="journal-error" role="alert">{error}</p>}
+    {attribution && <>
+      <table className="attribution-table" aria-label="买点结构类别聚合">
+        <thead><tr><th>类别</th><th>已结周期</th><th>开放周期</th><th>盈利周期</th><th>胜率</th><th>合计盈亏</th><th>平均盈亏</th></tr></thead>
+        <tbody>
+          {attribution.summary.map((row) => <tr key={row.category}>
+            <th scope="row">{attributionCategoryLabels[row.category]}</th>
+            <td>{row.closedCycles}</td>
+            <td>{row.openCycles}</td>
+            <td>{row.won}</td>
+            <td>{row.winRate === null ? "样本不足" : percentageText(row.winRate)}</td>
+            <td>{row.totalPnl}</td>
+            <td>{row.avgPnl ?? "—"}</td>
+          </tr>)}
+        </tbody>
+      </table>
+      {attribution.quality.symbolsMissingMarketData.length > 0 && <p className="review-warning">以下股票行情缺失，相关成交无法归因：{attribution.quality.symbolsMissingMarketData.join("、")}</p>}
+      {attribution.executions.length ? <table className="attribution-table attribution-detail" aria-label="逐笔成交归因明细">
+        <thead><tr><th>成交日</th><th>股票</th><th>方向</th><th>成交价</th><th>换算价</th><th>中枢区间</th><th>类别</th></tr></thead>
+        <tbody>
+          {attribution.executions.map((row) => <tr key={row.executionId}>
+            <td>{row.tradeDate}</td>
+            <td>{row.symbol}</td>
+            <td>{row.side === "buy" ? "买入" : "卖出"}</td>
+            <td>{row.price}</td>
+            <td>{row.adjustedPrice ?? "—"}</td>
+            <td>{row.centerLower !== null && row.centerUpper !== null ? `${row.centerLower} ~ ${row.centerUpper}` : "—"}</td>
+            <td>{attributionLabel(row)}</td>
+          </tr>)}
+        </tbody>
+      </table> : <p className="journal-muted">还没有可归因的成交。</p>}
+    </>}
+  </section>;
+}
+
+function attributionLabel(row: StructureAttributionExecution): string {
+  if (row.category === "unclassified" && row.reason !== null) return `${attributionCategoryLabels.unclassified}（${attributionReasonLabels[row.reason]}）`;
+  return attributionCategoryLabels[row.category];
 }
 
 function ReviewState({ report, onRetry, retrying }: { report: TradingReviewReport; onRetry: () => void; retrying: boolean }) {

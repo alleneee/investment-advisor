@@ -34,6 +34,7 @@ function apiForJournal(overrides: Partial<TradingApi> = {}): TradingApi {
     deleteCashFlow: vi.fn(),
     getDailyReview: vi.fn(async () => null),
     saveDailyReview: vi.fn(),
+    getStructureAttribution: vi.fn(),
     getReviewPreview: vi.fn(),
     createReviewReport: vi.fn(),
     listReviewReports: vi.fn(),
