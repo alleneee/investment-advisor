@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .analysis import MarketAnalysisService
 from .db import Database
 from .information import StockInformationService
+from .outcome import ReportOutcomeError, ReportOutcomeService
 from .providers.a_stock_data import normalize_symbol_code
 from .providers.tushare import MarketProviderError, TushareMarketProvider
 from .reporting import InvestmentReportService, information_reference, validate_report_draft_v2
@@ -32,11 +33,26 @@ class RetryReportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ReviewReportRequest(BaseModel):
+    """发布前的人工质检门：只接受明确的通过或驳回。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["accepted", "rejected"]
+    reviewer: str | None = None
+    note: str | None = None
+
+
+class PublishReportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 def create_router(
     db: Database,
     market_service: MarketAnalysisService | None = None,
     information_service: StockInformationService | None = None,
     report_service: InvestmentReportService | None = None,
+    outcome_service: ReportOutcomeService | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api")
 
@@ -130,12 +146,30 @@ def create_router(
             raise HTTPException(404, "run 不存在")
         return value
 
+    @router.get("/reports/quality")
+    def report_quality(scope: Literal["published", "all"] = "published") -> dict[str, Any]:
+        return _outcomes().quality(scope=scope)
+
+    @router.get("/reports/published")
+    def list_published_reports() -> list[dict[str, Any]]:
+        return [
+            {
+                "report_id": job["report_id"],
+                "symbol": job["symbol"],
+                "timeframe": job["timeframe"],
+                "as_of": job["as_of"],
+                "published_at": job["published_at"],
+                "title": (job.get("result") or {}).get("title"),
+            }
+            for job in db.list_published_reports()
+        ]
+
     @router.get("/reports/{report_id}")
     def get_report(report_id: str) -> dict:
         if report_service is not None:
             job = report_service.get(report_id)
             if job is not None:
-                return _report_job_envelope(job)
+                return _report_job_envelope(job, db.get_report_outcome(report_id))
         value = db.get_report(report_id)
         if value is None:
             raise HTTPException(404, "report 不存在")
@@ -158,16 +192,89 @@ def create_router(
         }
 
     @router.post("/reports/{report_id}/reviews", status_code=status.HTTP_201_CREATED)
-    def review_report(report_id: str, payload: dict) -> dict:
-        value = db.add_review(report_id, payload)
+    def review_report(report_id: str, payload: ReviewReportRequest) -> dict:
+        try:
+            value = db.add_review(report_id, payload.model_dump(exclude_none=True))
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
         if value is None:
             raise HTTPException(404, "report 不存在")
         return value
 
+    @router.post("/reports/{report_id}/publish")
+    def publish_report(report_id: str, payload: PublishReportRequest | None = None) -> dict[str, Any]:
+        try:
+            job = db.publish_investment_report(report_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {
+            "report_id": job["report_id"],
+            "review_status": job["review_status"],
+            "published_at": job["published_at"],
+        }
+
+    @router.post("/reports/{report_id}/share", status_code=status.HTTP_201_CREATED)
+    def create_report_share(report_id: str, response: Response) -> dict[str, Any]:
+        try:
+            share, created = db.create_report_share(report_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if not created:
+            response.status_code = status.HTTP_200_OK
+        return {
+            "report_id": share["report_id"],
+            "share_token": share["share_token"],
+            "share_url_path": f"#/share/{share['share_token']}",
+        }
+
+    @router.delete("/reports/{report_id}/share", status_code=status.HTTP_204_NO_CONTENT)
+    def revoke_report_share(report_id: str) -> None:
+        db.revoke_report_share(report_id)
+
+    @router.get("/shared/{share_token}")
+    def get_shared_report(share_token: str) -> dict[str, Any]:
+        # token 即访问凭证；不存在、未发布、已撤销一律 404，不暴露差异供探测。
+        job = db.get_report_by_share_token(share_token)
+        if job is None or not isinstance(job.get("result"), dict):
+            raise HTTPException(404, "分享链接无效")
+        return _shared_report_view(job, db.get_report_outcome(job["report_id"]))
+
+    @router.get("/reports/{report_id}/outcome")
+    def get_report_outcome(report_id: str) -> dict[str, Any]:
+        value = _outcomes().get(report_id)
+        if value is None:
+            raise HTTPException(404, "报告兑现结果尚未评估")
+        return value
+
+    @router.post("/reports/{report_id}/outcome")
+    def evaluate_report_outcome(report_id: str) -> dict[str, Any]:
+        try:
+            return _outcomes().evaluate(report_id)
+        except ReportOutcomeError as exc:
+            raise HTTPException(_OUTCOME_ERROR_STATUS.get(exc.code, 500), exc.message) from exc
+
+    def _outcomes() -> ReportOutcomeService:
+        return outcome_service or ReportOutcomeService(db)
+
     return router
 
 
-def _report_job_envelope(job: dict[str, Any]) -> dict[str, Any]:
+_OUTCOME_ERROR_STATUS = {
+    "REPORT_NOT_FOUND": 404,
+    "REPORT_NOT_COMPLETED": 409,
+    "ANCHOR_NOT_AVAILABLE": 409,
+    "MARKET_DATA_UNAVAILABLE": 503,
+}
+
+
+def _report_job_envelope(
+    job: dict[str, Any],
+    outcome: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
         "report_id": job["report_id"],
         "status": job["status"],
@@ -179,6 +286,71 @@ def _report_job_envelope(job: dict[str, Any]) -> dict[str, Any]:
         "updated_at": job["updated_at"],
         "report": job["result"],
         "error": job["error"],
+        "review_status": job.get("review_status", "pending"),
+        "reviewed_at": job.get("reviewed_at"),
+        "published_at": job.get("published_at"),
+        "share_token": job.get("share_token"),
+        "outcome": outcome,
+    }
+
+
+def _shared_report_view(
+    job: dict[str, Any],
+    outcome: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """对客净化视图：白名单构造，只暴露报告正文与图表所需的固化数据。
+
+    刻意剔除 input_digest、run_id、frozen_input、lease/execution、审阅内部信息、
+    draft、reference_registry、information_snapshot 等内部实现字段。
+    """
+    report = job["result"]
+    market = report.get("market_snapshot") if isinstance(report.get("market_snapshot"), dict) else {}
+    chan = report.get("chan_analysis") if isinstance(report.get("chan_analysis"), dict) else {}
+    return {
+        "symbol": job["symbol"],
+        "timeframe": job["timeframe"],
+        "as_of": job["as_of"],
+        "generated_at": report.get("generated_at"),
+        "published_at": job["published_at"],
+        "title": report.get("title"),
+        "executive_summary": report.get("executive_summary"),
+        "outlook": report.get("outlook"),
+        "risks": report.get("risks"),
+        "evidence": report.get("evidence"),
+        "disclaimer": report.get("disclaimer"),
+        "market_snapshot": {
+            "bars": market.get("bars") or [],
+            "window": market.get("window") or {},
+            "quality": market.get("quality") or {"status": "ok", "warnings": []},
+        },
+        "chan_analysis": {
+            "timeframe": chan.get("timeframe"),
+            "snapshot": chan.get("snapshot") or {},
+        },
+        "outcome": _shared_outcome_view(outcome),
+    }
+
+
+def _shared_outcome_view(outcome: dict[str, Any] | None) -> dict[str, Any] | None:
+    """兑现结果对客摘要：仅保留结论、窗口与质量告警，剔除内部判定明细。"""
+    if not isinstance(outcome, dict):
+        return None
+    window = outcome.get("window") if isinstance(outcome.get("window"), dict) else {}
+    quality = outcome.get("quality") if isinstance(outcome.get("quality"), dict) else {}
+    return {
+        "status": outcome.get("status"),
+        "realized_case": outcome.get("realized_case"),
+        "evaluated_at": outcome.get("evaluated_at"),
+        "window": {
+            "start": window.get("start"),
+            "end": window.get("end"),
+            "bar_count": window.get("bar_count"),
+            "required_bars": window.get("required_bars"),
+        },
+        "quality": {
+            "status": quality.get("status"),
+            "warnings": quality.get("warnings") or [],
+        },
     }
 
 

@@ -15,7 +15,16 @@ import type {
   InvestmentScenario,
   ReferenceFact,
   Report,
+  ReportConditionOutcome,
+  ReportOutcome,
+  ReportPublication,
+  ReportReviewDecision,
+  ReportReviewStatus,
+  ReportScenarioOutcome,
+  ReportShare,
   RunProgress,
+  SharedReport,
+  SharedReportOutcome,
   StockInformation,
   StructureFact,
   Timeframe,
@@ -33,6 +42,12 @@ export interface WorkbenchApi {
   createInvestmentReport(symbol: string, timeframe: Timeframe): Promise<InvestmentReportRequest>;
   getInvestmentReport(reportId: string): Promise<InvestmentReportJob>;
   retryInvestmentReport(reportId: string): Promise<InvestmentReportRequest>;
+  reviewInvestmentReport(reportId: string, decision: ReportReviewDecision, note?: string): Promise<void>;
+  publishInvestmentReport(reportId: string): Promise<ReportPublication>;
+  evaluateInvestmentReportOutcome(reportId: string): Promise<ReportOutcome>;
+  createInvestmentReportShare(reportId: string): Promise<ReportShare>;
+  revokeInvestmentReportShare(reportId: string): Promise<void>;
+  getSharedReport(shareToken: string): Promise<SharedReport>;
 }
 
 export interface MarketAnalysisResponse {
@@ -188,6 +203,11 @@ function mockInvestmentJob(reportId: string, symbol: string, timeframe: Timefram
       review: { status: "pending" },
     },
     error: null,
+    reviewStatus: "pending",
+    reviewedAt: null,
+    publishedAt: null,
+    shareToken: null,
+    outcome: null,
   };
 }
 
@@ -196,6 +216,9 @@ export function createMockApi(initialError?: string): WorkbenchApi {
     { symbol: "600519.SH", name: "贵州茅台", market: "SH" },
     { symbol: "000858.SZ", name: "五粮液", market: "SZ" },
   ];
+  const mockReviews = new Map<string, ReportReviewStatus>();
+  const mockPublications = new Map<string, string>();
+  const mockShares = new Map<string, string>();
   return {
     async getWatchlist() {
       return watchlist;
@@ -242,10 +265,79 @@ export function createMockApi(initialError?: string): WorkbenchApi {
     },
     async getInvestmentReport(reportId) {
       const [, symbol = "600519.SH", timeframe = "1d"] = reportId.match(/^report-(.+)-(1d|1w)$/) ?? [];
-      return mockInvestmentJob(reportId, symbol, timeframe === "1w" ? "1w" : "1d");
+      const job = mockInvestmentJob(reportId, symbol, timeframe === "1w" ? "1w" : "1d");
+      return {
+        ...job,
+        reviewStatus: mockReviews.get(reportId) ?? "pending",
+        publishedAt: mockPublications.get(reportId) ?? null,
+        shareToken: mockShares.get(reportId) ?? null,
+      };
     },
     async retryInvestmentReport(reportId) {
       return { reportId, status: "queued", cached: false };
+    },
+    async reviewInvestmentReport(reportId, decision) {
+      mockReviews.set(reportId, decision);
+    },
+    async publishInvestmentReport(reportId) {
+      if (mockReviews.get(reportId) !== "accepted") throw new ApiError("报告需通过审阅后才能发布", 409);
+      const publishedAt = "2026-08-12T09:00:00+08:00";
+      mockPublications.set(reportId, publishedAt);
+      return { reportId, reviewStatus: "accepted", publishedAt };
+    },
+    async evaluateInvestmentReportOutcome(reportId) {
+      return {
+        reportId,
+        symbol: "600519.SH",
+        asOf: "2026-08-11",
+        evaluatedAt: "2026-09-10T09:00:00+08:00",
+        status: "realized",
+        adjudication: "single_candidate",
+        realizedCase: "base",
+        realizedCases: ["base"],
+        window: { start: "20260812", end: "20260909", barCount: 20, requiredBars: 20 },
+        scenarios: [],
+        quality: { status: "ok", warnings: [] },
+      };
+    },
+    async createInvestmentReportShare(reportId) {
+      if (!mockPublications.has(reportId)) throw new ApiError("只有已发布的报告可以分享", 409);
+      const shareToken = mockShares.get(reportId) ?? `share-${reportId}`;
+      mockShares.set(reportId, shareToken);
+      return { reportId, shareToken, shareUrlPath: `#/share/${shareToken}` };
+    },
+    async revokeInvestmentReportShare(reportId) {
+      mockShares.delete(reportId);
+    },
+    async getSharedReport(shareToken) {
+      const shared = [...mockShares.entries()].find(([, token]) => token === shareToken);
+      const reportId = shared?.[0] ?? (shareToken === "demo" ? "report-600519.SH-1d" : null);
+      if (!reportId) throw new ApiError("分享链接无效或已撤销", 404);
+      const [, symbol = "600519.SH", timeframe = "1d"] = reportId.match(/^report-(.+)-(1d|1w)$/) ?? [];
+      const job = mockInvestmentJob(reportId, symbol, timeframe === "1w" ? "1w" : "1d");
+      const report = job.report!;
+      return {
+        symbol: report.symbol,
+        timeframe: report.timeframe,
+        asOf: report.asOf,
+        generatedAt: report.generatedAt,
+        publishedAt: mockPublications.get(reportId) ?? "2026-08-12T09:00:00+08:00",
+        title: report.title,
+        executiveSummary: report.executiveSummary,
+        outlook: report.outlook,
+        risks: report.risks,
+        evidence: report.evidence,
+        disclaimer: report.disclaimer,
+        chart: { ...mockReport.chart, timeframe: report.timeframe },
+        quality: { status: "ok", warnings: [] },
+        outcome: {
+          status: "realized",
+          realizedCase: "base",
+          evaluatedAt: "2026-09-10T09:00:00+08:00",
+          window: { start: "20260812", end: "20260909", barCount: 20, requiredBars: 20 },
+          quality: { status: "ok", warnings: [] },
+        },
+      };
     },
   };
 }
@@ -352,6 +444,38 @@ export function createHttpApi(baseUrl: string): WorkbenchApi {
       });
       return toInvestmentReportRequest(payload);
     },
+    async reviewInvestmentReport(reportId, decision, note) {
+      await request<unknown>(`/api/reports/${encodeURIComponent(reportId)}/reviews`, {
+        method: "POST",
+        body: JSON.stringify(note ? { decision, note } : { decision }),
+      });
+    },
+    async publishInvestmentReport(reportId) {
+      const payload = await request<unknown>(`/api/reports/${encodeURIComponent(reportId)}/publish`, {
+        method: "POST",
+        body: "{}",
+      });
+      return toReportPublication(payload);
+    },
+    async evaluateInvestmentReportOutcome(reportId) {
+      const payload = await request<unknown>(`/api/reports/${encodeURIComponent(reportId)}/outcome`, {
+        method: "POST",
+      });
+      return toReportOutcome(payload);
+    },
+    async createInvestmentReportShare(reportId) {
+      const payload = await request<unknown>(`/api/reports/${encodeURIComponent(reportId)}/share`, {
+        method: "POST",
+      });
+      return toReportShare(payload);
+    },
+    async revokeInvestmentReportShare(reportId) {
+      await request<void>(`/api/reports/${encodeURIComponent(reportId)}/share`, { method: "DELETE" });
+    },
+    async getSharedReport(shareToken) {
+      const payload = await request<unknown>(`/api/shared/${encodeURIComponent(shareToken)}`);
+      return toSharedReport(payload);
+    },
   };
 }
 
@@ -378,6 +502,12 @@ const SCENARIO_CASES = ["bullish", "base", "bearish"] as const;
 const DIRECTIONS = ["bullish", "sideways", "bearish", "uncertain"] as const;
 const CONFIDENCES = ["low", "medium", "high"] as const;
 const CONDITION_OPERATORS = ["break_above", "hold_above", "break_below", "hold_below", "structure_confirmed", "structure_invalidated"] as const;
+const REVIEW_STATUSES = ["pending", "accepted", "rejected"] as const;
+const OUTCOME_STATUSES = ["pending", "realized", "none_realized", "ambiguous", "inconclusive"] as const;
+const OUTCOME_ADJUDICATIONS = [
+  "window_pending", "single_candidate", "active_breakout_precedence",
+  "multiple_active_breakouts", "passive_only", "no_candidate",
+] as const;
 const INVESTMENT_REPORT_DISCLAIMER = "本报告基于固化数据生成，仅供研究参考，不构成任何投资建议。";
 const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
 const ISO_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/;
@@ -422,10 +552,229 @@ export function toInvestmentReportRequest(payload: unknown): InvestmentReportReq
   };
 }
 
+export function toReportPublication(payload: unknown): ReportPublication {
+  const value = exactRecord(payload, ["report_id", "review_status", "published_at"], "报告发布");
+  return {
+    reportId: text(value.report_id, "报告编号"),
+    reviewStatus: enumText(value.review_status, REVIEW_STATUSES, "报告审阅状态"),
+    publishedAt: requiredDate(value.published_at, "报告发布时间"),
+  };
+}
+
+export function toReportShare(payload: unknown): ReportShare {
+  const value = exactRecord(payload, ["report_id", "share_token", "share_url_path"], "分享链接");
+  const shareToken = text(value.share_token, "分享令牌");
+  const shareUrlPath = text(value.share_url_path, "分享路径");
+  if (shareUrlPath !== `#/share/${shareToken}`) throw adapterError("分享路径无效");
+  return {
+    reportId: text(value.report_id, "报告编号"),
+    shareToken,
+    shareUrlPath,
+  };
+}
+
+export function toSharedReport(payload: unknown): SharedReport {
+  const value = exactRecord(payload, [
+    "symbol", "timeframe", "as_of", "generated_at", "published_at", "title",
+    "executive_summary", "outlook", "risks", "evidence", "disclaimer",
+    "market_snapshot", "chan_analysis", "outcome",
+  ], "分享报告");
+  const market = exactRecord(value.market_snapshot, ["bars", "window", "quality"], "分享行情快照");
+  const chan = exactRecord(value.chan_analysis, ["timeframe", "snapshot"], "分享缠论分析");
+  const marketQuality = exactRecord(market.quality, ["status", "warnings"], "分享行情质量");
+  const snapshot = record(chan.snapshot, "分享缠论快照");
+  const timeframe = enumText(value.timeframe, ["1d", "1w"] as const, "分享报告周期");
+  const disclaimer = text(value.disclaimer, "分享报告免责声明");
+  if (disclaimer !== INVESTMENT_REPORT_DISCLAIMER) throw adapterError("分享报告免责声明无效");
+  const bars = toChartBars(
+    array(market.bars, "分享行情K线") as MarketAnalysisResponse["market_snapshot"]["bars"],
+  );
+  const structureDates = array(snapshot.bars ?? [], "分享结构K线")
+    .map((bar) => validDate(isRecord(bar) ? bar.occurred_at : null));
+  const structures = (name: string) =>
+    array(snapshot[name] ?? [], `分享结构 ${name}`).filter(isRecord);
+  return {
+    symbol: text(value.symbol, "分享报告股票"),
+    timeframe,
+    asOf: requiredDate(value.as_of, "分享报告数据日期"),
+    generatedAt: requiredDate(value.generated_at, "分享报告生成时间"),
+    publishedAt: requiredDate(value.published_at, "分享报告发布时间"),
+    title: text(value.title, "分享报告标题"),
+    executiveSummary: text(value.executive_summary, "分享报告摘要"),
+    outlook: toSharedOutlook(value.outlook),
+    risks: array(value.risks, "分享报告风险").map((item, index) => toSharedRisk(item, index)),
+    evidence: array(value.evidence, "分享报告证据")
+      .map((item, index) => toReferenceFact(item, `分享报告证据 ${index + 1}`)),
+    disclaimer: INVESTMENT_REPORT_DISCLAIMER,
+    chart: {
+      timeframe,
+      bars,
+      strokes: [
+        ...structures("confirmed").flatMap((stroke) => toStroke(stroke, "confirmed", structureDates)),
+        ...structures("provisional").flatMap((stroke) => toStroke(stroke, "provisional", structureDates)),
+      ],
+      centers: structures("centers").flatMap((center) => toCenter(center, structureDates)),
+    },
+    quality: {
+      status: enumText(marketQuality.status, ["ok", "degraded"] as const, "分享行情质量状态"),
+      warnings: stringArray(marketQuality.warnings, "分享行情质量警告"),
+    },
+    outcome: toSharedOutcome(value.outcome),
+  };
+}
+
+function toSharedOutlook(payload: unknown): SharedReport["outlook"] {
+  const outlook = exactRecord(payload, ["horizon", "direction", "confidence", "thesis", "scenarios"], "分享报告展望");
+  if (outlook.horizon !== "5-20-trading-days") throw adapterError("分享报告观察周期无效");
+  const scenarios = array(outlook.scenarios, "分享报告情景").map((item, index) => toSharedScenario(item, index));
+  if (scenarios.length !== 3 || SCENARIO_CASES.some((scenarioCase) => scenarios.filter((scenario) => scenario.case === scenarioCase).length !== 1)) {
+    throw adapterError("分享报告必须包含唯一的三种情景");
+  }
+  return {
+    horizon: "5-20-trading-days",
+    direction: enumText(outlook.direction, DIRECTIONS, "分享报告方向"),
+    confidence: enumText(outlook.confidence, CONFIDENCES, "分享报告置信度"),
+    thesis: text(outlook.thesis, "分享报告主论点"),
+    scenarios,
+  };
+}
+
+function toSharedScenario(payload: unknown, index: number): InvestmentScenario {
+  const value = exactRecord(payload, ["case", "narrative", "trigger", "invalidation", "evidence_refs", "evidence"], `分享情景 ${index + 1}`);
+  const evidence = toSharedEvidence(value.evidence_refs, value.evidence, `分享情景 ${index + 1}证据`);
+  return {
+    case: enumText(value.case, SCENARIO_CASES, "分享情景类型"),
+    narrative: text(value.narrative, "分享情景叙述"),
+    trigger: toSharedCondition(value.trigger, `分享情景 ${index + 1}触发条件`),
+    invalidation: toSharedCondition(value.invalidation, `分享情景 ${index + 1}失效条件`),
+    evidenceRefs: evidence.refs,
+    evidence: evidence.facts,
+  };
+}
+
+function toSharedCondition(payload: unknown, name: string) {
+  const value = exactRecord(payload, ["operator", "fact_ref", "fact"], name);
+  const factRef = text(value.fact_ref, `${name}引用编号`);
+  const fact = toReferenceFact(value.fact, `${name}引用事实`);
+  if (fact.ref !== factRef) throw adapterError(`${name}引用不一致`);
+  return {
+    operator: enumText(value.operator, CONDITION_OPERATORS, `${name}操作符`),
+    factRef,
+    fact,
+  };
+}
+
+function toSharedRisk(payload: unknown, index: number) {
+  const value = exactRecord(payload, ["narrative", "evidence_refs", "evidence"], `分享风险 ${index + 1}`);
+  const evidence = toSharedEvidence(value.evidence_refs, value.evidence, `分享风险 ${index + 1}证据`);
+  return {
+    narrative: text(value.narrative, "分享风险叙述"),
+    evidenceRefs: evidence.refs,
+    evidence: evidence.facts,
+  };
+}
+
+// 净化视图不带引用注册表，只做证据自身一致性校验（编号与事实一一对应）。
+function toSharedEvidence(
+  refsPayload: unknown,
+  factsPayload: unknown,
+  name: string,
+): { refs: string[]; facts: ReferenceFact[] } {
+  const refs = stringArray(refsPayload, `${name}编号`);
+  const facts = array(factsPayload, name).map((item) => toReferenceFact(item, name));
+  if (refs.length !== new Set(refs).size
+    || refs.length !== facts.length
+    || refs.some((ref, index) => facts[index].ref !== ref)) {
+    throw adapterError(`${name}与编号不一致`);
+  }
+  return { refs, facts };
+}
+
+function toSharedOutcome(payload: unknown): SharedReportOutcome | null {
+  if (payload == null) return null;
+  const value = exactRecord(payload, ["status", "realized_case", "evaluated_at", "window", "quality"], "分享兑现结果");
+  const window = exactRecord(value.window, ["start", "end", "bar_count", "required_bars"], "分享兑现窗口");
+  const quality = exactRecord(value.quality, ["status", "warnings"], "分享兑现质量");
+  return {
+    status: enumText(value.status, OUTCOME_STATUSES, "分享兑现状态"),
+    realizedCase: value.realized_case == null
+      ? null
+      : enumText(value.realized_case, SCENARIO_CASES, "分享兑现情景"),
+    evaluatedAt: requiredDate(value.evaluated_at, "分享兑现评估时间"),
+    window: {
+      start: nullableText(window.start, "分享兑现窗口起点"),
+      end: nullableText(window.end, "分享兑现窗口终点"),
+      barCount: nonNegativeInteger(window.bar_count, "分享兑现窗口交易日数"),
+      requiredBars: nonNegativeInteger(window.required_bars, "分享兑现窗口所需交易日数"),
+    },
+    quality: {
+      status: enumText(quality.status, QUALITY_STATUSES, "分享兑现质量状态"),
+      warnings: stringArray(quality.warnings, "分享兑现质量警告"),
+    },
+  };
+}
+
+export function toReportOutcome(payload: unknown): ReportOutcome {
+  const value = exactRecord(payload, [
+    "schema_version", "report_id", "symbol", "as_of", "evaluated_at", "window",
+    "scenarios", "quality", "status", "adjudication", "realized_case", "realized_cases",
+  ], "报告兑现结果");
+  const window = exactRecord(value.window, ["start", "end", "bar_count", "required_bars"], "兑现窗口");
+  const quality = exactRecord(value.quality, ["status", "warnings"], "兑现质量");
+  return {
+    reportId: text(value.report_id, "报告编号"),
+    symbol: text(value.symbol, "报告股票"),
+    asOf: requiredDate(value.as_of, "报告数据日期"),
+    evaluatedAt: requiredDate(value.evaluated_at, "兑现评估时间"),
+    status: enumText(value.status, OUTCOME_STATUSES, "兑现状态"),
+    adjudication: enumText(value.adjudication, OUTCOME_ADJUDICATIONS, "兑现裁决规则"),
+    realizedCase: value.realized_case == null
+      ? null
+      : enumText(value.realized_case, SCENARIO_CASES, "兑现情景"),
+    realizedCases: array(value.realized_cases, "兑现情景列表")
+      .map((item) => enumText(item, SCENARIO_CASES, "兑现情景")),
+    window: {
+      start: nullableText(window.start, "兑现窗口起点"),
+      end: nullableText(window.end, "兑现窗口终点"),
+      barCount: nonNegativeInteger(window.bar_count, "兑现窗口交易日数"),
+      requiredBars: nonNegativeInteger(window.required_bars, "兑现窗口所需交易日数"),
+    },
+    scenarios: array(value.scenarios, "兑现情景明细").map((item, index) => toScenarioOutcome(item, index)),
+    quality: {
+      status: enumText(quality.status, QUALITY_STATUSES, "兑现质量状态"),
+      warnings: stringArray(quality.warnings, "兑现质量警告"),
+    },
+  };
+}
+
+function toScenarioOutcome(payload: unknown, index: number): ReportScenarioOutcome {
+  const value = exactRecord(payload, ["case", "trigger", "invalidation"], `兑现情景 ${index + 1}`);
+  return {
+    case: enumText(value.case, SCENARIO_CASES, "兑现情景类型"),
+    trigger: toConditionOutcome(value.trigger, "触发条件"),
+    invalidation: toConditionOutcome(value.invalidation, "失效条件"),
+  };
+}
+
+function toConditionOutcome(payload: unknown, name: string): ReportConditionOutcome {
+  const value = record(payload, name);
+  // level 仅在事实为数值时出现，无法判定的条件不带该字段。
+  exactKeys(value, ["operator", "fact_ref", "hit", "decisive_date", "unevaluable_reason"], ["level"], name);
+  return {
+    operator: enumText(value.operator, CONDITION_OPERATORS, `${name}算子`),
+    factRef: text(value.fact_ref, `${name}事实引用`),
+    level: value.level == null ? null : text(value.level, `${name}价格水平`),
+    hit: value.hit == null ? null : booleanValue(value.hit, `${name}命中状态`),
+    decisiveDate: nullableText(value.decisive_date, `${name}判定日`),
+    unevaluableReason: nullableText(value.unevaluable_reason, `${name}无法判定原因`),
+  };
+}
+
 export function toInvestmentReportJob(payload: unknown): InvestmentReportJob {
   const value = exactRecord(payload, [
     "report_id", "status", "symbol", "timeframe", "as_of", "input_digest",
     "attempt_count", "updated_at", "report", "error",
+    "review_status", "reviewed_at", "published_at", "share_token", "outcome",
   ], "报告任务");
   const status = enumText(value.status, REPORT_STATUSES, "报告状态");
   const report = value.report == null ? null : toInvestmentReport(value.report);
@@ -454,6 +803,11 @@ export function toInvestmentReportJob(payload: unknown): InvestmentReportJob {
     updatedAt: requiredDate(value.updated_at, "报告更新时间"),
     report,
     error,
+    reviewStatus: enumText(value.review_status, REVIEW_STATUSES, "报告审阅状态"),
+    reviewedAt: nullableDate(value.reviewed_at, "报告审阅时间"),
+    publishedAt: nullableDate(value.published_at, "报告发布时间"),
+    shareToken: nullableText(value.share_token, "报告分享令牌"),
+    outcome: value.outcome == null ? null : toReportOutcome(value.outcome),
   };
 }
 

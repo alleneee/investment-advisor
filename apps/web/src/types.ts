@@ -192,6 +192,46 @@ export interface InvestmentReportError {
   retryable: boolean;
 }
 
+export type ReportReviewStatus = "pending" | "accepted" | "rejected";
+export type ReportReviewDecision = "accepted" | "rejected";
+export type ReportOutcomeStatus = "pending" | "realized" | "none_realized" | "ambiguous" | "inconclusive";
+export type ReportOutcomeAdjudication =
+  | "window_pending"
+  | "single_candidate"
+  | "active_breakout_precedence"
+  | "multiple_active_breakouts"
+  | "passive_only"
+  | "no_candidate";
+
+export interface ReportConditionOutcome {
+  operator: ReportCondition["operator"];
+  factRef: string;
+  level: string | null;
+  hit: boolean | null;
+  decisiveDate: string | null;
+  unevaluableReason: string | null;
+}
+
+export interface ReportScenarioOutcome {
+  case: InvestmentScenarioCase;
+  trigger: ReportConditionOutcome;
+  invalidation: ReportConditionOutcome;
+}
+
+export interface ReportOutcome {
+  reportId: string;
+  symbol: string;
+  asOf: string;
+  evaluatedAt: string;
+  status: ReportOutcomeStatus;
+  adjudication: ReportOutcomeAdjudication;
+  realizedCase: InvestmentScenarioCase | null;
+  realizedCases: InvestmentScenarioCase[];
+  window: { start: string | null; end: string | null; barCount: number; requiredBars: number };
+  scenarios: ReportScenarioOutcome[];
+  quality: { status: InformationQualityStatus; warnings: string[] };
+}
+
 export interface InvestmentReportJob {
   reportId: string;
   status: InvestmentReportStatus;
@@ -203,6 +243,48 @@ export interface InvestmentReportJob {
   updatedAt: string;
   report: InvestmentReport | null;
   error: InvestmentReportError | null;
+  reviewStatus: ReportReviewStatus;
+  reviewedAt: string | null;
+  publishedAt: string | null;
+  shareToken: string | null;
+  outcome: ReportOutcome | null;
+}
+
+export interface ReportShare {
+  reportId: string;
+  shareToken: string;
+  shareUrlPath: string;
+}
+
+export interface SharedReportOutcome {
+  status: ReportOutcomeStatus;
+  realizedCase: InvestmentScenarioCase | null;
+  evaluatedAt: string;
+  window: { start: string | null; end: string | null; barCount: number; requiredBars: number };
+  quality: { status: InformationQualityStatus; warnings: string[] };
+}
+
+export interface SharedReport {
+  symbol: string;
+  timeframe: Timeframe;
+  asOf: string;
+  generatedAt: string;
+  publishedAt: string;
+  title: string;
+  executiveSummary: string;
+  outlook: InvestmentReport["outlook"];
+  risks: InvestmentRisk[];
+  evidence: ReferenceFact[];
+  disclaimer: string;
+  chart: ChanChartData;
+  quality: { status: "ok" | "degraded"; warnings: string[] };
+  outcome: SharedReportOutcome | null;
+}
+
+export interface ReportPublication {
+  reportId: string;
+  publishedAt: string;
+  reviewStatus: ReportReviewStatus;
 }
 
 export interface InvestmentReportRequest {

@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 from app.db import Database
-from app.main import app, create_app
+from app.main import create_app
 from app.reporting import AgentRuntimeError, information_reference
 from httpx import ASGITransport, AsyncClient
 
@@ -12,8 +12,8 @@ class FakeInformationService:
         self.quality_status = quality_status
         self.calls = []
 
-    def get_information(self, symbol, *, limit=20):
-        self.calls.append((symbol, limit))
+    def get_information(self, symbol, *, limit=20, as_of=None):
+        self.calls.append((symbol, limit, as_of))
         return {
             "symbol": "002940.SZ",
             "snapshot_id": "information-stable",
@@ -198,7 +198,7 @@ def _valid_runtime_draft(run_id, news_ref):
 
 @pytest.mark.anyio
 async def test_cors_allows_local_web_origin():
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
         response = await client.options(
             "/api/watchlist",
             headers={
@@ -214,7 +214,7 @@ async def test_cors_allows_local_web_origin():
 
 @pytest.mark.anyio
 async def test_watchlist_crud_and_limit():
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
         response = await client.post("/api/watchlist", json={"symbol": "600000.SH"})
         assert response.status_code == 201
         assert (await client.get("/api/watchlist")).json()[0]["symbol"] == "600000.SH"
@@ -224,7 +224,7 @@ async def test_watchlist_crud_and_limit():
 
 @pytest.mark.anyio
 async def test_batch_report_and_review_are_replayable():
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
         created = await client.post("/api/batches", json={"symbols": ["600000.SH"]})
         assert created.status_code == 201
         batch = await client.get(f"/api/batches/{created.json()['id']}")
@@ -234,7 +234,7 @@ async def test_batch_report_and_review_are_replayable():
         report_id = run.json()["report_id"]
         report = await client.get(f"/api/reports/{report_id}")
         assert report.status_code == 200
-        review = await client.post(f"/api/reports/{report_id}/reviews", json={"decision": "accept", "note": "ok"})
+        review = await client.post(f"/api/reports/{report_id}/reviews", json={"decision": "accepted", "note": "ok"})
         assert review.status_code == 201
 
 
@@ -268,6 +268,11 @@ async def test_report_create_returns_202_then_poll_returns_hydrated_report():
             "as_of",
             "input_digest",
             "attempt_count",
+            "review_status",
+            "reviewed_at",
+            "published_at",
+            "share_token",
+            "outcome",
             "updated_at",
             "report",
             "error",
@@ -456,6 +461,200 @@ async def test_report_retry_accepts_empty_object_and_rejects_extra_fields():
     assert accepted.json() == {"report_id": report_id, "status": "queued", "cached": False}
 
 
+class FakeOutcomeMarketProvider:
+    """展望窗口行情：锚定日与报告固化基准一致，随后走出向上突破。"""
+
+    def __init__(self, closes=("20.80", "21.20", "21.50", "21.30", "21.60")):
+        self.closes = closes
+        self.calls = []
+
+    def daily(self, code, *, as_of=None, start_date=None, end_date=None):
+        self.calls.append((code, start_date.isoformat(), end_date.isoformat()))
+        rows = [{"trade_date": "20260807", "close": "20.60", "qfq_close": "20.60"}]
+        for index, close in enumerate(self.closes):
+            rows.append(
+                {
+                    "trade_date": f"202608{10 + index:02d}",
+                    "close": close,
+                    "qfq_close": close,
+                }
+            )
+        return rows
+
+
+async def _completed_report(client, scheduler):
+    created = await client.post("/api/market/002940.SZ/reports", json={"timeframe": "1d"})
+    scheduler.run_next()
+    return created.json()["report_id"]
+
+
+def _closed_loop_app(scheduler, provider=None, database=None):
+    information_service = FakeInformationService()
+    return create_app(
+        database=database,
+        market_service=FakeReportMarketService(),
+        information_service=information_service,
+        agent_runtime_client=FakeAgentRuntimeClient(
+            information_service.get_information("002940.SZ")
+        ),
+        report_scheduler=scheduler,
+        report_clock=lambda: datetime(2026, 8, 13, 10, tzinfo=UTC),
+        outcome_market_provider=provider or FakeOutcomeMarketProvider(),
+        outcome_clock=lambda: datetime(2026, 9, 10, 9, tzinfo=UTC),
+    )
+
+
+@pytest.mark.anyio
+async def test_report_publish_requires_accepted_review():
+    scheduler = RecordingScheduler()
+    instance = _closed_loop_app(scheduler)
+    async with AsyncClient(transport=ASGITransport(app=instance), base_url="http://test") as client:
+        report_id = await _completed_report(client, scheduler)
+
+        before_review = await client.post(f"/api/reports/{report_id}/publish")
+        rejected = await client.post(
+            f"/api/reports/{report_id}/reviews",
+            json={"decision": "rejected", "reviewer": "analyst", "note": "结构证据不足"},
+        )
+        after_reject = await client.post(f"/api/reports/{report_id}/publish")
+        accepted = await client.post(
+            f"/api/reports/{report_id}/reviews",
+            json={"decision": "accepted", "reviewer": "analyst"},
+        )
+        published = await client.post(f"/api/reports/{report_id}/publish")
+        republished = await client.post(f"/api/reports/{report_id}/publish")
+        listed = await client.get("/api/reports/published")
+        envelope = await client.get(f"/api/reports/{report_id}")
+
+    assert before_review.status_code == 409
+    assert rejected.status_code == 201
+    assert after_reject.status_code == 409
+    assert accepted.status_code == 201
+    assert published.status_code == 200
+    assert published.json()["review_status"] == "accepted"
+    assert published.json()["published_at"]
+    assert republished.json()["published_at"] == published.json()["published_at"]
+    assert [item["report_id"] for item in listed.json()] == [report_id]
+    assert envelope.json()["review_status"] == "accepted"
+    assert envelope.json()["published_at"] == published.json()["published_at"]
+
+
+@pytest.mark.anyio
+async def test_review_rejects_unknown_decision_and_unfinished_report():
+    scheduler = RecordingScheduler()
+    instance = _closed_loop_app(scheduler)
+    async with AsyncClient(transport=ASGITransport(app=instance), base_url="http://test") as client:
+        created = await client.post("/api/market/002940.SZ/reports", json={"timeframe": "1d"})
+        report_id = created.json()["report_id"]
+        while_queued = await client.post(
+            f"/api/reports/{report_id}/reviews", json={"decision": "accepted"}
+        )
+        scheduler.run_next()
+        invalid_decision = await client.post(
+            f"/api/reports/{report_id}/reviews", json={"decision": "maybe"}
+        )
+        missing = await client.post(
+            "/api/reports/00000000-0000-4000-8000-000000000000/reviews",
+            json={"decision": "accepted"},
+        )
+
+    assert while_queued.status_code == 409
+    assert invalid_decision.status_code == 422
+    assert missing.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_report_outcome_evaluates_window_and_feeds_quality_dashboard():
+    scheduler = RecordingScheduler()
+    provider = FakeOutcomeMarketProvider()
+    instance = _closed_loop_app(scheduler, provider)
+    async with AsyncClient(transport=ASGITransport(app=instance), base_url="http://test") as client:
+        report_id = await _completed_report(client, scheduler)
+        await client.post(f"/api/reports/{report_id}/reviews", json={"decision": "accepted"})
+
+        before = await client.get(f"/api/reports/{report_id}/outcome")
+        evaluated = await client.post(f"/api/reports/{report_id}/outcome")
+        stored = await client.get(f"/api/reports/{report_id}/outcome")
+        envelope = await client.get(f"/api/reports/{report_id}")
+        unpublished_quality = await client.get("/api/reports/quality")
+        internal_quality = await client.get("/api/reports/quality?scope=all")
+        await client.post(f"/api/reports/{report_id}/publish")
+        published_quality = await client.get("/api/reports/quality")
+
+    assert before.status_code == 404
+    assert evaluated.status_code == 200
+    assert evaluated.json()["status"] == "realized"
+    assert evaluated.json()["realized_case"] == "bullish"
+    assert evaluated.json()["window"]["bar_count"] == 5
+    assert provider.calls == [("002940.SZ", "2026-08-07", "2026-09-10")]
+    assert stored.json()["realized_case"] == "bullish"
+    assert envelope.json()["outcome"]["realized_case"] == "bullish"
+    # 尚未发布时对客看板不计入，内部复盘视角能看到。
+    assert unpublished_quality.json()["scope"] == "published"
+    assert unpublished_quality.json()["outcome"]["evaluated"] == 0
+    assert unpublished_quality.json()["review"]["decided"] == 0
+    assert internal_quality.json()["outcome"]["evaluated"] == 1
+    assert internal_quality.json()["review"]["decided"] == 1
+    assert published_quality.json()["review"] == {
+        "accepted": 1,
+        "rejected": 0,
+        "decided": 1,
+        "accept_rate": "1.0000",
+    }
+    assert published_quality.json()["outcome"]["realized"] == 1
+    assert published_quality.json()["outcome"]["realized_rate_over_conclusive"] == "1.0000"
+    assert published_quality.json()["outcome"]["realized_rate_over_evaluated"] == "1.0000"
+
+
+@pytest.mark.anyio
+async def test_quality_dashboard_excludes_rejected_reports_from_client_track_record():
+    scheduler = RecordingScheduler()
+    instance = _closed_loop_app(scheduler)
+    async with AsyncClient(transport=ASGITransport(app=instance), base_url="http://test") as client:
+        report_id = await _completed_report(client, scheduler)
+        await client.post(f"/api/reports/{report_id}/reviews", json={"decision": "rejected"})
+        await client.post(f"/api/reports/{report_id}/outcome")
+        published = await client.get("/api/reports/quality")
+        internal = await client.get("/api/reports/quality?scope=all")
+        invalid = await client.get("/api/reports/quality?scope=everything")
+
+    assert published.json()["outcome"]["evaluated"] == 0
+    assert published.json()["review"]["rejected"] == 0
+    assert internal.json()["scope"] == "all"
+    assert internal.json()["outcome"]["evaluated"] == 1
+    assert internal.json()["review"]["rejected"] == 1
+    assert invalid.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_report_outcome_stays_pending_before_minimum_window():
+    scheduler = RecordingScheduler()
+    provider = FakeOutcomeMarketProvider(closes=("20.80", "21.20"))
+    instance = _closed_loop_app(scheduler, provider)
+    async with AsyncClient(transport=ASGITransport(app=instance), base_url="http://test") as client:
+        report_id = await _completed_report(client, scheduler)
+        evaluated = await client.post(f"/api/reports/{report_id}/outcome")
+
+    assert evaluated.status_code == 200
+    assert evaluated.json()["status"] == "pending"
+    assert evaluated.json()["realized_case"] is None
+
+
+@pytest.mark.anyio
+async def test_outcome_evaluation_rejects_unfinished_and_missing_reports():
+    scheduler = RecordingScheduler()
+    instance = _closed_loop_app(scheduler)
+    async with AsyncClient(transport=ASGITransport(app=instance), base_url="http://test") as client:
+        created = await client.post("/api/market/002940.SZ/reports", json={"timeframe": "1d"})
+        queued = await client.post(f"/api/reports/{created.json()['report_id']}/outcome")
+        missing = await client.post(
+            "/api/reports/00000000-0000-4000-8000-000000000000/outcome"
+        )
+
+    assert queued.status_code == 409
+    assert missing.status_code == 404
+
+
 @pytest.mark.anyio
 async def test_information_endpoint_returns_complete_dto_without_market_service():
     information_service = FakeInformationService()
@@ -468,7 +667,7 @@ async def test_information_endpoint_returns_complete_dto_without_market_service(
 
     assert response.status_code == 200
     assert response.json() == information_service.get_information("002940.SZ", limit=10)
-    assert information_service.calls == [("002940.SZ", 10), ("002940.SZ", 10)]
+    assert information_service.calls == [("002940.SZ", 10, None), ("002940.SZ", 10, None)]
 
 
 @pytest.mark.anyio

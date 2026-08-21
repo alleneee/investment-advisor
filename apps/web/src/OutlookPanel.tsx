@@ -1,12 +1,32 @@
-import type { InvestmentReportJob, InvestmentReportStatus, InvestmentScenario, ReferenceFact } from "./types";
+import { useEffect, useState } from "react";
+import type {
+  InvestmentConfidence,
+  InvestmentDirection,
+  InvestmentReportJob,
+  InvestmentReportStatus,
+  InvestmentScenario,
+  InvestmentScenarioCase,
+  ReferenceFact,
+  ReportCondition,
+  ReportOutcome,
+  ReportOutcomeStatus,
+  ReportReviewDecision,
+} from "./types";
 
 interface OutlookPanelProps {
   job: InvestmentReportJob | null;
   pendingStatus?: InvestmentReportStatus | null;
   busy?: boolean;
   requestError?: string | null;
+  deliveryBusy?: boolean;
+  deliveryError?: string | null;
   onGenerate: () => void;
   onRetry: () => void;
+  onReview?: (decision: ReportReviewDecision) => void;
+  onPublish?: () => void;
+  onEvaluateOutcome?: () => void;
+  onCreateShare?: () => void;
+  onRevokeShare?: () => void;
 }
 
 const DISCLAIMER = "本报告基于固化数据生成，仅供研究参考，不构成任何投资建议。";
@@ -16,8 +36,15 @@ export function OutlookPanel({
   pendingStatus = null,
   busy = false,
   requestError = null,
+  deliveryBusy = false,
+  deliveryError = null,
   onGenerate,
   onRetry,
+  onReview,
+  onPublish,
+  onEvaluateOutcome,
+  onCreateShare,
+  onRevokeShare,
 }: OutlookPanelProps) {
   const status = job?.status ?? pendingStatus;
   return <section className="outlook-panel" aria-labelledby="outlook-heading">
@@ -44,8 +71,122 @@ export function OutlookPanel({
       <div className="scenario-grid">{job.report.outlook.scenarios.map((scenario) => <ScenarioCard scenario={scenario} key={scenario.case} />)}</div>
       <div className="outlook-risk-section"><span className="outlook-subheading">风险边界</span><div className="risk-list">{job.report.risks.map((risk, index) => <p key={`${risk.narrative}-${index}`}>{risk.narrative}</p>)}</div></div>
       <p className="outlook-disclaimer">{DISCLAIMER}</p>
+      <DeliverySection
+        job={job}
+        busy={deliveryBusy}
+        error={deliveryError}
+        onReview={onReview}
+        onPublish={onPublish}
+        onEvaluateOutcome={onEvaluateOutcome}
+        onCreateShare={onCreateShare}
+        onRevokeShare={onRevokeShare}
+      />
     </div>}
   </section>;
+}
+
+function DeliverySection({
+  job,
+  busy,
+  error,
+  onReview,
+  onPublish,
+  onEvaluateOutcome,
+  onCreateShare,
+  onRevokeShare,
+}: {
+  job: InvestmentReportJob;
+  busy: boolean;
+  error: string | null;
+  onReview?: (decision: ReportReviewDecision) => void;
+  onPublish?: () => void;
+  onEvaluateOutcome?: () => void;
+  onCreateShare?: () => void;
+  onRevokeShare?: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => setCopied(false), [job.shareToken]);
+  if (!onReview && !onPublish && !onEvaluateOutcome) return null;
+  const published = Boolean(job.publishedAt);
+  return <div className="outlook-delivery" aria-labelledby="delivery-heading">
+    <span className="outlook-subheading" id="delivery-heading">对客交付</span>
+    <dl className="delivery-status">
+      <div><dt>审阅</dt><dd>{reviewLabel(job.reviewStatus)}</dd></div>
+      <div><dt>发布</dt><dd>{published ? <time dateTime={job.publishedAt ?? undefined}>{job.publishedAt}</time> : "尚未发布"}</dd></div>
+    </dl>
+    <div className="delivery-actions">
+      {onReview && job.reviewStatus !== "accepted" && <button type="button" disabled={busy} onClick={() => onReview("accepted")}>通过审阅</button>}
+      {onReview && job.reviewStatus !== "rejected" && <button type="button" disabled={busy} onClick={() => onReview("rejected")}>驳回</button>}
+      {onPublish && job.reviewStatus === "accepted" && !published && <button type="button" disabled={busy} onClick={onPublish}>发布给客户</button>}
+      {onEvaluateOutcome && <button type="button" disabled={busy} onClick={onEvaluateOutcome}>{job.outcome ? "重新评估兑现" : "评估情景兑现"}</button>}
+    </div>
+    {published && (onCreateShare || onRevokeShare) && <div className="delivery-share">
+      <span className="outlook-subheading">分享链接</span>
+      {job.shareToken
+        ? <>
+          <p className="share-link-text">{shareUrl(job.shareToken)}</p>
+          <div className="delivery-actions">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void copyShareLink(job.shareToken as string, () => setCopied(true))}
+            >{copied ? "已复制" : "复制链接"}</button>
+            {onRevokeShare && <button type="button" disabled={busy} onClick={onRevokeShare}>撤销分享</button>}
+          </div>
+        </>
+        : onCreateShare && <div className="delivery-actions">
+          <button type="button" disabled={busy} onClick={onCreateShare}>生成分享链接</button>
+        </div>}
+    </div>}
+    {error && <p className="delivery-error" role="alert">{error}</p>}
+    {job.outcome && <OutcomeSummary outcome={job.outcome} />}
+  </div>;
+}
+
+export function shareUrl(token: string): string {
+  return `${window.location.origin}${window.location.pathname}#/share/${encodeURIComponent(token)}`;
+}
+
+async function copyShareLink(token: string, onCopied: () => void) {
+  if (!navigator.clipboard) return;
+  try {
+    await navigator.clipboard.writeText(shareUrl(token));
+    onCopied();
+  } catch {
+    // 剪贴板不可用时保持链接文本可见，用户可手动复制。
+  }
+}
+
+function OutcomeSummary({ outcome }: { outcome: ReportOutcome }) {
+  return <div className="delivery-outcome">
+    <dl className="delivery-status">
+      <div><dt>兑现结论</dt><dd>{outcomeStatusLabel(outcome.status, outcome.realizedCase)}</dd></div>
+      <div><dt>观察窗口</dt><dd>{outcome.window.barCount} / {outcome.window.requiredBars} 个交易日</dd></div>
+    </dl>
+    {outcome.quality.warnings.length > 0 && <ul className="delivery-warnings">
+      {outcome.quality.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+    </ul>}
+  </div>;
+}
+
+function reviewLabel(value: InvestmentReportJob["reviewStatus"]): string {
+  return { pending: "待审阅", accepted: "已通过", rejected: "已驳回" }[value];
+}
+
+export function outcomeStatusLabel(
+  status: ReportOutcomeStatus,
+  realizedCase: InvestmentScenarioCase | null,
+): string {
+  if (status === "realized" && realizedCase) {
+    return `${scenarioLabel(realizedCase)}情景兑现`;
+  }
+  return {
+    pending: "窗口尚未走满，暂不判定",
+    realized: "已兑现",
+    none_realized: "三个情景均未兑现",
+    ambiguous: "多个情景同时成立，需人工复核",
+    inconclusive: "存在无法判定的条件",
+  }[status];
 }
 
 function ReportProgress({ label, detail }: { label: string; detail: string }) {
@@ -63,28 +204,28 @@ function ScenarioCard({ scenario }: { scenario: InvestmentScenario }) {
   </article>;
 }
 
-function formatFactValue(fact: ReferenceFact): string {
+export function formatFactValue(fact: ReferenceFact): string {
   if (fact.value == null) return "—";
   return `${String(fact.value)}${fact.unit ? ` ${fact.unit}` : ""}`;
 }
 
-function scenarioLabel(value: InvestmentScenario["case"]): string {
+export function scenarioLabel(value: InvestmentScenarioCase): string {
   return { bullish: "偏强", base: "基准", bearish: "偏弱" }[value];
 }
 
-function scenarioIndex(value: InvestmentScenario["case"]): string {
+export function scenarioIndex(value: InvestmentScenarioCase): string {
   return { bullish: "A", base: "B", bearish: "C" }[value];
 }
 
-function directionLabel(value: NonNullable<InvestmentReportJob["report"]>["outlook"]["direction"]): string {
+export function directionLabel(value: InvestmentDirection): string {
   return { bullish: "方向偏强", sideways: "区间观察", bearish: "方向偏弱", uncertain: "方向待确认" }[value];
 }
 
-function confidenceLabel(value: NonNullable<InvestmentReportJob["report"]>["outlook"]["confidence"]): string {
+export function confidenceLabel(value: InvestmentConfidence): string {
   return { low: "低置信度", medium: "中置信度", high: "高置信度" }[value];
 }
 
-function conditionLabel(value: InvestmentScenario["trigger"]["operator"]): string {
+export function conditionLabel(value: ReportCondition["operator"]): string {
   return {
     break_above: "向上突破",
     hold_above: "保持上方",

@@ -1,5 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, createHttpApi, toInvestmentReportJob, toReport, toStockInformation } from "./api";
+import {
+  ApiError,
+  createHttpApi,
+  toInvestmentReportJob,
+  toReport,
+  toReportOutcome,
+  toReportPublication,
+  toReportShare,
+  toSharedReport,
+  toStockInformation,
+} from "./api";
 
 function payload() {
   return {
@@ -140,6 +150,47 @@ function reportEnvelope() {
       review: { status: "pending" },
     },
     error: null,
+    review_status: "pending",
+    reviewed_at: null,
+    published_at: null,
+    share_token: null,
+    outcome: null,
+  };
+}
+
+export function outcomePayload() {
+  return {
+    schema_version: "report_outcome.v1",
+    report_id: "report-1",
+    symbol: "002940.SZ",
+    as_of: "2026-08-13",
+    evaluated_at: "2026-09-12T09:00:00+08:00",
+    window: { start: "20260814", end: "20260911", bar_count: 20, required_bars: 20 },
+    scenarios: [
+      {
+        case: "bullish",
+        trigger: {
+          operator: "break_above",
+          fact_ref: "market.recent_high",
+          level: "21.00",
+          hit: true,
+          decisive_date: "20260818",
+          unevaluable_reason: null,
+        },
+        invalidation: {
+          operator: "structure_invalidated",
+          fact_ref: "chan.structure",
+          hit: null,
+          decisive_date: null,
+          unevaluable_reason: "structure_condition_not_replayable",
+        },
+      },
+    ],
+    quality: { status: "ok", warnings: [] },
+    status: "realized",
+    adjudication: "single_candidate",
+    realized_case: "bullish",
+    realized_cases: ["bullish"],
   };
 }
 
@@ -246,6 +297,11 @@ describe("information and investment report API", () => {
         updated_at: "2026-08-13T09:06:00+08:00",
         report: null,
         error: path.endsWith("report-002940") ? null : { code: "PROVIDER_ERROR", message: "生成失败", retryable: true },
+        review_status: "pending",
+        reviewed_at: null,
+        published_at: null,
+        share_token: null,
+        outcome: null,
       });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -491,5 +547,238 @@ describe("information and investment report API", () => {
     raw.generated_at = generatedAt;
 
     expect(() => toStockInformation(raw)).toThrow(ApiError);
+  });
+});
+
+describe("report delivery adapter", () => {
+  it("maps review and publication state onto the job", () => {
+    const raw = mutableReportEnvelope();
+    raw.review_status = "accepted";
+    raw.reviewed_at = "2026-08-13T10:00:00+08:00";
+    raw.published_at = "2026-08-13T10:05:00+08:00";
+
+    const job = toInvestmentReportJob(raw);
+
+    expect(job.reviewStatus).toBe("accepted");
+    expect(job.reviewedAt).toBe("2026-08-13T10:00:00+08:00");
+    expect(job.publishedAt).toBe("2026-08-13T10:05:00+08:00");
+  });
+
+  it("rejects an unknown review status", () => {
+    const raw = mutableReportEnvelope();
+    raw.review_status = "approved";
+
+    expect(() => toInvestmentReportJob(raw)).toThrow(ApiError);
+  });
+
+  it("maps an evaluated outcome including unevaluable conditions", () => {
+    const outcome = toReportOutcome(outcomePayload());
+
+    expect(outcome.status).toBe("realized");
+    expect(outcome.adjudication).toBe("single_candidate");
+    expect(outcome.realizedCase).toBe("bullish");
+    expect(outcome.window).toEqual({ start: "20260814", end: "20260911", barCount: 20, requiredBars: 20 });
+    expect(outcome.scenarios[0].trigger).toEqual({
+      operator: "break_above",
+      factRef: "market.recent_high",
+      level: "21.00",
+      hit: true,
+      decisiveDate: "20260818",
+      unevaluableReason: null,
+    });
+    expect(outcome.scenarios[0].invalidation.hit).toBeNull();
+    expect(outcome.scenarios[0].invalidation.unevaluableReason).toBe("structure_condition_not_replayable");
+  });
+
+  it("carries the outcome through the report job envelope", () => {
+    const raw = mutableReportEnvelope();
+    raw.outcome = outcomePayload();
+
+    expect(toInvestmentReportJob(raw).outcome?.realizedCase).toBe("bullish");
+  });
+
+  it("rejects an unknown outcome status", () => {
+    const raw = outcomePayload() as Record<string, unknown>;
+    raw.status = "partially_realized";
+
+    expect(() => toReportOutcome(raw)).toThrow(ApiError);
+  });
+
+  it("maps a publication response", () => {
+    const publication = toReportPublication({
+      report_id: "report-1",
+      review_status: "accepted",
+      published_at: "2026-08-13T10:05:00+08:00",
+    });
+
+    expect(publication).toEqual({
+      reportId: "report-1",
+      reviewStatus: "accepted",
+      publishedAt: "2026-08-13T10:05:00+08:00",
+    });
+  });
+
+  it("carries the share token through the report job envelope", () => {
+    const raw = mutableReportEnvelope();
+    raw.share_token = "token-1";
+
+    expect(toInvestmentReportJob(raw).shareToken).toBe("token-1");
+  });
+});
+
+function sharedReportPayload() {
+  const closeFact = { ref: "market.latest_close", kind: "price_level", label: "最新收盘", value: 20.6, unit: "CNY" };
+  const structureFact = { ref: "chan.structure", kind: "structure", label: "当前结构", value: "中枢震荡" };
+  const newsFact = { ref: "news.latest", kind: "news", label: "公司进展", value: "经营保持稳定", url: "https://example.com/news/1" };
+  const scenarioInputs: Array<[string, string, string, typeof closeFact | typeof structureFact]> = [
+    ["bullish", "结构确认后观察偏强情景。", "break_above", closeFact],
+    ["base", "中枢约束下保持基准观察。", "structure_confirmed", structureFact],
+    ["bearish", "结构失效后观察偏弱情景。", "break_below", closeFact],
+  ];
+  const scenarios = scenarioInputs.map(([scenarioCase, narrative, operator, fact]) => ({
+    case: scenarioCase,
+    narrative,
+    trigger: { operator, fact_ref: fact.ref, fact },
+    invalidation: { operator: "structure_invalidated", fact_ref: structureFact.ref, fact: structureFact },
+    evidence_refs: [fact.ref, newsFact.ref],
+    evidence: [fact, newsFact],
+  }));
+  return {
+    symbol: "002940.SZ",
+    timeframe: "1d",
+    as_of: "2026-08-13",
+    generated_at: "2026-08-13T09:05:00+08:00",
+    published_at: "2026-08-14T09:00:00+08:00",
+    title: "结构与资讯综合研判",
+    executive_summary: "结构处于等待确认阶段。",
+    outlook: {
+      horizon: "5-20-trading-days",
+      direction: "uncertain",
+      confidence: "medium",
+      thesis: "以后续结构确认与失效条件切换情景。",
+      scenarios,
+    },
+    risks: [{ narrative: "资讯存在时效差异。", evidence_refs: [newsFact.ref], evidence: [newsFact] }],
+    evidence: [closeFact, structureFact, newsFact],
+    disclaimer: "本报告基于固化数据生成，仅供研究参考，不构成任何投资建议。",
+    market_snapshot: {
+      bars: [
+        { occurred_at: "2026-08-11T00:00:00Z", open: "20", close: "20.2", low: "19.8", high: "20.5", volume: "90" },
+        { occurred_at: "2026-08-12T00:00:00Z", open: "20.2", close: "20.6", low: "20.1", high: "21.0", volume: "100" },
+      ],
+      window: { start: "20260811", end: "20260812", bar_count: 2 },
+      quality: { status: "ok", warnings: [] },
+    },
+    chan_analysis: {
+      timeframe: "1d",
+      snapshot: {
+        bars: [{ occurred_at: "2026-08-11T00:00:00Z" }, { occurred_at: "2026-08-12T00:00:00Z" }],
+        strokes: [],
+        confirmed: [{ direction: "up", start_index: 0, end_index: 1, start_price: "19.8", end_price: "21.0" }],
+        provisional: [],
+        centers: [],
+      },
+    },
+    outcome: {
+      status: "realized",
+      realized_case: "bullish",
+      evaluated_at: "2026-09-10T09:00:00+08:00",
+      window: { start: "20260813", end: "20260909", bar_count: 20, required_bars: 20 },
+      quality: { status: "ok", warnings: ["示例告警"] },
+    },
+  };
+}
+
+describe("shared report adapter", () => {
+  it("maps the sanitized shared view and rebuilds the chan chart", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(sharedReportPayload()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const shared = await createHttpApi("").getSharedReport("token-1");
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/shared/token-1", expect.any(Object));
+    expect(shared).toMatchObject({
+      symbol: "002940.SZ",
+      timeframe: "1d",
+      publishedAt: "2026-08-14T09:00:00+08:00",
+      title: "结构与资讯综合研判",
+      outcome: {
+        status: "realized",
+        realizedCase: "bullish",
+        window: { barCount: 20, requiredBars: 20 },
+        quality: { warnings: ["示例告警"] },
+      },
+    });
+    expect(shared.chart.bars).toHaveLength(2);
+    expect(shared.chart.strokes[0]).toMatchObject({
+      startAt: "2026-08-11T00:00:00Z",
+      endAt: "2026-08-12T00:00:00Z",
+      state: "confirmed",
+    });
+    expect(shared.outlook.scenarios[0]).toMatchObject({
+      case: "bullish",
+      trigger: { factRef: "market.latest_close", fact: { value: 20.6, unit: "CNY" } },
+    });
+    expect(shared.evidence.map((fact) => fact.ref)).toEqual([
+      "market.latest_close", "chan.structure", "news.latest",
+    ]);
+  });
+
+  it("rejects a shared payload that carries internal fields", () => {
+    const raw = sharedReportPayload() as Record<string, unknown>;
+    raw.input_digest = "digest-1";
+
+    expect(() => toSharedReport(raw)).toThrow(ApiError);
+  });
+
+  it("rejects a tampered shared disclaimer", () => {
+    const raw = sharedReportPayload() as Record<string, unknown>;
+    raw.disclaimer = "保证投资收益。";
+
+    expect(() => toSharedReport(raw)).toThrow(ApiError);
+  });
+
+  it("keeps the shared outcome optional", () => {
+    const raw = sharedReportPayload() as Record<string, unknown>;
+    raw.outcome = null;
+
+    expect(toSharedReport(raw).outcome).toBeNull();
+  });
+
+  it("surfaces 404 for revoked or unknown share tokens", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ detail: "分享链接无效" }, 404)));
+
+    await expect(createHttpApi("").getSharedReport("expired")).rejects.toEqual(
+      new ApiError("分享链接无效", 404),
+    );
+  });
+
+  it("creates and revokes a share link over http", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        return jsonResponse(
+          { report_id: "report-1", share_token: "token-1", share_url_path: "#/share/token-1" },
+          201,
+        );
+      }
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createHttpApi("");
+
+    const share = await api.createInvestmentReportShare("report-1");
+    await api.revokeInvestmentReportShare("report-1");
+
+    expect(share).toEqual({ reportId: "report-1", shareToken: "token-1", shareUrlPath: "#/share/token-1" });
+    expect(fetchMock).toHaveBeenCalledWith("/api/reports/report-1/share", expect.objectContaining({ method: "POST" }));
+    expect(fetchMock).toHaveBeenCalledWith("/api/reports/report-1/share", expect.objectContaining({ method: "DELETE" }));
+  });
+
+  it("rejects a share path that does not match its token", () => {
+    expect(() => toReportShare({
+      report_id: "report-1",
+      share_token: "token-1",
+      share_url_path: "#/share/other",
+    })).toThrow(ApiError);
   });
 });
