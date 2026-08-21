@@ -100,17 +100,25 @@ KPI 值约 32px，次级 18px，正文 14px，标签 11px。对比度：正文�
 
 ## 展示格式
 
-新增 `apps/web/src/ui/formatDisplay.ts`，只用于 UI：
+新增 `apps/web/src/ui/formatDisplay.ts`，只用于 UI。金额仍是字符串，禁止 `Number`
+做账本运算；展示换算允许 `Number` 失败时回退原文。
 
-- 千分位只加在小数点左侧，保留原小数部分；失败则原样显示。
-- 带符号盈亏：正数前加 `+`，负数保留 `-`，零不带符号。
+- `formatMoney(text)`：千分位只加在小数点左侧，保留原小数部分。
+- `formatSignedMoney(text)`：正数前加 `+`，负数保留 `-`，零不带符号。
+- `formatRate(text)`：把 `0–1` 小数（如 `"1"`、`"-0.012"`、`"0.5"`）格式为
+  `(Number(text) * 100).toFixed(2) + "%"`，与现网 `percentageText` / `rateLabel`
+  一致。失败回退原文。
+- 比率字段必须走 `formatRate`，禁止只加千分位导致 KPI 显示 `1` 或 `-0.012`。
 - `tone`：`up` 红、`down` 绿、`risk` 橙、`neutral` 主文字。
-- 当日盈亏、周期盈亏、闭合周期盈亏：正 `up`，负 `down`，零 `neutral`。
-- 最大回撤、成立以来回撤：`risk`。
-- 胜率、纪律率、现金、权益、股数：`neutral`，除非字段本身是带符号盈亏。
-- `null` / 不可用：`—`，`neutral`，不编造 `0`。
+- 当日盈亏、周期盈亏、闭合周期盈亏、资金流调整收益率：正 `up`，负 `down`，零 `neutral`。
+- 最大回撤、成立以来回撤：`risk`，展示用 `formatRate`。
+- 胜率、纪律率、审阅通过率、兑现率：`neutral` + `formatRate`。
+- 现金、权益、股数、日期：`neutral`；金额用 `formatMoney`。
+- 指标 `null`：主值 `—`。质量看板比率 `null` 仍显示「样本不足」（现网文案，测试在查）。
+- `MetricTile` 可带 `detail?: string`（对应现有 `unavailableReason` 或「已决定 n/m」），
+  显示在数字下方小字。
 
-接口 JSON 仍用原字符串。测试若断言金额可见文本，改为格式化后的文本。
+接口 JSON 仍用原字符串。测试若断言可见金额/百分比，改为格式化后的文本。
 
 ## 共用零件
 
@@ -120,8 +128,8 @@ KPI 值约 32px，次级 18px，正文 14px，标签 11px。对比度：正文�
 |---|---|
 | `Icon` | Lucide 统一出口 |
 | `Atmosphere` | 全站画布层 |
-| `MetricTile` | 标签 + 大数字 + `tone` |
-| `KpiStrip` | 一排 MetricTile |
+| `MetricTile` | 标签 + 大数字 + `tone` + 可选 `detail`；也可在值槽放 `StatusChip` |
+| `KpiStrip` | 一排格子，数字格或状态格均可 |
 | `Panel` | 玻璃卡片 |
 | `SplitPane` | 左约 0.9fr / 右约 1.3fr，≤1100px 单列 |
 | `SegmentedControl` | `aria-pressed` 段控 |
@@ -131,7 +139,8 @@ KPI 值约 32px，次级 18px，正文 14px，标签 11px。对比度：正文�
 
 `Notice` 保留 `role="alert"`，改色板，左侧 Lucide `AlertTriangle`，不要感叹号字符。
 
-零件测试（薄）：`MetricTile` 色；`formatDisplay`。不测像素、不测 canvas 帧。
+零件测试（薄）：`MetricTile` 色；`formatMoney` / `formatSignedMoney` / `formatRate`
+（含 `"1"` → `100.00%`、`"-0.012"` → `-1.20%`）。不测像素、不测 canvas 帧。
 流水文案里的乘号「价格 × 股数」是数学符号，保留，不算图标替代。
 
 ## 页面拼装
@@ -143,30 +152,53 @@ KPI 值约 32px，次级 18px，正文 14px，标签 11px。对比度：正文�
 
 1. 展示标题「每日交易日记」+ 日期。
 2. `KpiStrip`：总权益、可用现金、持仓市值、当日盈亏、成立以来回撤。
-3. `SplitPane`：左持仓表；右成交录入、今日流水、资金流水。
+3. `SplitPane`：左持仓表；右上成交录入，右下今日流水**和资金流水表单**（录入字段不搬走）。
 4. 全宽收盘检查。
 5. 无账户：创建表单进 `Panel` + `EmptyState` 说明，不显示假 KPI。
+6. 「成立以来回撤」继续用 `formatRate`（现为 `percent()`）。
 
 ### 复盘中心
 
 1. 周期 `SegmentedControl`、日期、预览/生成（Lucide 辅图标，文字保留）。
-2. 有确定性结果时 `KpiStrip`：已实现盈亏、闭合周期盈亏、最大回撤、胜率、纪律。
-   无报告不渲染 KPI。
+2. 有确定性结果时 `KpiStrip` 六格，与现有 `MetricBand` 标签一致，不删项：
+   报告期已实现盈亏、闭合周期盈亏、资金流调整收益率、周期最大回撤、胜率、纪律执行率。
+   百分比三格走 `formatRate`；`unavailableReason` 放 `detail`。无报告不渲染 KPI。
 3. `SplitPane`：左版本；右图、理由、周期、比较。
 4. 全宽归因、Pi 总结。
 5. 无历史：`EmptyState`「该周期还没有固化报告。」
 
 ### 今日批次
 
-1. `KpiStrip`：自选只数、已完成、运行中、数据质量（`StatusChip`）。
+1. `KpiStrip` 四格，只从现有 `watchlist` / `progress` 推导，不新增字段：
+   自选只数 `watchlist.length`；已完成数 `progress` 中 `completed`；运行中数
+   `running`；本批状态 `StatusChip`（不是百分比）。状态优先级：
+   有 `failed` →「失败」；否则有 `degraded` →「降级」；否则有 `running`/`queued`
+   →「进行中」；否则全完成 →「完成」；`progress` 为空 →「无批次」。
+   当前打开报告的 `report.quality` 仍只出现在结构报告卡片上，不充当第四格。
 2. `SplitPane`：左自选；右进度 + 结构图。
 3. 全宽资讯、AI 展望。
 4. 无自选/无报告：`EmptyState`，不编造结论。
 5. 「生成本批报告」去掉 `↗`，改 `ArrowUpRight`。
 
-### 研究记录 / 数据快照
+### 研究记录
 
-现有计数进 `KpiStrip` / `MetricTile`，列表进 `DataTable`/`Panel`。口径不变。
+保留标题「质量看板」「运行归档」（测试在查「审阅通过率」）。`KpiStrip` 四格即现网
+`QualityDashboard`，不改口径：
+
+- 审阅通过率：`formatRate(review.acceptRate)`，null 为「样本不足」，detail 为
+  `{accepted}/{decided} 已决定`
+- 有结论兑现率：`formatRate(outcome.realizedRateOverConclusive)`，detail 为
+  `{realized}/{conclusive} 明确结论`
+- 已评估兑现率：`formatRate(outcome.realizedRateOverEvaluated)`
+- 情景分布：主值仍是看多+基准+看空的合计（现网 `padStart(2,"0")`），detail
+  `看多 n · 基准 n · 看空 n`
+
+归档表列：状态点、标的+日期/周期、标题、审阅·兑现。不要改成「总数/失败/降级」。
+
+### 数据快照
+
+四格仍是现网 WATCHLIST / FROZEN / AS-OF DAYS / LATEST AS OF，只换 `MetricTile`。
+下方「固化输入」列表保留。
 
 ### 分享页
 
@@ -174,8 +206,14 @@ KPI 值约 32px，次级 18px，正文 14px，标签 11px。对比度：正文�
 
 ## 图表
 
-不改计算，只改颜色与图例，与 `--up` / `--down` / `--risk` 对齐。K 线涨红跌绿；
-买入红、卖出绿；回撤橙。
+不改计算，只改颜色与图例：
+
+- K 线涨 `--up`，跌 `--down`。
+- 买入叠加 `--up`，卖出叠加 `--down`。
+- 权益线 `--accent` 或 `--text`，回撤 `--risk`。
+- 笔 `--accent`，中枢 `--muted` 描边 + 低透明填充，不用涨跌红绿。
+- 更新 `chan-chart-option.test.ts` / `trading-review-chart-option.test.ts` 里钉死的旧色
+  `#67baa1` / `#e56548`。
 
 ## 状态
 
