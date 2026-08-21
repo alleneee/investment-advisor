@@ -13,6 +13,7 @@ data/*.sqlite3*
 *.tsbuildinfo
 .learnings/
 .superpowers/
+.worktrees/
 .jbeval/
 outputs/
 work/
