@@ -7,6 +7,7 @@ import { SharedReportPage } from "./SharedReportPage";
 import { StockInformationPanel } from "./StockInformationPanel";
 import { TradeJournalPage } from "./TradeJournalPage";
 import { createMockTradingApi, type TradingApi } from "./trading-api";
+import { Atmosphere } from "./ui/Atmosphere";
 import type {
   InvestmentReportJob,
   InvestmentReportStatus,
@@ -505,6 +506,7 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
 
   return (
     <div className="app-shell">
+      <Atmosphere />
       <aside className="rail">
         <div className="brand-mark" aria-label="结构投研台">CH<span>AN</span></div>
         <div className="rail-caption">结构投研台</div>
