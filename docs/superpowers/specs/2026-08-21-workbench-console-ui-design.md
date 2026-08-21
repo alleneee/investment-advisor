@@ -110,7 +110,7 @@ KPI 值约 32px，次级 18px，正文 14px，标签 11px。对比度：正文�
   一致。失败回退原文。
 - 比率字段必须走 `formatRate`，禁止只加千分位导致 KPI 显示 `1` 或 `-0.012`。
 - `tone`：`up` 红、`down` 绿、`risk` 橙、`neutral` 主文字。
-- 当日盈亏、闭合周期盈亏：`formatSignedMoney`；正 `up`，负 `down`，零 `neutral`。
+- 当日盈亏、报告期已实现盈亏、闭合周期盈亏：`formatSignedMoney`；正 `up`，负 `down`，零 `neutral`。
 - 资金流调整收益率、胜率、纪律率、审阅通过率、兑现率：`formatRate`。收益率为正 `up`、
   负 `down`、零 `neutral`；其余比率 `neutral`。不要把 `0.0198` 显示成 `+0.0198`。
 - 最大回撤、成立以来回撤：`risk` + `formatRate`。
