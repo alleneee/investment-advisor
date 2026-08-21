@@ -182,16 +182,19 @@ ChanEngine.replay          30 分钟 K 线（预拉缓存，只读）
 一类的 `sublevel` 必填。二类若依赖次级别回抽则同样填写。三类
 `sublevel` 为 `None`。
 
+一类的 `price` / `occurred_at` 取本级别离开段终点（最后一笔的
+`end_price` / `occurred_at`），不取次级别确认事件。注册表用这个时间判断
+「是否仍属于最后离开段」。二类取次级别第一段反向已确认线段的终点。
+三类取本级别回抽线段终点。
+
 `reason` 使用固定枚举，不使用自由文本：
 
 - `class1_sublevel_market_not_ready`
 - `class1_sublevel_structure_incomplete`
-- `class1_no_trend_divergence`
 - `macd_not_ready`
-- `insufficient_centers`
-- `class2_awaits_class1`
 - `class2_pullback_incomplete`
-- `class3_reentry`（回抽已回到中枢，不是三类）
+
+`insufficient_centers` 只出现在 `trend.unavailable_reason`，不是 `Signal.reason`。
 
 ## 冻结修复
 
@@ -239,8 +242,8 @@ ChanEngine.replay          30 分钟 K 线（预拉缓存，只读）
 
 输入结束仍未破坏的最后一段为 `provisional`，`break_kind=None`。
 
-无法唯一判定时不猜：不输出该段，或将其标 `provisional` 且不写
-`break_kind`。禁止用启发式补线段。
+无法唯一判定时不输出该段，也不标 `provisional`。
+`provisional` 只表示「输入结束时尚未破坏」。禁止用启发式补线段。
 
 ### 线段中枢
 
@@ -282,13 +285,15 @@ ChanEngine.replay          30 分钟 K 线（预拉缓存，只读）
 
 - 离开段 = 最后一个线段中枢之后、同趋势方向的线段序列，价格极值取其高/低
 - 前一段 = 倒数第二个中枢之后、进入最后一个中枢之前的同向离开
-- 面积 = 对应时间窗内同号 MACD 柱之和（上涨比红柱，下跌比绿柱）
+- 面积 = 只累加**同向离开段自身**时间范围内的同号 MACD 柱（上涨比红柱，
+  下跌比绿柱）。中间反向段的柱不计入，也不把两段之间的闭包整段拿来积分。
 - 顶背驰：后段价格更高，面积不更高
 - 底背驰：后段价格更低，面积不更低
 - 价格创新高/低但 MACD 未就绪：`unevaluable`
 
-盘整背驰：仅一个线段中枢时，比较中枢两侧同向离开段的价格与面积。
-`kind=consolidation`，**不**生成一类信号。
+盘整背驰：仅当 `trend.center_count == 1` 时记账。`trend.type` 因
+「≥2 且不单调」落成 `consolidation` 时不算盘整背驰。比较该中枢两侧同向
+离开段的价格与面积。`kind=consolidation`，**不**生成一类信号。
 
 ## 买卖点
 
@@ -306,25 +311,50 @@ ChanEngine.replay          30 分钟 K 线（预拉缓存，只读）
 | `1d` | `30m` | 预拉缓存 |
 | `1w` | `1d` | 已有日线缓存 |
 
-`confirm_class1(parent, child) -> Signal.status`：
+`confirm_class1(parent, child_bars) -> Signal`（含 `status`、`reason`、
+`sublevel`，不是只返回 status 枚举）：
 
-- 次级别行情缺失或窗口对不上本级别离开段：`unevaluable` /
+次级别**先按本级别离开段切片再 `replay`**，禁止先全量回放再挑窗口内事件。
+两者线段不同，确认条件会对不上。
+
+窗口按**交易日包含**，不比较 raw UTC 时间戳。日线 `occurred_at` 是
+「交易日 00:00 UTC」，30 分钟是「bar 结束时间（上海时区转 UTC）」；
+若按 `occurred_at <= T1` 比较，离开段最后一天 01:30–07:00 UTC 的 30 分钟
+K 线会被丢掉，而一类确认最常出现在离开段末尾。
+
+1. 离开段的交易日闭区间为 `[D0, D1]`：`D0` 是本级别离开段第一笔起点的
+   上海日历日，`D1` 是最后一笔终点的上海日历日。周线离开段的 `D1` 取该
+   周最后一个已完成交易日，不是周一。
+2. 取次级别 K 线：其上海日历日 ∈ `[D0, D1]`，再向前多取 120 根（或不足则
+   全取）只作引擎预热。预热区只排除「完成日早于 D0」的线段；起点在预热、
+   终点落在 `[D0, D1]` 的线段算确认事件。
+3. 对这批 K 线 `ChanEngine.replay`。
+4. 确认事件的上海日历日必须 ∈ `[D0, D1]`：出现与本级别相反方向的
+   **已确认**线段，或次级别自身的反向趋势背驰。
+   「反向趋势背驰」指次级别 `trend.type` 与本级别离开方向相反，且该背驰
+   `direction` 对本级别是反转（本级别向上离开对应次级别 `bottom`，
+   本级别向下离开对应次级别 `top`）。
+5. `sublevel.window_start` / `window_end` 记 `D0` / `D1` 的日期，不记
+   日线 00:00 UTC。
+
+状态：
+
+- 次级别行情缺失，或切片后可用 K 线为空：`unevaluable` /
   `class1_sublevel_market_not_ready`
-- 次级别已回放，但尚未走出与本级别相反方向的**已确认**线段
-  （或次级别自身的反向趋势背驰）：`provisional` /
+- 切片已回放，但 `[D0, D1]` 内没有合格确认事件：`provisional` /
   `class1_sublevel_structure_incomplete`
-- 次级别出现反向已确认线段，或次级别反向趋势背驰成立：`confirmed`
-- `sublevel.window_start` / `window_end` 必须落在本级别离开段的时间范围内，
-  禁止用全局 30 分钟结构冒充「这一段」的确认
+- `[D0, D1]` 内出现合格确认事件：`confirmed`
 
 ### 二类
 
-一类（`confirmed` 或 `provisional`）出现之后，次级别第一次回抽不破一类极值。
+一类（`confirmed` 或 `provisional`）出现之后，在同一离开段窗口内，次级别
+第一段与一类反向的**已确认**线段，其极值不破一类价。
 
 - 没有一类：不输出二类
-- 次级别缺失：`unevaluable` / `class1_sublevel_market_not_ready`
-- 回抽未完成：`provisional` / `class2_pullback_incomplete`
-- 回抽完成且不破极值：`confirmed`
+- 次级别缺失或切片为空：`unevaluable` / `class1_sublevel_market_not_ready`
+- 窗口内还没有这段反向已确认线段：`provisional` / `class2_pullback_incomplete`
+- 该线段已确认且极值不破一类价：`confirmed`
+- 该线段已确认但破了极值：不输出二类
 
 ### 三类
 
@@ -332,8 +362,7 @@ ChanEngine.replay          30 分钟 K 线（预拉缓存，只读）
 
 离开中枢后的第一段回抽，收盘极值不回到 `[lower, upper]`（闭区间，与现有
 中枢包含价格的口径一致）。回抽线段已确认则 `confirmed`，否则
-`provisional`。回抽已回到区间则不输出三类，或输出后立即作废并记
-`class3_reentry`——实现必须选前者：不输出。
+`provisional`。回抽已回到区间则不输出三类。
 
 ## 30 分钟数据
 
@@ -355,17 +384,34 @@ ChanEngine.replay          30 分钟 K 线（预拉缓存，只读）
 ### 缓存
 
 复用 `market_history_snapshots`，`timeframe="30m"`，`adjustment="qfq"`。
-主键已经包含 `symbol, timeframe, adjustment, as_of, start_date, end_date`，
-预拉按日期分片写入互不覆盖。
+主键已经包含 `symbol, timeframe, adjustment, as_of, start_date, end_date`。
+现有 `get_market_history` 是精确命中，不会自动拼接分片。
+
+因此缓存分两层，职责不能混：
+
+1. **下载分片**：`start_date`/`end_date` 跨度不超过 20 个交易日，只用于
+   断点续拉，分析路径不读这些键。
+2. **分析窗**：一轮预拉在全部分片成功后，再物化一条分析窗。`as_of` /
+   `start_date` / `end_date` **必须与同一次日线分析使用的窗口函数完全相同**
+   （现有 `as_of - 365 * 5` 到 `as_of`），禁止另写一套 `as_of-5y`。
+   分析只精确读这一条。任一下载分片失败则不更新分析窗，旧分析窗保持不动。
 
 ### 预拉
 
-独立命令（实现计划里给出入口，例如
-`uv run python -m app.market_prefetch --symbol 002940.SZ --timeframe 30m`）：
+独立命令：
+
+```bash
+uv run python -m app.market_prefetch \
+  --symbol 002940.SZ --timeframe 30m --as_of 2026-08-21
+```
+
+`--as_of` 必填。前复权基准绑在这个日期上；不写则拒绝运行。今日预拉与
+历史 `as_of` 分析不是同一缓存键。
 
 - 按不超过 20 个交易日一片请求 `stk_mins`
-- 一片成功才写库，失败不覆盖已有分片
-- 幂等：相同主键重复预拉覆盖为同一 payload hash 则视为命中
+- 一片成功才写下载分片，失败不覆盖该分片
+- 全部分片成功后才重写分析窗
+- 幂等：分析窗 payload hash 不变则视为命中
 - 不在 FastAPI `analyze` 或报告任务里触发预拉
 
 ### 分析路径
@@ -373,8 +419,9 @@ ChanEngine.replay          30 分钟 K 线（预拉缓存，只读）
 `MarketAnalysisService.analyze` 对日线：
 
 1. 照常回放日线
-2. 用同一 `as_of` 与五年窗去读 `30m` 缓存
-3. 命中则回放 30 分钟引擎，调用 `confirm_class1`
+2. 用与日线相同的 `as_of` / 五年窗精确读取 `30m` 分析窗
+3. 命中则把分析窗 K 线交给 `confirm_class1`；函数内部再按离开段切片回放，
+   不在分析服务里先全量回放 30 分钟结构
 4. 未命中不请求 Tushare，一类 / 依赖次级别的二类记
    `class1_sublevel_market_not_ready`
 
@@ -385,8 +432,15 @@ ChanEngine.replay          30 分钟 K 线（预拉缓存，只读）
 
 ## 引用注册表
 
-`build_reference_registry` 只追加仍「可用」的事实，规则与现有中枢暴露一致：
-只暴露仍含现价或仍未终结的信号，不把五年前已失效的一类买卖点送给模型。
+`build_reference_registry` 只追加仍「可用」的事实。一类 / 二类 / 三类各只
+暴露**最后一条**满足以下全部条件的信号：
+
+- `status` 为 `provisional` 或 `confirmed`（`unevaluable` 不进注册表）
+- 仍属于当前走势的最后离开段（`occurred_at` 不早于最后一个线段中枢的
+  `occurred_at`；没有线段中枢则不暴露买卖点）
+- 未被之后的反向已确认线段作废
+
+不把五年前已失效的一类买卖点送给模型。
 
 新增引用（名称固定）：
 
@@ -453,13 +507,17 @@ ChanEngine.replay          30 分钟 K 线（预拉缓存，只读）
 7. 线段中枢：顺序消费，两组不相交。
 8. MACD：用手算的短序列钉死前几根柱值。
 9. 趋势背驰：价格新高、面积不新高 → 顶背驰；反之底背驰。
-10. 盘整背驰：有记录，不出现 `klass=class1`。
+10. 盘整背驰：仅 `center_count==1` 时有记录，不出现 `klass=class1`；
+    ≥2 且不单调的 `consolidation` 不得记盘整背驰。
 11. 一类：无 30 分钟 → `class1_sublevel_market_not_ready`；次级别反向线段
     未确认 → `provisional`；已确认 → `confirmed`；窗口必须落在离开段内。
 12. 二类 / 三类：不破极值 / 不回中枢才输出。
-13. 预拉：分片写入、失败不覆盖、`analyze` 不调用 provider.minutes30。
-14. 注册表：新引用只在事实存在时出现；情景正文仍禁数字。
-15. 回归现有笔、中枢、归因、兑现测试。
+13. 预拉：下载分片失败不改分析窗；分析只命中五年窗键；`analyze` 不调用
+    `provider.minutes30`。
+14. 一类确认：全量 30 分钟结构里存在反向线段、但离开段窗口内没有时，
+    不得标 `confirmed`。
+15. 注册表：新引用只在事实存在时出现；情景正文仍禁数字。
+16. 回归现有笔、中枢、归因、兑现测试。
 
 ## 验收标准
 
