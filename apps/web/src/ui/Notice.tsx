@@ -5,8 +5,10 @@ export function Notice({ title, detail }: { title: string; detail?: string }) {
   return (
     <div role="alert" className="notice">
       <Icon icon={AlertTriangle} />
-      <strong>{title}</strong>
-      {detail != null ? <span>{detail}</span> : null}
+      <div>
+        <strong>{title}</strong>
+        {detail != null && detail !== "" ? <span>{detail}</span> : null}
+      </div>
     </div>
   );
 }

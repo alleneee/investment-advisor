@@ -1,5 +1,14 @@
-import type { ReactNode } from "react";
+import type { HTMLAttributes, ReactNode } from "react";
 
-export function SegmentedControl({ children, className }: { children: ReactNode; className?: string }) {
-  return <div className={["ui-segment", className].filter(Boolean).join(" ")}>{children}</div>;
+type SegmentedControlProps = {
+  children: ReactNode;
+  className?: string;
+} & Omit<HTMLAttributes<HTMLDivElement>, "children" | "className">;
+
+export function SegmentedControl({ children, className, ...rest }: SegmentedControlProps) {
+  return (
+    <div className={["ui-segment", className].filter(Boolean).join(" ")} {...rest}>
+      {children}
+    </div>
+  );
 }
