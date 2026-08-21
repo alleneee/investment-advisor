@@ -144,6 +144,17 @@ prompt。
 聚合结构引用的 value 由 Python 根据固化 snapshot 生成 canonical JSON；稳定 ref
 不包含运行时间，输入变化由现有 snapshot digest 和 report input digest 管理。
 
+新增 ref 的 kind 固定为：
+
+- `market.change.*`、`market.volume.*`：`market`。
+- `chan.fractals.*`、`chan.strokes.*`、`chan.centers.*`、`chan.structure`：
+  `structure`。
+- `chan.center.upper`、`chan.center.lower`：`price_level`。
+
+聚合 JSON 使用字段白名单和固定 key 排序。分型、笔和中枢分别最多保留离 `as_of`
+最近的 20 项，按 `known_at`、`occurred_at` 和稳定对象 ID 排序后确定性裁剪；单个
+value 最多 2,000 个 Unicode code point。超限不能由 Node 临时截断或生成新 ref。
+
 角色白名单同时检查 kind 和 namespace：
 
 - market：允许 `market`、`price_level`，ref 必须是 `market.*`。
@@ -197,7 +208,7 @@ interface SubagentAnalysisV1 {
 
 - 对象必须 exact，拒绝额外字段。
 - `role` 必须与父进程启动的角色一致。
-- 至少一条 observation，observation 和 risk flag 数量设固定上限。
+- observation 为 1 至 5 项，risk flag 为 0 至 3 项。
 - role、category、kind 和 ref namespace 必须满足固定兼容矩阵。
 - 所有引用必须属于该角色输入的引用子集。
 - 引用不得重复，空引用的 observation 或 risk flag 无效。
@@ -213,6 +224,29 @@ category 与 role 的矩阵为：
 - information：`information_tone`、`information_attention`、
   `information_quality`、`information_conflict`。
 
+### 可执行 schema 边界
+
+`SubagentTaskV1`、`SubagentAnalysisV1` 和 worker 协议必须在共享 contracts 中提供
+TypeScript 类型、JSON Schema 和运行时 validator。parent 和 worker 使用同一个
+validator，不能各写一套近似校验。
+
+- `request_id` 是标准 UUID，长度 36。
+- ref 长度 3 至 128，匹配
+  `^[a-z][a-z0-9_]*(?:\.[a-z0-9_-]+)+$`。
+- label 为 1 至 80 个 Unicode code point。
+- value 为 1 至 2,000 个 Unicode code point。
+- market evidence 为 1 至 16 项，chan evidence 为 1 至 16 项，information
+  evidence 为 1 至 11 项。
+- observation 为 1 至 5 项，risk flag 为 0 至 3 项。
+- 每个 `evidence_refs` 为 1 至 5 项并设置 `uniqueItems:true`。
+- `as_of` 必须是有效 `YYYY-MM-DD`；`observed_at` 必须是带时区 ISO-8601，且不晚于
+  `as_of` 的上海时区日终。
+- attempt、latency、usage 都是零至 `Number.MAX_SAFE_INTEGER` 的安全整数。
+
+输入投影阶段继续拒绝 URL、证券代码开放文本和超限 value。枚举子输出不存在文本
+字段，因此数字、URL、交易指令和收益承诺测试属于输入净化或最终 ReportDraftV2
+测试，不伪装成子输出文本测试。
+
 ## 主 Agent 输入
 
 三个输出全部通过校验后，父进程用固定服务端模板把它们转换为 `analyst_views`，再
@@ -220,9 +254,8 @@ category 与 role 的矩阵为：
 主 Agent 同时保留经过裁剪的 canonical reference registry，用于选择最终情景条件和
 证据引用。
 
-子 Agent 的 claim 只是带引用的分析意见，不成为新的 canonical fact。最终
-ReportDraftV2 仍只能引用 Python registry 中已有 ref，Node 和 Python 现有 V2 校验
-继续作为最终权威。
+子 Agent 的枚举判断不成为新的 canonical fact。最终 ReportDraftV2 仍只能引用
+Python registry 中已有 ref，Node 和 Python 现有 V2 校验继续作为最终权威。
 
 主 Agent 仍然只注册 `emit_research_report`，不能调用 `subagent` 或
 `emit_subagent_analysis`。
@@ -243,15 +276,36 @@ interface SubagentCoordinatorPort {
   }>;
 }
 
+interface CoordinatorInput {
+  run_id: string;
+  execution_id: string;
+  lease_epoch: number;
+  deadline_at_ms: number;
+  tasks: {
+    market: SubagentTaskV1;
+    chan: SubagentTaskV1;
+    information: SubagentTaskV1;
+  };
+}
+
+interface ReportGenerationInput {
+  state: AdvisorRun;
+  execution_id: string;
+  lease_epoch: number;
+  deadline_at_ms: number;
+}
+
+interface ReportGenerationResult {
+  report: ReportDraftV2;
+  subagents: SubagentTraceV1[];
+  analyses: SubagentAnalysisV1[];
+}
+
 interface ReportGeneratorPort {
   generate(
-    state: AdvisorRun,
+    input: ReportGenerationInput,
     signal: AbortSignal,
-  ): Promise<{
-    report: ReportDraftV2;
-    subagents: SubagentTraceV1[];
-    analyses: SubagentAnalysisV1[];
-  }>;
+  ): Promise<ReportGenerationResult>;
 }
 ```
 
@@ -262,6 +316,11 @@ coordinator，再通过 session factory 创建全新父 session。`PiSessionPort
 成功后 orchestrator 将 report 交给现有 `emit_research_report` RPC，并把安全 trace
 带到 HTTP 响应。analysis 不混入 `AdvisorRun.artifacts.report` 或对外 hydrated
 report。
+
+`ReportGenerationError` 必须携带稳定 `code`、`retryable`、已经产生的
+`SubagentTraceV1[]` 和已经通过校验的部分 `SubagentAnalysisV1[]`。coordinator 或
+父 session 抛错时也不能丢失部分成功结果。owner-check、worker timeout、retry 和父
+session timeout 全部读取同一个 `deadline_at_ms`，不各自重建截止时间。
 
 ### 共用模型运行时
 
@@ -331,13 +390,17 @@ interface WorkerFailureV1 {
 普通日志。非 JSON stdout、额外消息、request ID 不一致、超限输出或非零退出都视为
 失败。session ID 和 usage 只能取 worker 内真实 Pi session 结果，父进程不能推测。
 
+worker 输出 completed 或 failed 协议对象后都以退出码 0 结束，表示协议正常完成；
+非零退出码只表示进程级异常。退出码 0 但无合法 payload、退出码非零但带 completed
+payload、重复 payload 或 status 与字段不匹配都判为 `INVALID_PROTOCOL`，父进程只
+记录安全错误码。
+
 子进程环境使用显式白名单，仅包含运行 Node 和模型 Provider 必需的配置：
 
 - `PI_PROVIDER`
 - `PI_MODEL`
 - `PI_API_KEY`
 - `PI_BASE_URL`
-- 必需的 Node 运行参数
 
 不传 `TUSHARE_TOKEN`、`TUSHARE_API_URL`、`DATABASE_URL`、
 `INTERNAL_AGENT_TOKEN`、`PYTHON_API_BASE_URL` 或其他宿主环境变量。HTTP 不能覆盖
@@ -371,11 +434,13 @@ semaphore 在同一个 Node 进程的多个报告之间共享，使用 FIFO wait
 数和 Provider 限流。abort waiter 会立即从队列移除，每次 retry 重新获取 permit，
 进程 close 或 error 后只释放一次 permit。
 
-180 秒从 Node 收到请求时开始，包含四个 Python RPC、semaphore 等待、子 Agent
-重试、lease owner 检查、kill grace 和主 Agent 汇总。每次子调用的实际 timeout 是
-`min(45 秒, remaining)`，主汇总是 `min(60 秒, remaining)`；剩余预算不足时不得继续
-spawn 或重试。Python 客户端 245 秒 timeout 保留为 65 秒外围余量，Python lease
-300 秒保留为 120 秒接管余量。
+180 秒从 Node 收到请求时开始，包含本次执行的全部 Python RPC、semaphore 等待、
+子 Agent 重试、lease owner 检查、kill grace 和主 Agent 汇总。worker 的运行预算是
+`min(45 秒, remaining - 5 秒 kill grace)`；剩余时间不足完整 kill grace 时不得
+spawn 或重试。主 session 的运行预算是
+`min(60 秒, remaining - 5 秒 abort/dispose grace)`，abort 和 dispose 合计最多等待
+5 秒。Python 客户端 245 秒 timeout 保留为至少 65 秒外围余量，Python lease 300 秒
+保留为至少 120 秒接管余量。
 
 ### Abort 和 owner 检查
 
@@ -404,8 +469,8 @@ GET /internal/v1/agent-runs/{run_id}/owner
 
 ## 状态、重试和恢复
 
-三个子 Agent 同时启动。某个角色出现临时 Provider 错误、超时、进程异常或非法输出
-时，只重试该角色一次。第二次仍失败时：
+三个子 Agent 同时提交；没有 semaphore 竞争时并行 spawn。某个角色出现临时
+Provider 错误、超时、进程异常或非法输出时，只重试该角色一次。第二次仍失败时：
 
 - 不启动主 Agent。
 - Node 返回 typed、安全、可重试错误和子 Agent trace。
@@ -442,6 +507,8 @@ key 或完整原始 evidence。
 
 `investment_report_jobs` 增加独立 `subagent_trace` 和内部
 `subagent_analyses` JSONB 列。它们不能写入 hydrated report 的 `result` 字段。
+执行一旦通过 envelope 校验，trace 始终包含 market、chan、information 三项；尚未
+spawn 的角色使用 `attempt_count:0` 和对应 failed 或 aborted 状态。
 complete 或 fail 必须在同一数据库事务里写终态、trace 和 analysis；终态更新条件
 必须同时匹配 `status='running'`、`lease_epoch` 和 `execution_id`。retry、requeue 和
 新 owner 接管会清空旧 trace 和 analysis，避免把旧尝试显示成当前运行结果。
@@ -464,6 +531,7 @@ interface AgentRunSuccessV2 {
   lease_epoch: number;
   report: ReportDraftV2;
   subagents: SubagentTraceV1[];
+  subagent_analyses: SubagentAnalysisV1[];
 }
 
 interface AgentRunFailureV2 {
@@ -473,15 +541,18 @@ interface AgentRunFailureV2 {
   lease_epoch: number;
   error: { code: string; message: string; retryable: boolean };
   subagents: SubagentTraceV1[];
+  subagent_analyses: SubagentAnalysisV1[];
 }
 ```
 
 `AgentRunFailureV2` 用于请求 envelope 已通过校验且执行已开始的失败。鉴权失败、请求体
 超限或缺少 execution 字段时，继续返回当前不带 owner 的通用安全 error envelope。
 
-Node 不返回 analysis 原文。Python `AgentRuntimeClient` 必须解析成功和失败 trace；异常
-对象携带安全 trace，不能丢弃。业务 job 对外 envelope 单独暴露安全 `subagents`
-状态，不把它塞进 report。Python complete/fail 在一次事务中同时保存终态和 trace。
+validated enum analyses 只通过内部 Bearer 响应传给 Python。Python
+`AgentRuntimeClient` 必须解析成功和失败 trace、partial analyses；异常对象也必须
+携带两者。业务 job envelope、hydrated report 和前端只暴露转换后的安全
+`subagents` 状态，永不暴露 analyses。Python complete/fail 在一次事务中同时保存
+终态、trace 和 analyses。
 
 新增稳定错误码：
 
@@ -517,16 +588,23 @@ type PublicSubagents = null | {
 };
 ```
 
-AI job 进入 running 时 Python 初始化三个角色为 running；终态用 Node trace 更新。失败
-时只标记失败角色和安全错误摘要，并沿用现有重试按钮。旧报告没有 subagent trace 时
-返回 `subagents:null` 并隐藏角色区域，不伪造“已完成”。
+数据库 `subagent_trace` 在 Node 返回终态前保持 null，不写合成运行状态。API 按以下
+规则生成 public DTO：
+
+- 新版 job 为 queued 时合成三个 pending。
+- 新版 job 为 running 时合成三个 running。
+- terminal job 从真实 trace 转换三个角色状态。
+- frozen input 不含 `SUBAGENT_PLAN_VERSION` 的历史 job 始终返回
+  `subagents:null`。
+
+失败时只标记失败角色和安全错误摘要，并沿用现有重试按钮。旧报告隐藏角色区域，不
+伪造“已完成”。
 
 前端 exact adapter、types、mock 和测试必须同步加入 `subagents` 字段。切换股票、周期
 或报告 ID 时继续使用现有 lifecycle token 丢弃迟到响应。
 
-前端不展示内部引用 ID、子 Agent summary、findings、risks、prompt、思考过程、
-session ID 或 token usage。最终用户仍只阅读现有三情景报告、触发条件、失效条件、
-风险和免责声明。
+前端不展示内部引用 ID、枚举 analyses、prompt、思考过程、session ID 或 token
+usage。最终用户仍只阅读现有三情景报告、触发条件、失效条件、风险和免责声明。
 
 实现时提升 `PROMPT_VERSION`，新增固定 `SUBAGENT_PLAN_VERSION`，两者都进入 report
 input digest。这样旧 completed 缓存不会绕过三个子 Agent；历史报告仍可只读展示。
@@ -535,9 +613,10 @@ input digest。这样旧 completed 缓存不会绕过三个子 Agent；历史报
 
 ### Contracts
 
-- 三种角色合法输入和输出。
-- exact object、角色与 kind 矩阵、数量和文本边界。
-- 未知引用、跨角色引用、重复引用、URL、数字、交易指令和收益承诺。
+- 三种角色合法输入和枚举输出。
+- exact object、角色与 kind 矩阵、明确的 min/max、pattern、日期和安全整数边界。
+- 未知引用、跨角色引用和重复引用。
+- 输入净化与最终报告层的 URL、数字、交易指令和收益承诺拒绝。
 
 ### Node coordinator
 
@@ -584,7 +663,8 @@ session。
 ## 验收标准
 
 - 单份投研报告产生且仅产生三个固定子 Agent 任务。
-- 三个任务并行，主 Agent 在全部合法完成后才启动。
+- 三个任务同时提交；没有 process-global semaphore 竞争时并行 spawn。主 Agent 在
+  全部合法完成后才启动。
 - 子 Agent 模型无数据源、业务网络、文件、shell、Python RPC 和业务写入工具；部署
   层继续负责 OS sandbox 与 egress allowlist。
 - 子 Agent 只输出枚举和既有引用，不能通过自由文本新增事实。
