@@ -118,10 +118,29 @@ function makeInvestmentJob(
     updatedAt: "2026-08-13T09:06:00+08:00",
     report: status === "completed" ? makeInvestmentReport(symbol, timeframe, title) : null,
     error: status === "failed" ? { code: "TIMEOUT", message: "报告生成超时", retryable: true } : null,
+    reviewStatus: "pending",
+    reviewedAt: null,
+    publishedAt: null,
+    shareToken: null,
+    outcome: null,
   };
 }
 
-function auxiliaryApi(): Pick<WorkbenchApi, "getInformation" | "createInvestmentReport" | "getInvestmentReport" | "retryInvestmentReport"> {
+type AuxiliaryApi = Pick<
+  WorkbenchApi,
+  | "getInformation"
+  | "createInvestmentReport"
+  | "getInvestmentReport"
+  | "retryInvestmentReport"
+  | "reviewInvestmentReport"
+  | "publishInvestmentReport"
+  | "evaluateInvestmentReportOutcome"
+  | "createInvestmentReportShare"
+  | "revokeInvestmentReportShare"
+  | "getSharedReport"
+>;
+
+function auxiliaryApi(): AuxiliaryApi {
   return {
     async getInformation(symbol) { return makeInformation(symbol); },
     async createInvestmentReport(symbol, timeframe) { return { reportId: `report-${symbol}-${timeframe}`, status: "queued", cached: false }; },
@@ -130,6 +149,53 @@ function auxiliaryApi(): Pick<WorkbenchApi, "getInformation" | "createInvestment
       return makeInvestmentJob("completed", match?.[1] ?? "600519.SH", match?.[2] === "1w" ? "1w" : "1d");
     },
     async retryInvestmentReport(reportId) { return { reportId, status: "queued", cached: false }; },
+    async reviewInvestmentReport() {},
+    async publishInvestmentReport(reportId) {
+      return { reportId, reviewStatus: "accepted", publishedAt: "2026-08-13T10:00:00+08:00" };
+    },
+    async evaluateInvestmentReportOutcome(reportId) {
+      return {
+        reportId,
+        symbol: "600519.SH",
+        asOf: "2026-08-13",
+        evaluatedAt: "2026-09-13T09:00:00+08:00",
+        status: "realized",
+        adjudication: "single_candidate",
+        realizedCase: "base",
+        realizedCases: ["base"],
+        window: { start: "20260814", end: "20260911", barCount: 20, requiredBars: 20 },
+        scenarios: [],
+        quality: { status: "ok", warnings: [] },
+      };
+    },
+    async createInvestmentReportShare(reportId) {
+      return { reportId, shareToken: "token-1", shareUrlPath: "#/share/token-1" };
+    },
+    async revokeInvestmentReportShare() {},
+    async getSharedReport(shareToken) {
+      const report = makeInvestmentReport("600519.SH", "1d");
+      return {
+        symbol: report.symbol,
+        timeframe: report.timeframe,
+        asOf: report.asOf,
+        generatedAt: report.generatedAt,
+        publishedAt: "2026-08-13T10:00:00+08:00",
+        title: `分享报告 ${shareToken}`,
+        executiveSummary: report.executiveSummary,
+        outlook: report.outlook,
+        risks: report.risks,
+        evidence: report.evidence,
+        disclaimer: report.disclaimer,
+        chart: {
+          timeframe: report.timeframe,
+          bars: [{ occurredAt: "2026-08-11T00:00:00Z", open: 10, close: 11, low: 9, high: 12, volume: 100 }],
+          strokes: [],
+          centers: [],
+        },
+        quality: { status: "ok", warnings: [] },
+        outcome: null,
+      };
+    },
   };
 }
 
@@ -204,6 +270,31 @@ describe("research workbench", () => {
     expect(await screen.findByRole("heading", { name: "周期复盘" })).toBeInTheDocument();
     expect(reviews).toHaveAttribute("aria-current", "page");
     expect(window.location.hash).toBe("#/reviews");
+  });
+
+  it("renders the shared report page for #/share/{token} without workbench chrome", async () => {
+    window.location.hash = "#/share/token-9";
+    const getWatchlist = vi.fn(apiWith(async (symbol, timeframe) => makeReport(symbol, timeframe)).getWatchlist);
+    render(<App api={{ ...apiWith(async (symbol, timeframe) => makeReport(symbol, timeframe)), getWatchlist }} />);
+
+    expect(await screen.findByRole("heading", { name: "分享报告 token-9" })).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "主导航" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /今日批次/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "导出 PDF" })).toBeInTheDocument();
+    expect(screen.getByText("本报告基于固化数据生成，仅供研究参考，不构成任何投资建议。")).toBeInTheDocument();
+    expect(getWatchlist).not.toHaveBeenCalled();
+  });
+
+  it("shows a Chinese error page when the share link is invalid", async () => {
+    window.location.hash = "#/share/expired-token";
+    render(<App api={{
+      ...apiWith(async (symbol, timeframe) => makeReport(symbol, timeframe)),
+      async getSharedReport() { throw new ApiError("分享链接无效", 404); },
+    }} />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("无法打开研究报告");
+    expect(alert).toHaveTextContent("分享链接无效或已撤销，请与您的顾问确认最新链接。");
   });
 
   it("adds and removes watchlist symbols with a hard limit", async () => {

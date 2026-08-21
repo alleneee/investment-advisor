@@ -1,0 +1,174 @@
+import { useEffect, useState } from "react";
+import { ApiError, type WorkbenchApi } from "./api";
+import { ChanChart } from "./ChanChart";
+import {
+  conditionLabel,
+  confidenceLabel,
+  directionLabel,
+  formatFactValue,
+  outcomeStatusLabel,
+  scenarioIndex,
+  scenarioLabel,
+} from "./OutlookPanel";
+import type { InvestmentScenario, SharedReport, SharedReportOutcome } from "./types";
+
+interface SharedReportPageProps {
+  token: string;
+  api: WorkbenchApi;
+}
+
+const INVALID_LINK_MESSAGE = "分享链接无效或已撤销，请与您的顾问确认最新链接。";
+
+export function SharedReportPage({ token, api }: SharedReportPageProps) {
+  const [report, setReport] = useState<SharedReport | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError(null);
+    setReport(null);
+    api.getSharedReport(token)
+      .then((value) => {
+        if (!active) return;
+        setReport(value);
+        setLoading(false);
+      })
+      .catch((cause: unknown) => {
+        if (!active) return;
+        setError(cause instanceof ApiError && cause.status === 404
+          ? INVALID_LINK_MESSAGE
+          : cause instanceof ApiError
+            ? cause.message
+            : "报告加载失败，请稍后重试。");
+        setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [api, token]);
+
+  if (loading) {
+    return <div className="share-page">
+      <div className="share-state" role="status">正在加载研究报告…</div>
+    </div>;
+  }
+
+  if (error != null || report == null) {
+    return <div className="share-page">
+      <div className="share-state share-error" role="alert">
+        <strong>无法打开研究报告</strong>
+        <p>{error ?? INVALID_LINK_MESSAGE}</p>
+      </div>
+    </div>;
+  }
+
+  return <div className="share-page">
+    <article className="share-report" aria-label="对客研究报告">
+      <header className="share-header">
+        <div className="share-header-top">
+          <span className="share-kicker">结构投研 · 对客研究报告</span>
+          <button type="button" className="share-print-button" onClick={() => window.print()}>
+            导出 PDF
+          </button>
+        </div>
+        <h1>{report.title}</h1>
+        <dl className="share-meta">
+          <div><dt>标的</dt><dd>{report.symbol}</dd></div>
+          <div><dt>周期</dt><dd>{report.timeframe === "1d" ? "日线" : "周线"}</dd></div>
+          <div><dt>数据截至</dt><dd>{report.asOf}</dd></div>
+          <div><dt>生成日期</dt><dd><time dateTime={report.generatedAt}>{dateOnly(report.generatedAt)}</time></dd></div>
+          <div><dt>研判基调</dt><dd>{directionLabel(report.outlook.direction)} · {confidenceLabel(report.outlook.confidence)}</dd></div>
+        </dl>
+      </header>
+
+      <section className="share-section" aria-label="报告摘要">
+        <p className="share-summary">{report.executiveSummary}</p>
+        <blockquote className="share-thesis">{report.outlook.thesis}</blockquote>
+      </section>
+
+      <section className="share-section share-chart-section" aria-label="缠论结构图">
+        <h2>缠论结构与固化行情</h2>
+        <ChanChart symbol={report.symbol} data={report.chart} />
+        {report.quality.warnings.length > 0 && <p className="share-quality-note">{report.quality.warnings.join("；")}</p>}
+      </section>
+
+      <section className="share-section" aria-label="三情景展望">
+        <h2>三情景展望（未来五到二十个交易日）</h2>
+        <div className="share-scenarios">
+          {report.outlook.scenarios.map((scenario) => <SharedScenarioCard scenario={scenario} key={scenario.case} />)}
+        </div>
+      </section>
+
+      <section className="share-section" aria-label="风险提示">
+        <h2>风险提示</h2>
+        {report.risks.length
+          ? <ul className="share-risks">
+            {report.risks.map((risk, index) => <li key={`${risk.narrative}-${index}`}>{risk.narrative}</li>)}
+          </ul>
+          : <p className="share-empty">本报告未列出额外风险条目。</p>}
+      </section>
+
+      <section className="share-section" aria-label="证据来源">
+        <h2>证据来源</h2>
+        <ol className="share-evidence">
+          {report.evidence.map((fact) => <li key={fact.ref}>
+            <span className="share-evidence-label">
+              {fact.url
+                ? <a href={fact.url} target="_blank" rel="noreferrer">{fact.label}</a>
+                : fact.label}
+            </span>
+            <span className="share-evidence-value">{formatFactValue(fact)}</span>
+            {fact.occurredAt && <small>{dateOnly(fact.occurredAt)}</small>}
+          </li>)}
+        </ol>
+      </section>
+
+      {report.outcome && <SharedOutcomeSection outcome={report.outcome} />}
+
+      <footer className="share-disclaimer" role="note">
+        <strong>免责声明</strong>
+        <p>{report.disclaimer}</p>
+      </footer>
+    </article>
+  </div>;
+}
+
+function SharedScenarioCard({ scenario }: { scenario: InvestmentScenario }) {
+  return <article className={`share-scenario scenario-${scenario.case}`}>
+    <div className="share-scenario-heading">
+      <span>{scenarioIndex(scenario.case)}</span>
+      <h3>{scenarioLabel(scenario.case)}情景</h3>
+    </div>
+    <p>{scenario.narrative}</p>
+    <dl className="share-conditions">
+      <div>
+        <dt>触发条件</dt>
+        <dd>{conditionLabel(scenario.trigger.operator)} · {scenario.trigger.fact.label} / {formatFactValue(scenario.trigger.fact)}</dd>
+      </div>
+      <div>
+        <dt>失效条件</dt>
+        <dd>{conditionLabel(scenario.invalidation.operator)} · {scenario.invalidation.fact.label} / {formatFactValue(scenario.invalidation.fact)}</dd>
+      </div>
+    </dl>
+  </article>;
+}
+
+function SharedOutcomeSection({ outcome }: { outcome: SharedReportOutcome }) {
+  return <section className="share-section share-outcome" aria-label="兑现结果">
+    <h2>情景兑现结果</h2>
+    <dl className="share-meta">
+      <div><dt>兑现结论</dt><dd>{outcomeStatusLabel(outcome.status, outcome.realizedCase)}</dd></div>
+      <div><dt>观察窗口</dt><dd>{outcome.window.barCount} / {outcome.window.requiredBars} 个交易日</dd></div>
+      <div><dt>评估时间</dt><dd><time dateTime={outcome.evaluatedAt}>{dateOnly(outcome.evaluatedAt)}</time></dd></div>
+    </dl>
+    {outcome.quality.warnings.length > 0 && <ul className="share-warnings">
+      {outcome.quality.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+    </ul>}
+  </section>;
+}
+
+function dateOnly(value: string): string {
+  return value.slice(0, 10);
+}

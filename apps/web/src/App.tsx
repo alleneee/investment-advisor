@@ -3,6 +3,7 @@ import { ApiError, createMockApi, normalizeSymbol, type WorkbenchApi } from "./a
 import { ChanChart } from "./ChanChart";
 import { OutlookPanel } from "./OutlookPanel";
 import { ReviewCenterPage } from "./ReviewCenterPage";
+import { SharedReportPage } from "./SharedReportPage";
 import { StockInformationPanel } from "./StockInformationPanel";
 import { TradeJournalPage } from "./TradeJournalPage";
 import { createMockTradingApi, type TradingApi } from "./trading-api";
@@ -33,9 +34,33 @@ function viewFromHash(): WorkbenchView {
   return "batch";
 }
 
+function shareTokenFromHash(): string | null {
+  const match = /^#\/share\/([^/?#]+)/.exec(window.location.hash);
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+}
+
 export function App({ api, tradingApi, initialError }: AppProps) {
   const service = useMemo(() => api ?? createMockApi(initialError), [api, initialError]);
   const tradingService = useMemo(() => tradingApi ?? createMockTradingApi(), [tradingApi]);
+  const [shareToken, setShareToken] = useState<string | null>(shareTokenFromHash);
+
+  useEffect(() => {
+    const sync = () => setShareToken(shareTokenFromHash());
+    window.addEventListener("hashchange", sync);
+    return () => window.removeEventListener("hashchange", sync);
+  }, []);
+
+  // 分享路由是纯对客形态：不挂工作台，也不发起任何工作台数据请求。
+  if (shareToken != null) return <SharedReportPage token={shareToken} api={service} />;
+  return <Workbench service={service} tradingService={tradingService} />;
+}
+
+function Workbench({ service, tradingService }: { service: WorkbenchApi; tradingService: TradingApi }) {
   const [watchlist, setWatchlist] = useState<WatchItem[]>([]);
   const [progress, setProgress] = useState<RunProgress[]>([]);
   const [report, setReport] = useState<Report | null>(null);
@@ -51,6 +76,8 @@ export function App({ api, tradingApi, initialError }: AppProps) {
   const [outlookPendingStatus, setOutlookPendingStatus] = useState<InvestmentReportStatus | null>(null);
   const [outlookBusy, setOutlookBusy] = useState(false);
   const [outlookError, setOutlookError] = useState<string | null>(null);
+  const [deliveryBusy, setDeliveryBusy] = useState(false);
+  const [deliveryError, setDeliveryError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [view, setView] = useState<WorkbenchView>(viewFromHash);
   const reportCache = useRef(new Map<string, Report>());
@@ -69,6 +96,7 @@ export function App({ api, tradingApi, initialError }: AppProps) {
   const batchPollToken = useRef(0);
   const hydratedBatchReports = useRef(new Set<string>());
   const outlookMutationPending = useRef(false);
+  const deliveryPending = useRef(false);
   const mounted = useRef(false);
   const lifecycleToken = useRef(0);
 
@@ -404,6 +432,36 @@ export function App({ api, tradingApi, initialError }: AppProps) {
     }
   }
 
+  // 审阅、发布与兑现评估共用同一条收尾路径：动作成功后重新拉取任务，
+  // 让审阅状态、发布时间和兑现结论都以服务端为准。
+  async function runDeliveryAction(action: (reportId: string) => Promise<unknown>) {
+    const selection = currentOutlookSelection.current;
+    const job = outlookJob;
+    if (!selection || job?.status !== "completed" || deliveryPending.current) return;
+    const mutationToken = lifecycleToken.current;
+    deliveryPending.current = true;
+    setDeliveryBusy(true);
+    setDeliveryError(null);
+    try {
+      await action(job.reportId);
+      if (!mounted.current || lifecycleToken.current !== mutationToken) return;
+      const refreshed = await service.getInvestmentReport(job.reportId);
+      if (!mounted.current || lifecycleToken.current !== mutationToken) return;
+      if (currentOutlookSelection.current?.key !== selection.key) return;
+      cacheOutlookJob(selection.key, refreshed);
+      setOutlookJob(refreshed);
+    } catch (error) {
+      if (mounted.current && lifecycleToken.current === mutationToken && currentOutlookSelection.current?.key === selection.key) {
+        setDeliveryError(errorMessage(error));
+      }
+    } finally {
+      if (mounted.current && lifecycleToken.current === mutationToken) {
+        deliveryPending.current = false;
+        setDeliveryBusy(false);
+      }
+    }
+  }
+
   async function addSymbol() {
     try {
       const normalized = normalizeSymbol(code);
@@ -514,6 +572,13 @@ export function App({ api, tradingApi, initialError }: AppProps) {
             requestError={outlookError}
             onGenerate={() => void createOutlook()}
             onRetry={() => void retryOutlook()}
+            deliveryBusy={deliveryBusy}
+            deliveryError={deliveryError}
+            onReview={(decision) => void runDeliveryAction((reportId) => service.reviewInvestmentReport(reportId, decision))}
+            onPublish={() => void runDeliveryAction((reportId) => service.publishInvestmentReport(reportId))}
+            onEvaluateOutcome={() => void runDeliveryAction((reportId) => service.evaluateInvestmentReportOutcome(reportId))}
+            onCreateShare={() => void runDeliveryAction((reportId) => service.createInvestmentReportShare(reportId))}
+            onRevokeShare={() => void runDeliveryAction((reportId) => service.revokeInvestmentReportShare(reportId))}
           />
         </section></>}
 

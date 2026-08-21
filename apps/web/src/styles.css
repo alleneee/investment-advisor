@@ -201,6 +201,17 @@ h2 { display: inline; font-family: 'Noto Serif SC', serif; font-size: 19px; font
 .risk-list { display: grid; gap: 8px; }
 .risk-list p { color: #8c8170; font-family: 'Noto Serif SC', serif; font-size: 9px; line-height: 1.7; }
 .outlook-disclaimer { padding: 13px 29px; border-top: 1px solid rgba(213, 228, 218, .09); color: #596f6a; font-size: 8px; line-height: 1.7; }
+.outlook-delivery { padding: 22px 29px 24px; border-top: 1px solid rgba(213, 228, 218, .1); }
+.delivery-status { display: flex; flex-wrap: wrap; gap: 34px; margin: 0; }
+.delivery-status dt { color: #536e68; font-size: 8px; letter-spacing: .1em; }
+.delivery-status dd { margin: 6px 0 0; color: #9fb2aa; font-size: 10px; }
+.delivery-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 17px; }
+.delivery-actions button { padding: 8px 15px; border: 1px solid rgba(103, 186, 161, .3); background: transparent; color: #8fc4b2; font-size: 9px; letter-spacing: .06em; cursor: pointer; }
+.delivery-actions button:hover:not(:disabled) { border-color: rgba(103, 186, 161, .55); color: #a9d6c6; }
+.delivery-actions button:disabled { opacity: .4; cursor: not-allowed; }
+.delivery-error { margin-top: 13px; color: #d08a6f; font-size: 9px; line-height: 1.7; }
+.delivery-outcome { margin-top: 19px; padding-top: 17px; border-top: 1px solid rgba(213, 228, 218, .08); }
+.delivery-warnings { margin: 12px 0 0; padding-left: 15px; display: grid; gap: 5px; color: #8c8170; font-size: 8px; line-height: 1.7; }
 @keyframes outlook-pulse { from { opacity: .28; transform: scale(.7); } to { opacity: 1; transform: scale(1); } }
 
 @media (max-width: 900px) { .rail { width: 108px; padding: 25px 11px; }.brand-mark { font-size: 18px; }.rail-caption, .rail-footer { display: none; }.nav-item { padding: 9px 6px; font-size: 9px; }.nav-item span { display: none; }.main-column { width: calc(100% - 108px); padding: 30px 24px 60px; }.dashboard-grid, .report-body, .information-grid, .scenario-grid { grid-template-columns: 1fr; }.chart-pane, .chan-chart-shell { min-height: 420px; }.chan-chart { height: 391px; }.chart-pane { border-right: 0; border-bottom: 1px solid rgba(213, 228, 218, .1); }.run-list { grid-template-columns: 1fr; }.report-meta { display: none; }.snapshot-grid { grid-template-columns: 1fr 1fr; }.information-column, .scenario-card { border-right: 0; border-bottom: 1px solid rgba(213, 228, 218, .09); }.information-column:last-child, .scenario-card:last-child { border-bottom: 0; }.scenario-card > p { min-height: 0; } }
@@ -277,4 +288,76 @@ textarea { min-height: 74px; padding: 9px; resize: vertical; line-height: 1.65; 
 .comparison-period { margin-top: 16px; color: #6f8780; font-size: 9px; }.comparison-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 13px; }.comparison-list div { min-width: 0; padding: 12px; border: 1px solid rgba(213, 228, 218, .09); border-right: 0; }.comparison-list div:last-child { border-right: 1px solid rgba(213, 228, 218, .09); }.comparison-list span, .comparison-list small { display: block; overflow: hidden; color: #69827b; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }.comparison-list strong { display: block; margin: 7px 0; color: #dce8df; font-size: 12px; font-weight: 500; }.review-ai-status > p { display: grid; gap: 8px; margin-top: 17px; }.review-ai-status strong { color: #e4a15f; font-family: 'Noto Serif SC', serif; font-size: 14px; font-weight: 500; }.review-ai-status span { color: #748a83; font-size: 10px; line-height: 1.75; }
 @media (max-width: 1100px) { .journal-workspace { grid-template-columns: 1fr; }.execution-entry, .daily-close, .journal-ledger, .cash-flow-entry { grid-column: 1; }.account-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }.account-metric:nth-child(3) { border-right: 0; }.review-metric-band { grid-template-columns: repeat(3, minmax(0, 1fr)); }.review-metric-band article:nth-child(3) { border-right: 0; } }
 @media (max-width: 700px) { .journal-page-heading, .review-controls-heading { align-items: flex-start; flex-direction: column; }.journal-date { width: 100%; }.journal-form-grid { grid-template-columns: 1fr; }.journal-span-two { grid-column: auto; }.account-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }.account-metric { padding: 14px 12px; }.account-metric:first-child { padding-left: 0; }.account-metric:nth-child(2) { border-right: 0; }.account-metric:nth-child(3) { border-right: 1px solid rgba(213, 228, 218, .1); }.review-controls-heading > span { text-align: left; }.review-date-form { grid-template-columns: 1fr 1fr; }.review-date-form button { width: 100%; }.review-metric-band, .reason-grid, .comparison-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }.review-metric-band article:nth-child(2n), .reason-grid article:nth-child(2n) { border-right: 0; }.comparison-list div { border-right: 1px solid rgba(213, 228, 218, .09); }.trading-review-chart-shell { min-height: 455px; }.trading-review-chart { height: 415px; }.journal-card { padding: 17px; } }
+/* 工作台：分享链接操作区 */
+.delivery-share { margin-top: 19px; padding-top: 15px; border-top: 1px solid rgba(213, 228, 218, .08); }
+.share-link-text { margin: 4px 0 0; color: #8fc4b2; font-size: 10px; line-height: 1.7; overflow-wrap: anywhere; }
+
+/* 对客分享页：不带工作台导航的干净版面 */
+.share-page { min-height: 100vh; background: radial-gradient(circle at 75% -15%, rgba(21, 79, 87, .24), transparent 34rem), #07131e; padding: 46px 20px 80px; }
+.share-state { max-width: 620px; margin: 18vh auto 0; padding: 34px; border: 1px solid rgba(213, 228, 218, .16); background: rgba(9, 24, 34, .78); color: #8da099; font-size: 12px; line-height: 1.8; text-align: center; }
+.share-error strong { display: block; margin-bottom: 10px; color: #f08a70; font-family: 'Noto Serif SC', serif; font-size: 17px; }
+.share-report { max-width: 880px; margin: 0 auto; border: 1px solid rgba(213, 228, 218, .15); background: rgba(9, 24, 34, .82); }
+.share-header { padding: 30px 34px 24px; border-bottom: 1px solid rgba(213, 228, 218, .12); }
+.share-header-top { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.share-kicker { color: #66827c; font-size: 10px; letter-spacing: .14em; }
+.share-print-button { border: 1px solid rgba(228, 161, 95, .42); padding: 10px 14px; background: rgba(228, 161, 95, .08); color: #e4a15f; font-size: 10px; letter-spacing: .05em; }
+.share-print-button:hover { background: #e4a15f; color: #07131e; }
+.share-header h1 { margin-top: 18px; font-size: clamp(24px, 3.4vw, 34px); letter-spacing: -.06em; }
+.share-meta { display: flex; flex-wrap: wrap; gap: 14px 34px; margin: 22px 0 0; }
+.share-meta dt { color: #536e68; font-size: 9px; letter-spacing: .1em; }
+.share-meta dd { margin: 6px 0 0; color: #cddbd2; font-size: 12px; }
+.share-section { padding: 26px 34px; border-bottom: 1px solid rgba(213, 228, 218, .09); }
+.share-section h2 { display: block; margin: 0 0 16px; color: #dce8df; font-size: 16px; letter-spacing: -.04em; }
+.share-summary { max-width: 760px; color: #97aba2; font-family: 'Noto Serif SC', serif; font-size: 13px; line-height: 1.9; }
+.share-thesis { max-width: 760px; margin: 16px 0 0; padding-left: 13px; border-left: 1px solid #e4a15f; color: #ad9b7e; font-family: 'Noto Serif SC', serif; font-size: 11px; line-height: 1.8; }
+.share-chart-section .chan-chart-shell { position: relative; padding-top: 29px; background: #081924; }
+.share-quality-note { margin-top: 12px; color: #927b60; font-size: 10px; }
+.share-scenarios { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.share-scenario { min-width: 0; padding: 18px 16px 20px; border: 1px solid rgba(213, 228, 218, .12); background: linear-gradient(180deg, rgba(103, 186, 161, .03), transparent 42%); }
+.share-scenario-heading { display: flex; align-items: center; gap: 10px; }
+.share-scenario-heading span { width: 22px; height: 22px; display: grid; place-items: center; border: 1px solid rgba(103, 186, 161, .32); color: #67baa1; font-size: 9px; }
+.share-scenario-heading h3 { margin: 0; color: #dce8df; font-family: 'Noto Serif SC', serif; font-size: 15px; font-weight: 500; }
+.share-scenario > p { margin-top: 14px; color: #849991; font-family: 'Noto Serif SC', serif; font-size: 11px; line-height: 1.85; }
+.share-conditions { margin: 12px 0 0; border-top: 1px solid rgba(213, 228, 218, .1); }
+.share-conditions div { padding: 10px 0; border-bottom: 1px solid rgba(213, 228, 218, .08); }
+.share-conditions dt { color: #e4a15f; font-size: 8px; letter-spacing: .08em; }
+.share-conditions dd { margin: 6px 0 0; color: #879b94; font-size: 9px; line-height: 1.6; }
+.share-risks { margin: 0; padding-left: 17px; display: grid; gap: 8px; color: #8c8170; font-family: 'Noto Serif SC', serif; font-size: 11px; line-height: 1.8; }
+.share-empty { color: #607974; font-size: 10px; }
+.share-evidence { margin: 0; padding: 0; list-style: none; counter-reset: share-evidence; }
+.share-evidence li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; padding: 11px 0; border-bottom: 1px solid rgba(213, 228, 218, .08); counter-increment: share-evidence; }
+.share-evidence li::before { content: counter(share-evidence, decimal-leading-zero); color: #465c59; font-size: 9px; }
+.share-evidence-label { color: #b9cac1; font-size: 11px; }
+.share-evidence-label a { color: #8fc4b2; text-decoration: underline; text-underline-offset: 3px; }
+.share-evidence-value { color: #71857e; font-size: 10px; overflow-wrap: anywhere; }
+.share-evidence small { color: #536e68; font-size: 9px; }
+.share-warnings { margin: 14px 0 0; padding-left: 15px; display: grid; gap: 5px; color: #8c8170; font-size: 9px; line-height: 1.7; }
+.share-disclaimer { padding: 22px 34px 28px; border-top: 2px solid rgba(228, 161, 95, .5); background: rgba(228, 161, 95, .05); }
+.share-disclaimer strong { display: block; margin-bottom: 8px; color: #e4a15f; font-size: 11px; letter-spacing: .1em; }
+.share-disclaimer p { color: #a99b82; font-size: 10px; line-height: 1.8; }
+.chan-chart-print-image { display: none; }
+@media (max-width: 760px) { .share-scenarios { grid-template-columns: 1fr; }.share-header, .share-section, .share-disclaimer { padding-left: 20px; padding-right: 20px; }.share-header-top { align-items: flex-start; flex-direction: column; } }
+
+/* 导出 PDF：打印版面白底黑字、隐藏交互元素、关键区块不跨页截断 */
+@page { margin: 14mm; }
+@media print {
+  :root, body, .share-page { background: #fff !important; }
+  .share-page { min-height: 0; padding: 0; }
+  .share-page * { color: #000 !important; background: transparent !important; box-shadow: none !important; }
+  .share-report { max-width: none; border: 0; }
+  .share-header, .share-section, .share-disclaimer { padding-left: 0; padding-right: 0; border-color: #bbb !important; }
+  .share-print-button, .rail, .primary-button, .delivery-actions, .timeframe-switch { display: none !important; }
+  .share-evidence-label a { color: #000 !important; }
+  .share-scenario { border: 1pt solid #999 !important; }
+  .share-conditions dt, .share-kicker, .share-meta dt { color: #444 !important; }
+  .share-meta, .share-conditions, .share-scenario, .share-chart-section, .share-outcome, .share-disclaimer, .chan-chart-shell, .share-evidence li { break-inside: avoid; }
+  .share-disclaimer { border-top: 2pt solid #000 !important; }
+  .share-disclaimer strong { font-size: 12px; }
+  .chan-chart, .chan-chart-legend { display: none !important; }
+  .chan-chart-print-image { display: block !important; width: 100%; }
+  .share-chart-section .chan-chart-shell { min-height: 0; padding-top: 0; background: transparent !important; }
+}
+
 @media (max-width: 420px) { .journal-onboarding, .journal-card, .review-controls { padding: 15px; }.review-date-form { grid-template-columns: 1fr; }.account-summary, .review-metric-band, .reason-grid, .comparison-list { grid-template-columns: 1fr; }.account-metric, .review-metric-band article, .reason-grid article { border-right: 0; border-bottom: 1px solid rgba(213, 228, 218, .09); }.review-metric-band article:last-child, .reason-grid article:last-child { border-bottom: 0; }.cycle-list article { align-items: flex-start; flex-direction: column; }.cycle-list article > div:last-child { justify-items: start; }.trading-review-chart-shell { min-height: 410px; }.trading-review-chart { height: 370px; }.review-period-switch { width: 100%; }.review-period-switch button { flex: 1; padding: 9px 5px; } }
+
+.structure-attribution { min-width: 0; }.structure-attribution > .journal-muted { margin-top: 12px; font-size: 9px; line-height: 1.7; }.attribution-table { width: 100%; margin-top: 14px; border-collapse: collapse; }.attribution-table th, .attribution-table td { padding: 9px 10px; border-bottom: 1px solid rgba(213, 228, 218, .09); color: #d7e2da; font-size: 10px; font-weight: 400; text-align: right; }.attribution-table thead th { color: #66827c; font-size: 8px; letter-spacing: .08em; }.attribution-table th:first-child, .attribution-table td:first-child { text-align: left; }.attribution-table tbody th[scope="row"] { color: #dbe7df; font-weight: 500; text-align: left; }.attribution-detail { overflow-x: auto; }.attribution-table td:last-child { color: #a18b68; }
