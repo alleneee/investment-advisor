@@ -297,7 +297,7 @@ def test_raw_bar_digest_ignores_adjusted_fields_and_chart_bundle_keeps_volume_an
 
 
 def test_chart_bundle_maps_chan_indices_to_merged_bar_dates() -> None:
-    values = [(47, 35), (12, 2), (34, 26), (40, 26), (39, 30), (15, 8), (50, 35), (29, 17)]
+    values = [(10, 8), (7, 5), (9, 6), (11, 8), (13, 10), (16, 13), (14, 11)]
     bars = [
         {
             "trade_date": f"202601{index + 1:02d}",
@@ -313,7 +313,7 @@ def test_chart_bundle_maps_chan_indices_to_merged_bar_dates() -> None:
     bundle = build_chart_bundle(symbol="600000.SH", name="浦发银行", bars=bars)
 
     assert bundle["strokes"][0]["start_at"].startswith("2026-01-02")
-    assert bundle["strokes"][0]["end_at"].startswith("2026-01-07")
+    assert bundle["strokes"][0]["end_at"].startswith("2026-01-06")
 
 
 class FakeMarketProvider:

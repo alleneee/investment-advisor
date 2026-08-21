@@ -2,10 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
   createHttpApi,
+  mapPool,
   toInvestmentReportJob,
   toReport,
   toReportOutcome,
   toReportPublication,
+  toReportQuality,
   toReportShare,
   toSharedReport,
   toStockInformation,
@@ -323,6 +325,164 @@ describe("information and investment report API", () => {
       { symbol: "002940.SZ", name: "昂利康", reportId: "report-002940", stage: "报告生成", state: "running" },
       { symbol: "002309.SZ", name: "中利集团", reportId: "report-002309", stage: "生成失败", state: "failed" },
     ]);
+  });
+
+  it("limits batch creates to two concurrent requests", async () => {
+    let inflight = 0;
+    let peak = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/watchlist") {
+        return jsonResponse([
+          { symbol: "002940.SZ", name: "昂利康" },
+          { symbol: "002309.SZ", name: "中利集团" },
+          { symbol: "600519.SH", name: "贵州茅台" },
+        ]);
+      }
+      if (init?.method === "POST") {
+        inflight += 1;
+        peak = Math.max(peak, inflight);
+        await Promise.resolve();
+        inflight -= 1;
+        const symbol = path.split("/")[3];
+        return jsonResponse({ report_id: `report-${symbol}`, status: "queued", cached: false }, 202);
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await createHttpApi("").createBatch();
+    expect(peak).toBeLessThanOrEqual(2);
+  });
+
+  it("restores batch progress from persisted jobs after a reload", async () => {
+    const jobPayload = {
+      report_id: "report-002940",
+      status: "running",
+      symbol: "002940.SZ",
+      timeframe: "1d",
+      as_of: "2026-08-13",
+      input_digest: "digest-1",
+      attempt_count: 1,
+      updated_at: "2026-08-13T09:06:00+08:00",
+      report: null,
+      error: null,
+      review_status: "pending",
+      reviewed_at: null,
+      published_at: null,
+      share_token: null,
+      outcome: null,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/watchlist") {
+        return jsonResponse([{ symbol: "002940.SZ", name: "昂利康" }]);
+      }
+      if (path.startsWith("/api/reports/jobs")) {
+        return jsonResponse([jobPayload]);
+      }
+      if (path === "/api/reports/report-002940") {
+        return jsonResponse(jobPayload);
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const progress = await createHttpApi("").getProgress();
+    expect(fetchMock).toHaveBeenCalledWith("/api/reports/jobs?timeframe=1d", expect.any(Object));
+    expect(progress).toEqual([
+      { symbol: "002940.SZ", name: "昂利康", reportId: "report-002940", stage: "报告生成", state: "running" },
+    ]);
+  });
+
+  it("lists the research archive and maps the quality dashboard", async () => {
+    const jobPayload = {
+      report_id: "report-002940",
+      status: "running",
+      symbol: "002940.SZ",
+      timeframe: "1d",
+      as_of: "2026-08-13",
+      input_digest: "digest-1",
+      attempt_count: 1,
+      updated_at: "2026-08-13T09:06:00+08:00",
+      report: null,
+      error: null,
+      review_status: "pending",
+      reviewed_at: null,
+      published_at: null,
+      share_token: null,
+      outcome: null,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/reports/jobs")) {
+        return jsonResponse([jobPayload]);
+      }
+      if (path === "/api/reports/quality?scope=all") {
+        return jsonResponse({
+          scope: "all",
+          review: { accepted: 2, rejected: 1, decided: 3, accept_rate: "0.6667" },
+          outcome: {
+            evaluated: 4,
+            conclusive: 2,
+            realized: 1,
+            none_realized: 1,
+            ambiguous: 1,
+            inconclusive: 0,
+            pending: 1,
+            realized_rate_over_conclusive: "0.5000",
+            realized_rate_over_evaluated: "0.2500",
+            by_case: { bullish: 1 },
+          },
+        });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createHttpApi("");
+    const jobs = await api.listInvestmentReportJobs({ latestPerSymbol: false });
+    const quality = await api.getReportQuality("all");
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/reports/jobs?latest_per_symbol=false", expect.any(Object));
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].symbol).toBe("002940.SZ");
+    expect(quality).toEqual({
+      scope: "all",
+      review: { accepted: 2, rejected: 1, decided: 3, acceptRate: "0.6667" },
+      outcome: {
+        evaluated: 4,
+        conclusive: 2,
+        realized: 1,
+        noneRealized: 1,
+        ambiguous: 1,
+        inconclusive: 0,
+        pending: 1,
+        realizedRateOverConclusive: "0.5000",
+        realizedRateOverEvaluated: "0.2500",
+        byCase: { bullish: 1 },
+      },
+    });
+    expect(toReportQuality({
+      scope: "published",
+      review: { accepted: 0, rejected: 0, decided: 0, accept_rate: null },
+      outcome: {
+        evaluated: 0, conclusive: 0, realized: 0, none_realized: 0, ambiguous: 0,
+        inconclusive: 0, pending: 0, realized_rate_over_conclusive: null,
+        realized_rate_over_evaluated: null, by_case: {},
+      },
+    }).review.acceptRate).toBeNull();
+  });
+
+  it("runs mapPool with a concurrency cap", async () => {
+    let inflight = 0;
+    let peak = 0;
+    const results = await mapPool([1, 2, 3, 4], 2, async (value) => {
+      inflight += 1;
+      peak = Math.max(peak, inflight);
+      await Promise.resolve();
+      inflight -= 1;
+      return value * 2;
+    });
+    expect(results).toEqual([2, 4, 6, 8]);
+    expect(peak).toBe(2);
   });
 
   it("maps the complete information DTO to camelCase", async () => {

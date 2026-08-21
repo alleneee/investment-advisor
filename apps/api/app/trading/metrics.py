@@ -652,7 +652,7 @@ def build_chart_bundle(
         "adjustment": "none",
         "market_snapshot_id": market_snapshot_id,
         "chan_analysis_id": f"chan-{market_snapshot_id[:24]}",
-        "chan_engine_version": "chan-engine.v1",
+        "chan_engine_version": "chan-engine.v1.1",
         "bars": normalized,
         "strokes": stroke_items,
         "centers": center_items,

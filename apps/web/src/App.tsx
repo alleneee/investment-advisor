@@ -11,6 +11,7 @@ import type {
   InvestmentReportJob,
   InvestmentReportStatus,
   Report,
+  ReportQualityDashboard,
   RunProgress,
   StockInformation,
   Timeframe,
@@ -48,6 +49,9 @@ export function App({ api, tradingApi, initialError }: AppProps) {
   const service = useMemo(() => api ?? createMockApi(initialError), [api, initialError]);
   const tradingService = useMemo(() => tradingApi ?? createMockTradingApi(), [tradingApi]);
   const [shareToken, setShareToken] = useState<string | null>(shareTokenFromHash);
+  if (import.meta.env.PROD && api == null) {
+    return <div className="notice" role="alert"><span>!</span><div><strong>未配置 API 地址</strong><br />请设置 VITE_API_BASE_URL 后重新启动前端，当前不会使用内置假数据。</div></div>;
+  }
 
   useEffect(() => {
     const sync = () => setShareToken(shareTokenFromHash());
@@ -582,8 +586,8 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
           />
         </section></>}
 
-        {view === "records" && <ResearchRecords progress={progress} report={report} />}
-        {view === "snapshots" && <DataSnapshots watchlist={watchlist} report={report} />}
+        {view === "records" && <ResearchRecords api={service} />}
+        {view === "snapshots" && <DataSnapshots api={service} watchlist={watchlist} />}
         {view === "journal" && <TradeJournalPage api={tradingService} />}
         {view === "reviews" && <ReviewCenterPage api={tradingService} />}
       </main>
@@ -591,30 +595,82 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
   );
 }
 
-function ResearchRecords({ progress, report }: { progress: RunProgress[]; report: Report | null }) {
+function ResearchRecords({ api }: { api: WorkbenchApi }) {
+  const [jobs, setJobs] = useState<InvestmentReportJob[] | null>(null);
+  const [quality, setQuality] = useState<ReportQualityDashboard | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      api.listInvestmentReportJobs({ latestPerSymbol: false }),
+      api.getReportQuality("all"),
+    ]).then(([nextJobs, nextQuality]) => {
+      if (cancelled) return;
+      setJobs(nextJobs);
+      setQuality(nextQuality);
+    }).catch((reason: unknown) => {
+      if (!cancelled) setError(errorMessage(reason));
+    });
+    return () => { cancelled = true; };
+  }, [api]);
+
   return <section className="view-section" aria-label="研究记录列表">
-    <div className="section-heading"><div><span className="section-index">01</span><h2>运行归档</h2></div><span className="count-badge">{progress.length.toString().padStart(2, "0")} RECORDS</span></div>
+    {error && <div className="notice" role="alert"><span>!</span><div><strong>研究记录暂不可用</strong><br />{error}</div></div>}
+    <div className="section-heading"><div><span className="section-index">01</span><h2>质量看板</h2></div><span className="count-badge">{quality ? quality.scope.toUpperCase() : "…"}</span></div>
+    {quality ? <QualityDashboard quality={quality} /> : <div className="empty-state">正在加载质量看板…</div>}
+    <div className="section-heading record-archive-heading"><div><span className="section-index">02</span><h2>运行归档</h2></div><span className="count-badge">{(jobs?.length ?? 0).toString().padStart(2, "0")} RECORDS</span></div>
     <div className="record-list">
-      {progress.length ? progress.map((item, index) => <article className="record-row" key={`${item.symbol}-${index}`}><span className={`status-dot ${item.state}`} /><div><strong>{item.symbol}</strong><small>{item.name}</small></div><span>{item.stage}</span><small>{stateLabel(item.state)}</small></article>) : <div className="empty-state">尚无研究运行记录</div>}
+      {jobs?.length ? jobs.map((job) => <article className="record-row" key={job.reportId}>
+        <span className={`status-dot ${job.status === "failed" ? "failed" : job.status === "completed" ? "completed" : "running"}`} />
+        <div><strong>{job.symbol}</strong><small>{job.asOf} · {job.timeframe === "1w" ? "周线" : "日线"}</small></div>
+        <span>{job.report?.title ?? jobStatusLabel(job.status)}</span>
+        <small>{reviewStatusLabel(job.reviewStatus)} · {job.outcome ? outcomeSummary(job.outcome.status, job.outcome.realizedCase) : "未评估"}</small>
+      </article>) : <div className="empty-state">{jobs ? "尚无研究运行记录" : "正在加载研究记录…"}</div>}
     </div>
-    {report && <div className="record-report"><div className="section-heading"><div><span className="section-index">02</span><h2>最近报告</h2></div><span className={`quality-tag ${report.quality}`}>{report.quality === "ok" ? "数据完整" : "部分降级"}</span></div><ReportView report={report} /></div>}
   </section>;
 }
 
-function DataSnapshots({ watchlist, report }: { watchlist: WatchItem[]; report: Report | null }) {
-  const confirmed = report?.structure.filter((item) => item.state === "confirmed").length ?? 0;
-  const provisional = report?.structure.filter((item) => item.state === "provisional").length ?? 0;
+function QualityDashboard({ quality }: { quality: ReportQualityDashboard }) {
+  return <div className="snapshot-grid quality-grid">
+    <article className="snapshot-card"><span>审阅通过率</span><strong>{rateLabel(quality.review.acceptRate)}</strong><small>{quality.review.accepted}/{quality.review.decided} 已决定</small></article>
+    <article className="snapshot-card"><span>有结论兑现率</span><strong>{rateLabel(quality.outcome.realizedRateOverConclusive)}</strong><small>{quality.outcome.realized}/{quality.outcome.conclusive} 明确结论</small></article>
+    <article className="snapshot-card"><span>已评估兑现率</span><strong>{rateLabel(quality.outcome.realizedRateOverEvaluated)}</strong><small>含冲突与无法判定，共 {quality.outcome.evaluated} 份</small></article>
+    <article className="snapshot-card"><span>情景分布</span><strong className="snapshot-date">{caseDistribution(quality.outcome.byCase)}</strong><small>看多 {quality.outcome.byCase.bullish ?? 0} · 基准 {quality.outcome.byCase.base ?? 0} · 看空 {quality.outcome.byCase.bearish ?? 0}</small></article>
+  </div>;
+}
+
+function DataSnapshots({ api, watchlist }: { api: WorkbenchApi; watchlist: WatchItem[] }) {
+  const [jobs, setJobs] = useState<InvestmentReportJob[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api.listInvestmentReportJobs({ latestPerSymbol: false }).then((nextJobs) => {
+      if (!cancelled) setJobs(nextJobs);
+    }).catch((reason: unknown) => {
+      if (!cancelled) setError(errorMessage(reason));
+    });
+    return () => { cancelled = true; };
+  }, [api]);
+
+  const completed = jobs?.filter((job) => job.status === "completed") ?? [];
+  const asOfDates = new Set(completed.map((job) => job.asOf));
+  const latestAsOf = completed[0]?.asOf ?? "—";
   return <section className="view-section" aria-label="数据快照详情">
+    {error && <div className="notice" role="alert"><span>!</span><div><strong>数据快照暂不可用</strong><br />{error}</div></div>}
     <div className="snapshot-grid">
       <article className="snapshot-card"><span>WATCHLIST</span><strong>{watchlist.length.toString().padStart(2, "0")}</strong><small>当前监控标的</small></article>
-      <article className="snapshot-card"><span>CONFIRMED</span><strong>{confirmed.toString().padStart(2, "0")}</strong><small>已确认结构事实</small></article>
-      <article className="snapshot-card"><span>PROVISIONAL</span><strong>{provisional.toString().padStart(2, "0")}</strong><small>形成中结构事实</small></article>
-      <article className="snapshot-card"><span>AS OF</span><strong className="snapshot-date">{report?.asOf ?? "—"}</strong><small>{report?.quality === "ok" ? "数据完整" : "部分降级"}</small></article>
+      <article className="snapshot-card"><span>FROZEN</span><strong>{completed.length.toString().padStart(2, "0")}</strong><small>已固化研究报告</small></article>
+      <article className="snapshot-card"><span>AS-OF DAYS</span><strong>{asOfDates.size.toString().padStart(2, "0")}</strong><small>独立固化日期</small></article>
+      <article className="snapshot-card"><span>LATEST AS OF</span><strong className="snapshot-date">{latestAsOf}</strong><small>最近一份完成报告</small></article>
     </div>
     <div className="snapshot-details">
-      <div className="section-heading"><div><span className="section-index">01</span><h2>证据来源</h2></div><span className="data-line"><span className="status-dot completed" />IMMUTABLE INPUTS</span></div>
-      <div className="source-list">{report?.sources.map((source, index) => <div className="source-row" key={source}><span>{String(index + 1).padStart(2, "0")}</span><strong>{source}</strong></div>) ?? <div className="empty-state">尚无已固化数据快照</div>}</div>
-      {report && <p className="snapshot-note">{report.qualityNote}</p>}
+      <div className="section-heading"><div><span className="section-index">01</span><h2>固化输入</h2></div><span className="data-line"><span className="status-dot completed" />MARKET · CHAN · INFORMATION</span></div>
+      <div className="source-list">
+        {completed.length ? completed.map((job, index) => <div className="source-row" key={job.reportId}>
+          <span>{String(index + 1).padStart(2, "0")}</span>
+          <strong>{job.symbol} · {job.asOf} · {job.timeframe === "1w" ? "周线" : "日线"} · {job.report?.title ?? "已固化"}</strong>
+        </div>) : <div className="empty-state">{jobs ? "尚无已固化数据快照" : "正在加载数据快照…"}</div>}
+      </div>
     </div>
   </section>;
 }
@@ -645,6 +701,29 @@ function errorMessage(error: unknown): string {
 
 function stateLabel(state: RunProgress["state"]): string {
   return { queued: "排队", running: "进行中", completed: "完成", degraded: "降级", failed: "失败" }[state];
+}
+
+function jobStatusLabel(status: InvestmentReportStatus): string {
+  return { queued: "排队", running: "生成中", completed: "已完成", failed: "失败" }[status];
+}
+
+function reviewStatusLabel(status: InvestmentReportJob["reviewStatus"]): string {
+  return { pending: "待审阅", accepted: "已通过", rejected: "已驳回" }[status];
+}
+
+function outcomeSummary(status: NonNullable<InvestmentReportJob["outcome"]>["status"], realizedCase: NonNullable<InvestmentReportJob["outcome"]>["realizedCase"]): string {
+  if (status === "realized") return `兑现 ${realizedCase === "bullish" ? "看多" : realizedCase === "bearish" ? "看空" : "基准"}`;
+  return { pending: "窗口未满", none_realized: "未兑现", ambiguous: "多情景冲突", inconclusive: "无法判定" }[status];
+}
+
+function rateLabel(value: string | null): string {
+  if (value == null) return "样本不足";
+  return `${(Number(value) * 100).toFixed(2)}%`;
+}
+
+function caseDistribution(byCase: ReportQualityDashboard["outcome"]["byCase"]): string {
+  const total = (byCase.bullish ?? 0) + (byCase.base ?? 0) + (byCase.bearish ?? 0);
+  return total ? total.toString().padStart(2, "0") : "00";
 }
 
 function viewEyebrow(view: WorkbenchView): string {

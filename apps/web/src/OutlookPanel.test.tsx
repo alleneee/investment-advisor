@@ -105,7 +105,7 @@ describe("OutlookPanel", () => {
     expect(screen.queryByText("引用证据")).not.toBeInTheDocument();
     expect(screen.queryByText("公司经营进展")).not.toBeInTheDocument();
     expect(screen.getByText("2026-08-13T09:05:00+08:00")).toBeInTheDocument();
-    expect(screen.getByText("待审阅 · pending")).toBeInTheDocument();
+    expect(screen.getByText("待审阅")).toBeInTheDocument();
     expect(screen.getByText("本报告基于固化数据生成，仅供研究参考，不构成任何投资建议。")).toBeInTheDocument();
   });
 
@@ -137,7 +137,7 @@ describe("OutlookPanel", () => {
       onPublish={onPublish}
     />);
 
-    expect(screen.getByText("待审阅")).toBeInTheDocument();
+    expect(screen.getAllByText("待审阅").length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: "发布给客户" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "通过审阅" }));
@@ -150,6 +150,8 @@ describe("OutlookPanel", () => {
       onReview={onReview}
       onPublish={onPublish}
     />);
+
+    expect(screen.getAllByText("已通过").length).toBeGreaterThan(0);
 
     await user.click(screen.getByRole("button", { name: "发布给客户" }));
     expect(onPublish).toHaveBeenCalledOnce();

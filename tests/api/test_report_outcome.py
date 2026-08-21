@@ -81,6 +81,44 @@ def test_structure_condition_is_explicitly_unevaluable_instead_of_guessed():
     assert result["unevaluable_reason"] == "structure_condition_not_replayable"
 
 
+def test_structure_confirmed_holds_while_closes_stay_inside_the_frozen_center():
+    center = {"lower": "9.5", "upper": "11.5"}
+    confirmed = evaluate_condition(
+        _condition("structure_confirmed", "confirmed=1;provisional=0;centers=1", kind="structure"),
+        _bars(["10", "10.2", "11", "10.8", "10.1"]),
+        structure_center=center,
+    )
+    invalidated = evaluate_condition(
+        _condition("structure_invalidated", "confirmed=1;provisional=0;centers=1", kind="structure"),
+        _bars(["10", "10.2", "11", "10.8", "10.1"]),
+        structure_center=center,
+    )
+
+    assert confirmed["hit"] is True
+    assert confirmed["unevaluable_reason"] is None
+    assert invalidated["hit"] is False
+    assert invalidated["decisive_date"] is None
+
+
+def test_structure_invalidated_hits_on_the_first_close_outside_the_frozen_center():
+    center = {"lower": "9.5", "upper": "11.5"}
+    result = evaluate_condition(
+        _condition("structure_invalidated", "confirmed=1;provisional=0;centers=1", kind="structure"),
+        _bars(["10", "10.2", "11.6", "10.8", "10.1"]),
+        structure_center=center,
+    )
+    confirmed = evaluate_condition(
+        _condition("structure_confirmed", "confirmed=1;provisional=0;centers=1", kind="structure"),
+        _bars(["10", "10.2", "11.6", "10.8", "10.1"]),
+        structure_center=center,
+    )
+
+    assert result["hit"] is True
+    assert result["decisive_date"] == "20260114"
+    assert confirmed["hit"] is False
+    assert confirmed["decisive_date"] == "20260114"
+
+
 def test_non_numeric_level_and_short_window_are_unevaluable():
     non_numeric = evaluate_condition(_condition("break_above", "近期高点"), _bars(["10", "11", "12", "13", "14"]))
     short_window = evaluate_condition(_condition("break_above", "10"), _bars(["10", "11"]))
@@ -267,6 +305,63 @@ def _scenario(trigger_op: str, trigger_level: str, invalid_op: str, invalid_leve
             "fact": {"ref": "market.recent_low", "kind": "price_level", "label": "低点", "value": invalid_level},
         },
     }
+
+
+def test_report_outcome_replays_structure_from_the_frozen_center_holding_close():
+    report = _report(
+        chan_analysis={
+            "snapshot": {
+                "centers": [
+                    {"start_index": 0, "end_index": 4, "lower": "9.5", "upper": "11.5"},
+                    {"start_index": 6, "end_index": 10, "lower": "40", "upper": "45"},
+                ]
+            }
+        },
+        outlook={
+            "scenarios": [
+                {
+                    "case": "bullish",
+                    **_scenario("break_above", "12", "break_below", "9"),
+                },
+                {
+                    "case": "base",
+                    "trigger": {
+                        "operator": "structure_confirmed",
+                        "fact_ref": "chan.structure",
+                        "fact": {
+                            "ref": "chan.structure",
+                            "kind": "structure",
+                            "label": "结构",
+                            "value": "confirmed=1",
+                        },
+                    },
+                    "invalidation": {
+                        "operator": "structure_invalidated",
+                        "fact_ref": "chan.structure",
+                        "fact": {
+                            "ref": "chan.structure",
+                            "kind": "structure",
+                            "label": "结构",
+                            "value": "confirmed=1",
+                        },
+                    },
+                },
+                {
+                    "case": "bearish",
+                    **_scenario("break_below", "9", "break_above", "12"),
+                },
+            ]
+        },
+    )
+
+    held = evaluate_report_outcome(report, _bars(["10.1", "10.2", "10.4", "10.3", "10.0"]), evaluated_at=NOW.isoformat())
+    broken = evaluate_report_outcome(report, _bars(["10.1", "10.2", "11.6", "10.3", "10.0"]), evaluated_at=NOW.isoformat())
+
+    assert held["status"] == "realized"
+    assert held["realized_case"] == "base"
+    assert held["scenarios"][1]["trigger"]["hit"] is True
+    assert broken["scenarios"][1]["invalidation"]["hit"] is True
+    assert broken["scenarios"][1]["invalidation"]["decisive_date"] == "20260114"
 
 
 def test_report_outcome_realizes_bullish_case_and_reports_window():

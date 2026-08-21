@@ -53,7 +53,7 @@ export function OutlookPanel({
         <span className="evidence-kicker">PI AI · CONDITIONAL OUTLOOK</span>
         <h3 id="outlook-heading">Pi AI 三情景走势报告</h3>
       </div>
-      {job?.report && <div className="outlook-meta"><span>GENERATED</span><time dateTime={job.report.generatedAt}>{job.report.generatedAt}</time><strong>待审阅 · {job.report.review.status}</strong></div>}
+      {job?.report && <div className="outlook-meta"><span>GENERATED</span><time dateTime={job.report.generatedAt}>{job.report.generatedAt}</time><strong>{reviewLabel(job.reviewStatus)}</strong></div>}
     </div>
     {!status && <div className="outlook-idle">
       <div><strong>尚未生成 Pi AI 走势报告</strong><p>按当前股票与周期固化输入后，生成偏强、基准、偏弱三种条件化情景。</p></div>

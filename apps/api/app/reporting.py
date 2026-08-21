@@ -11,12 +11,15 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import psycopg
 
+from .domain.chan_engine import center_containing_price
 from .domain.report_outcome import condition_resolved_at_anchor
 
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 REPORT_SCHEMA_VERSION = "investment_report.v2"
 PROMPT_VERSION = "pi-advisor.v2.1"
 DIGEST_FIELDS = (
@@ -200,6 +203,10 @@ class InvestmentReportService:
     def _schedule(self, report_id: str) -> None:
         self.scheduler(lambda: self._run(report_id))
 
+    def recover_pending(self) -> None:
+        for job in self.database.list_recoverable_investment_report_jobs(now=self._now()):
+            self._schedule(job["report_id"])
+
     def _run(self, report_id: str) -> None:
         execution_id = f"report-{uuid.uuid4()}"
         try:
@@ -295,7 +302,7 @@ class InvestmentReportService:
         value = self.clock()
         if value.tzinfo is None:
             raise ValueError("report clock 必须返回带时区的 datetime")
-        return value
+        return value.astimezone(SHANGHAI)
 
     @staticmethod
     def _thread_scheduler(task: Callable[[], None]) -> None:
@@ -371,7 +378,7 @@ def build_reference_registry(frozen_input: dict[str, Any]) -> dict[str, dict[str
         occurred_at=_string_or_none(snapshot.get("occurred_at")),
     )
     centers = [value for value in _list(snapshot.get("centers")) if isinstance(value, dict)]
-    center = _center_holding_close(centers, latest_close)
+    center = center_containing_price(centers, latest_close)
     if center is not None:
         _add_reference(
             registry,
@@ -635,26 +642,6 @@ def _extreme_bar(bars: list[dict[str, Any]], field: str, *, highest: bool) -> di
         return None
     picker = max if highest else min
     return picker(numeric, key=lambda item: item[1])[0]
-
-
-def _center_holding_close(
-    centers: list[dict[str, Any]],
-    close: Decimal | None,
-) -> dict[str, Any] | None:
-    """从后往前找第一个仍然包含最新收盘的中枢。
-
-    缠论引擎对每三笔滑窗都产出一个中枢，"最新"那个可能是几周前、价格已经离开的
-    区间；只暴露仍然约束现价的中枢，否则模型写出的「跌破下沿」在报告固化那天就
-    已经成立。没有任何中枢包含现价时返回 ``None``，上下沿一并省略。
-    """
-    if close is None:
-        return None
-    for center in reversed(centers):
-        lower = _decimal_or_none(center.get("lower"))
-        upper = _decimal_or_none(center.get("upper"))
-        if lower is not None and upper is not None and lower <= close <= upper:
-            return center
-    return None
 
 
 def _recent_span_label(timeframe: Any) -> str:

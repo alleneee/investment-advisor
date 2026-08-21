@@ -627,7 +627,7 @@ def test_failed_investment_job_rejects_direct_advisor_state_write():
         database.save_advisor_state(state)
 
 
-def test_interrupted_running_job_is_failed_during_read(tmp_path):
+def test_interrupted_running_job_stays_recoverable_during_read(tmp_path):
     now = datetime(2026, 8, 13, 10, tzinfo=UTC)
     database = Database()
     frozen = frozen_input()
@@ -644,12 +644,12 @@ def test_interrupted_running_job_is_failed_during_read(tmp_path):
 
     recovered = database.get_investment_report_job(created["report_id"], now=now)
 
-    assert recovered["status"] == "failed"
-    assert recovered["error"] == {
-        "code": "INTERRUPTED",
-        "message": "报告生成进程已中断",
-        "retryable": True,
-    }
+    assert recovered["status"] == "running"
+    assert recovered["error"] is None
+    assert [
+        item["report_id"]
+        for item in database.list_recoverable_investment_report_jobs(now=now)
+    ] == [created["report_id"]]
 
 
 def test_v2_validation_rejects_unknown_reference_and_operator_kind():

@@ -287,6 +287,28 @@ export interface ReportPublication {
   reviewStatus: ReportReviewStatus;
 }
 
+export interface ReportQualityDashboard {
+  scope: "published" | "all";
+  review: {
+    accepted: number;
+    rejected: number;
+    decided: number;
+    acceptRate: string | null;
+  };
+  outcome: {
+    evaluated: number;
+    conclusive: number;
+    realized: number;
+    noneRealized: number;
+    ambiguous: number;
+    inconclusive: number;
+    pending: number;
+    realizedRateOverConclusive: string | null;
+    realizedRateOverEvaluated: string | null;
+    byCase: Partial<Record<InvestmentScenarioCase, number>>;
+  };
+}
+
 export interface InvestmentReportRequest {
   reportId: string;
   status: InvestmentReportStatus;

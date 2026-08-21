@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS investment_report_jobs(
     result TEXT,
     error TEXT,
     execution_id TEXT,
+    lease_expires_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     started_at TEXT,
@@ -98,6 +99,7 @@ _COLUMN_MIGRATIONS = {
         "reviewed_at": "TEXT",
         "published_at": "TEXT",
         "share_token": "TEXT UNIQUE",
+        "lease_expires_at": "TEXT",
     },
 }
 
@@ -142,6 +144,10 @@ class Database:
                 for name, definition in columns.items():
                     if name not in existing:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+            conn.execute(
+                "UPDATE investment_report_jobs SET lease_expires_at = updated_at "
+                "WHERE status = 'running' AND lease_expires_at IS NULL"
+            )
 
     def close(self) -> None:
         self.pool.close()
@@ -344,7 +350,8 @@ class Database:
                                 """
                                 UPDATE investment_report_jobs
                                 SET status = 'queued', attempt_count = %s, lease_epoch = %s, error = NULL,
-                                    execution_id = NULL, updated_at = %s, started_at = NULL, completed_at = NULL
+                                    execution_id = NULL, lease_expires_at = NULL, updated_at = %s,
+                                    started_at = NULL, completed_at = NULL
                                 WHERE report_id = %s AND status = 'failed'
                                 """,
                                 (attempt_count, lease_epoch, timestamp, row["report_id"]),
@@ -407,40 +414,12 @@ class Database:
         now: datetime | None = None,
     ) -> dict[str, Any] | None:
         self._assert_no_nested_transaction()
-        current = now or datetime.now(UTC)
-        interrupted_error = {
-            "code": "INTERRUPTED",
-            "message": "报告生成进程已中断",
-            "retryable": True,
-        }
         with self.pool.connection() as conn:
             row = conn.execute(
-                "SELECT * FROM investment_report_jobs WHERE report_id = %s FOR UPDATE",
+                "SELECT * FROM investment_report_jobs WHERE report_id = %s",
                 (report_id,),
             ).fetchone()
-            if row is None:
-                return None
-            updated_at = datetime.fromisoformat(row["updated_at"])
-            if row["status"] == "running" and current - updated_at > timedelta(seconds=300):
-                conn.execute(
-                    """
-                    UPDATE investment_report_jobs
-                    SET status = 'failed', error = %s, updated_at = %s, completed_at = %s
-                    WHERE report_id = %s AND status = 'running' AND updated_at = %s
-                    """,
-                    (
-                        json.dumps(interrupted_error, ensure_ascii=False),
-                        current.isoformat(),
-                        current.isoformat(),
-                        report_id,
-                        row["updated_at"],
-                    ),
-                )
-                row = conn.execute(
-                    "SELECT * FROM investment_report_jobs WHERE report_id = %s",
-                    (report_id,),
-                ).fetchone()
-            return self._investment_job(row)
+            return self._investment_job(row) if row is not None else None
 
     def claim_investment_report_job(
         self,
@@ -448,25 +427,75 @@ class Database:
         execution_id: str,
         *,
         now: datetime | None = None,
+        lease_seconds: int = 300,
     ) -> dict[str, Any]:
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds 必须大于 0")
         self._assert_no_nested_transaction()
-        timestamp = (now or datetime.now(UTC)).isoformat()
+        current = now or datetime.now(UTC)
+        timestamp = current.isoformat()
+        lease_expires_at = (current + timedelta(seconds=lease_seconds)).isoformat()
         with self.pool.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM investment_report_jobs WHERE report_id = %s FOR UPDATE",
+                (report_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("报告任务不可执行")
+            takeover = row["status"] == "running" and row.get("lease_expires_at") is not None and row["lease_expires_at"] <= timestamp
+            if row["status"] != "queued" and not takeover:
+                raise ValueError("报告任务不可执行")
+            current_epoch = int(row["lease_epoch"])
+            next_epoch = current_epoch + 1 if takeover else current_epoch
             result = conn.execute(
                 """
                 UPDATE investment_report_jobs
-                SET status = 'running', execution_id = %s, started_at = %s, updated_at = %s
-                WHERE report_id = %s AND status = 'queued'
+                SET status = 'running', execution_id = %s, lease_epoch = %s,
+                    lease_expires_at = %s, started_at = %s, updated_at = %s
+                WHERE report_id = %s AND lease_epoch = %s
+                    AND (status = 'queued' OR (status = 'running' AND lease_expires_at <= %s))
                 """,
-                (execution_id, timestamp, timestamp, report_id),
+                (
+                    execution_id,
+                    next_epoch,
+                    lease_expires_at,
+                    timestamp,
+                    timestamp,
+                    report_id,
+                    current_epoch,
+                    timestamp,
+                ),
             )
             if result.rowcount != 1:
                 raise ValueError("报告任务不可执行")
+            if takeover:
+                conn.execute(
+                    "UPDATE advisor_states SET lease_epoch = %s WHERE run_id = %s",
+                    (next_epoch, row["run_id"]),
+                )
             row = conn.execute(
                 "SELECT * FROM investment_report_jobs WHERE report_id = %s",
                 (report_id,),
             ).fetchone()
             return self._investment_job(row)
+
+    def list_recoverable_investment_report_jobs(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        timestamp = (now or datetime.now(UTC)).isoformat()
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM investment_report_jobs
+                WHERE status = 'queued'
+                   OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= %s)
+                ORDER BY created_at, report_id
+                """,
+                (timestamp,),
+            ).fetchall()
+        return [self._investment_job(row) for row in rows]
 
     def retry_investment_report_job(
         self,
@@ -492,7 +521,8 @@ class Database:
                 """
                 UPDATE investment_report_jobs
                 SET status = 'queued', attempt_count = %s, lease_epoch = %s, error = NULL,
-                    execution_id = NULL, updated_at = %s, started_at = NULL, completed_at = NULL
+                    execution_id = NULL, lease_expires_at = NULL, updated_at = %s,
+                    started_at = NULL, completed_at = NULL
                 WHERE report_id = %s AND status = 'failed'
                 """,
                 (attempt_count, lease_epoch, timestamp, report_id),
@@ -546,7 +576,8 @@ class Database:
             updated = conn.execute(
                 """
                 UPDATE investment_report_jobs
-                SET status = 'completed', result = %s, error = NULL, updated_at = %s, completed_at = %s
+                SET status = 'completed', result = %s, error = NULL, lease_expires_at = NULL,
+                    updated_at = %s, completed_at = %s
                 WHERE report_id = %s AND status = 'running' AND lease_epoch = %s
                 """,
                 (json.dumps(result, ensure_ascii=False, default=str), timestamp, timestamp, report_id, lease_epoch),
@@ -568,7 +599,8 @@ class Database:
             updated = conn.execute(
                 """
                 UPDATE investment_report_jobs
-                SET status = 'failed', error = %s, updated_at = %s, completed_at = %s
+                SET status = 'failed', error = %s, lease_expires_at = NULL,
+                    updated_at = %s, completed_at = %s
                 WHERE report_id = %s AND status = 'running' AND lease_epoch = %s
                 """,
                 (json.dumps(error, ensure_ascii=False), timestamp, timestamp, report_id, lease_epoch),
@@ -592,6 +624,7 @@ class Database:
             "result": json.loads(row["result"]) if row["result"] else None,
             "error": json.loads(row["error"]) if row["error"] else None,
             "execution_id": row["execution_id"],
+            "lease_expires_at": row.get("lease_expires_at"),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "started_at": row["started_at"],
@@ -727,6 +760,41 @@ class Database:
                 "SELECT * FROM investment_report_jobs WHERE published_at IS NOT NULL "
                 "ORDER BY published_at DESC"
             ).fetchall()
+        return [self._investment_job(row) for row in rows]
+
+    def list_investment_report_jobs(
+        self,
+        *,
+        timeframe: str | None = None,
+        as_of: str | None = None,
+        latest_per_symbol: bool = True,
+    ) -> list[dict[str, Any]]:
+        clauses = []
+        params: list[Any] = []
+        if timeframe:
+            clauses.append("timeframe = %s")
+            params.append(timeframe)
+        if as_of:
+            clauses.append("as_of = %s")
+            params.append(as_of)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        query = (
+            f"""
+                SELECT DISTINCT ON (symbol) *
+                FROM investment_report_jobs
+                {where}
+                ORDER BY symbol, updated_at DESC
+            """
+            if latest_per_symbol
+            else f"""
+                SELECT *
+                FROM investment_report_jobs
+                {where}
+                ORDER BY updated_at DESC
+            """
+        )
+        with self.pool.connection() as conn:
+            rows = conn.execute(query, params).fetchall()
         return [self._investment_job(row) for row in rows]
 
     def create_report_share(self, report_id: str) -> tuple[dict[str, Any], bool]:

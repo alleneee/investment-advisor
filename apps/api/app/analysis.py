@@ -82,7 +82,7 @@ class MarketAnalysisService:
             },
             "chan_analysis": {
                 "analysis_id": f"chan-{snapshot_id[:24]}",
-                "engine_version": "chan-engine.v1",
+                "engine_version": "chan-engine.v1.1",
                 "timeframe": timeframe,
                 "snapshot": snapshot,
             },

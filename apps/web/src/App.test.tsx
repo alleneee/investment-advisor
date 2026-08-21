@@ -138,6 +138,8 @@ type AuxiliaryApi = Pick<
   | "createInvestmentReportShare"
   | "revokeInvestmentReportShare"
   | "getSharedReport"
+  | "listInvestmentReportJobs"
+  | "getReportQuality"
 >;
 
 function auxiliaryApi(): AuxiliaryApi {
@@ -172,6 +174,17 @@ function auxiliaryApi(): AuxiliaryApi {
       return { reportId, shareToken: "token-1", shareUrlPath: "#/share/token-1" };
     },
     async revokeInvestmentReportShare() {},
+    async listInvestmentReportJobs() { return []; },
+    async getReportQuality() {
+      return {
+        scope: "all" as const,
+        review: { accepted: 0, rejected: 0, decided: 0, acceptRate: null },
+        outcome: {
+          evaluated: 0, conclusive: 0, realized: 0, noneRealized: 0, ambiguous: 0,
+          inconclusive: 0, pending: 0, realizedRateOverConclusive: null, realizedRateOverEvaluated: null, byCase: {},
+        },
+      };
+    },
     async getSharedReport(shareToken) {
       const report = makeInvestmentReport("600519.SH", "1d");
       return {
@@ -240,13 +253,17 @@ describe("research workbench", () => {
     expect(screen.getByRole("heading", { name: "研究记录" })).toBeInTheDocument();
     expect(records).toHaveAttribute("aria-current", "page");
     expect(window.location.hash).toBe("#/records");
+    expect(await screen.findByRole("heading", { name: "质量看板" })).toBeInTheDocument();
+    expect(screen.getByText("审阅通过率")).toBeInTheDocument();
+    expect(screen.getByText("600519.SH")).toBeInTheDocument();
+    expect(screen.getByText(/已通过 · 兑现 基准/)).toBeInTheDocument();
 
     await user.click(snapshots);
     expect(screen.getByRole("heading", { name: "数据快照" })).toBeInTheDocument();
     expect(snapshots).toHaveAttribute("aria-current", "page");
     expect(window.location.hash).toBe("#/snapshots");
-    expect(screen.getByText("CONFIRMED").nextElementSibling).toHaveTextContent("02");
-    expect(screen.getByText("PROVISIONAL").nextElementSibling).toHaveTextContent("01");
+    expect(screen.getByText("FROZEN").nextElementSibling).toHaveTextContent("01");
+    expect(await screen.findByText(/600519.SH · 2026-08-11 · 日线/)).toBeInTheDocument();
 
     await user.click(batch);
     expect(await screen.findByRole("heading", { name: "自选池" })).toBeInTheDocument();

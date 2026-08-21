@@ -14,6 +14,8 @@ from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
+from .chan_engine import center_containing_price
+
 OUTCOME_SCHEMA_VERSION = "report_outcome.v1"
 
 # 展望期固定为 5-20 个交易日：满 5 根可给出中途结论，满 20 根为完整窗口。
@@ -45,10 +47,14 @@ AdjudicationRule = Literal[
 def evaluate_condition(
     condition: Mapping[str, Any],
     bars: Sequence[Mapping[str, Any]],
+    *,
+    structure_center: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """判定单个条件在窗口行情内是否命中。
 
     ``bars`` 必须已经换算到报告固化时的前复权基准，且按交易日升序排列。
+    结构类条件用报告固化时仍包含收盘的中枢回放：窗口收盘仍在区间内为确认，
+    第一次越出为失效。缺少可回放中枢时仍返回 ``structure_condition_not_replayable``。
     """
     operator = condition.get("operator")
     fact = condition.get("fact") if isinstance(condition.get("fact"), Mapping) else {}
@@ -56,8 +62,7 @@ def evaluate_condition(
     base = {"operator": operator, "fact_ref": fact_ref}
 
     if operator in STRUCTURE_OPERATORS:
-        # 结构类条件需要按窗口重放缠论并比较结构状态，当前不做推测判定。
-        return _unevaluable(base, "structure_condition_not_replayable")
+        return _evaluate_structure(base, str(operator), bars, structure_center)
     if operator not in BREAK_OPERATORS and operator not in HOLD_OPERATORS:
         return _unevaluable(base, "unknown_operator")
 
@@ -101,11 +106,16 @@ def evaluate_report_outcome(
     scenarios = outlook.get("scenarios") if isinstance(outlook.get("scenarios"), list) else []
     window = list(bars)[:HORIZON_MAX_BARS]
 
+    frozen_center = _frozen_structure_center(report)
     results = [
         {
             "case": scenario.get("case"),
-            "trigger": evaluate_condition(_condition(scenario, "trigger"), window),
-            "invalidation": evaluate_condition(_condition(scenario, "invalidation"), window),
+            "trigger": evaluate_condition(
+                _condition(scenario, "trigger"), window, structure_center=frozen_center
+            ),
+            "invalidation": evaluate_condition(
+                _condition(scenario, "invalidation"), window, structure_center=frozen_center
+            ),
         }
         for scenario in scenarios
         if isinstance(scenario, Mapping)
@@ -346,6 +356,40 @@ def _verdict(
 def _condition(scenario: Mapping[str, Any], name: str) -> dict[str, Any]:
     value = scenario.get(name)
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _evaluate_structure(
+    base: Mapping[str, Any],
+    operator: str,
+    bars: Sequence[Mapping[str, Any]],
+    center: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(center, Mapping):
+        return _unevaluable(base, "structure_condition_not_replayable")
+    lower = _decimal_or_none(center.get("lower"))
+    upper = _decimal_or_none(center.get("upper"))
+    if lower is None or upper is None or lower > upper:
+        return _unevaluable(base, "structure_condition_not_replayable")
+
+    closes = [(str(bar.get("trade_date") or ""), _decimal_or_none(bar.get("close"))) for bar in bars]
+    usable = [(day, close) for day, close in closes if close is not None]
+    if len(usable) < HORIZON_MIN_BARS:
+        return _unevaluable(base, "window_not_ready")
+
+    outside = next((day for day, close in usable if close < lower or close > upper), None)
+    if operator == "structure_invalidated":
+        return {**base, "hit": outside is not None, "decisive_date": outside, "unevaluable_reason": None}
+    return {**base, "hit": outside is None, "decisive_date": outside, "unevaluable_reason": None}
+
+
+def _frozen_structure_center(report: Mapping[str, Any]) -> dict[str, Any] | None:
+    market = report.get("market_snapshot") if isinstance(report.get("market_snapshot"), Mapping) else {}
+    bars = [bar for bar in (market.get("bars") or []) if isinstance(bar, Mapping)]
+    close = _decimal_or_none(bars[-1].get("close")) if bars else None
+    chan = report.get("chan_analysis") if isinstance(report.get("chan_analysis"), Mapping) else {}
+    snapshot = chan.get("snapshot") if isinstance(chan.get("snapshot"), Mapping) else {}
+    centers = [item for item in (snapshot.get("centers") or []) if isinstance(item, Mapping)]
+    return center_containing_price(list(centers), close)
 
 
 def _unevaluable(base: Mapping[str, Any], reason: UnevaluableReason) -> dict[str, Any]:

@@ -19,6 +19,7 @@ import type {
   ReportOutcome,
   ReportPublication,
   ReportReviewDecision,
+  ReportQualityDashboard,
   ReportReviewStatus,
   ReportScenarioOutcome,
   ReportShare,
@@ -30,6 +31,25 @@ import type {
   Timeframe,
   WatchItem,
 } from "./types";
+
+export async function mapPool<T, R>(
+  items: T[],
+  limit: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  const workers = Math.min(Math.max(limit, 1), items.length || 1);
+  await Promise.all(Array.from({ length: items.length ? workers : 0 }, () => worker()));
+  return results;
+}
 
 export interface WorkbenchApi {
   getWatchlist(): Promise<WatchItem[]>;
@@ -48,6 +68,8 @@ export interface WorkbenchApi {
   createInvestmentReportShare(reportId: string): Promise<ReportShare>;
   revokeInvestmentReportShare(reportId: string): Promise<void>;
   getSharedReport(shareToken: string): Promise<SharedReport>;
+  listInvestmentReportJobs(options?: { latestPerSymbol?: boolean; timeframe?: string }): Promise<InvestmentReportJob[]>;
+  getReportQuality(scope?: "published" | "all"): Promise<ReportQualityDashboard>;
 }
 
 export interface MarketAnalysisResponse {
@@ -339,6 +361,45 @@ export function createMockApi(initialError?: string): WorkbenchApi {
         },
       };
     },
+    async listInvestmentReportJobs() {
+      const job = mockInvestmentJob("report-600519.SH-1d", "600519.SH", "1d");
+      return [{
+        ...job,
+        reviewStatus: "accepted",
+        publishedAt: "2026-08-12T09:00:00+08:00",
+        outcome: {
+          reportId: job.reportId,
+          symbol: job.symbol,
+          asOf: job.asOf,
+          evaluatedAt: "2026-09-10T09:00:00+08:00",
+          status: "realized",
+          adjudication: "single_candidate",
+          realizedCase: "base",
+          realizedCases: ["base"],
+          window: { start: "20260812", end: "20260909", barCount: 20, requiredBars: 20 },
+          scenarios: [],
+          quality: { status: "ok", warnings: [] },
+        },
+      }];
+    },
+    async getReportQuality(scope = "all") {
+      return {
+        scope,
+        review: { accepted: 2, rejected: 1, decided: 3, acceptRate: "0.6667" },
+        outcome: {
+          evaluated: 4,
+          conclusive: 2,
+          realized: 1,
+          noneRealized: 1,
+          ambiguous: 1,
+          inconclusive: 0,
+          pending: 1,
+          realizedRateOverConclusive: "0.5000",
+          realizedRateOverEvaluated: "0.2500",
+          byCase: { base: 1 },
+        },
+      };
+    },
   };
 }
 
@@ -390,13 +451,13 @@ export function createHttpApi(baseUrl: string): WorkbenchApi {
     async createBatch() {
       const rows = await this.getWatchlist();
       if (!rows.length) throw new ApiError("自选池为空，无法生成本批报告", 409);
-      const created = await Promise.all(rows.map(async (item) => {
+      const created = await mapPool(rows, 2, async (item) => {
         const payload = await request<unknown>(`/api/market/${encodeURIComponent(item.symbol)}/reports`, {
           method: "POST",
           body: JSON.stringify({ timeframe: "1d" }),
         });
         return { item, report: toInvestmentReportRequest(payload) };
-      }));
+      });
       activeBatchReports = new Map(created.map(({ item, report }) => [item.symbol, {
         symbol: item.symbol,
         name: item.name,
@@ -406,13 +467,33 @@ export function createHttpApi(baseUrl: string): WorkbenchApi {
       return { id: created[0].report.reportId };
     },
     async getProgress() {
+      if (!activeBatchReports.size) {
+        const [watchlist, jobs] = await Promise.all([
+          this.getWatchlist(),
+          request<unknown[]>("/api/reports/jobs?timeframe=1d"),
+        ]);
+        const bySymbol = new Map(watchlist.map((item) => [item.symbol, item]));
+        activeBatchReports = new Map(
+          jobs.flatMap((row) => {
+            const job = toInvestmentReportJob(row);
+            const item = bySymbol.get(job.symbol);
+            if (!item) return [];
+            return [[job.symbol, {
+              symbol: job.symbol,
+              name: item.name,
+              reportId: job.reportId,
+              status: job.status,
+            }]];
+          }),
+        );
+      }
       if (!activeBatchReports.size) return [];
-      const refreshed = await Promise.all([...activeBatchReports.values()].map(async (run) => {
+      const refreshed = await mapPool([...activeBatchReports.values()], 2, async (run) => {
         if (run.status === "completed" || run.status === "failed") return run;
         const payload = await request<unknown>(`/api/reports/${encodeURIComponent(run.reportId)}`);
         const job = toInvestmentReportJob(payload);
         return { ...run, status: job.status };
-      }));
+      });
       activeBatchReports = new Map(refreshed.map((run) => [run.symbol, run]));
       return refreshed.map(toBatchProgress);
     },
@@ -475,6 +556,17 @@ export function createHttpApi(baseUrl: string): WorkbenchApi {
     async getSharedReport(shareToken) {
       const payload = await request<unknown>(`/api/shared/${encodeURIComponent(shareToken)}`);
       return toSharedReport(payload);
+    },
+    async listInvestmentReportJobs(options) {
+      const query = new URLSearchParams();
+      if (options?.timeframe) query.set("timeframe", options.timeframe);
+      query.set("latest_per_symbol", options?.latestPerSymbol === false ? "false" : "true");
+      const rows = await request<unknown[]>(`/api/reports/jobs?${query.toString()}`);
+      return array(rows, "报告任务列表").map((row) => toInvestmentReportJob(row));
+    },
+    async getReportQuality(scope = "published") {
+      const query = scope === "all" ? "?scope=all" : "";
+      return toReportQuality(await request<unknown>(`/api/reports/quality${query}`));
     },
   };
 }
@@ -710,6 +802,45 @@ function toSharedOutcome(payload: unknown): SharedReportOutcome | null {
     quality: {
       status: enumText(quality.status, QUALITY_STATUSES, "分享兑现质量状态"),
       warnings: stringArray(quality.warnings, "分享兑现质量警告"),
+    },
+  };
+}
+
+export function toReportQuality(payload: unknown): ReportQualityDashboard {
+  const value = exactRecord(payload, ["scope", "review", "outcome"], "质量看板");
+  const review = exactRecord(value.review, ["accepted", "rejected", "decided", "accept_rate"], "审阅质量");
+  const outcome = exactRecord(value.outcome, [
+    "evaluated", "conclusive", "realized", "none_realized", "ambiguous", "inconclusive",
+    "pending", "realized_rate_over_conclusive", "realized_rate_over_evaluated", "by_case",
+  ], "兑现质量汇总");
+  const byCase = record(outcome.by_case, "兑现情景分布");
+  const cases: ReportQualityDashboard["outcome"]["byCase"] = {};
+  for (const [key, count] of Object.entries(byCase)) {
+    cases[enumText(key, SCENARIO_CASES, "兑现情景")] = nonNegativeInteger(count, "兑现情景计数");
+  }
+  return {
+    scope: enumText(value.scope, ["published", "all"] as const, "质量看板范围"),
+    review: {
+      accepted: nonNegativeInteger(review.accepted, "审阅通过数"),
+      rejected: nonNegativeInteger(review.rejected, "审阅驳回数"),
+      decided: nonNegativeInteger(review.decided, "审阅决定数"),
+      acceptRate: review.accept_rate == null ? null : text(review.accept_rate, "审阅通过率"),
+    },
+    outcome: {
+      evaluated: nonNegativeInteger(outcome.evaluated, "已评估样本"),
+      conclusive: nonNegativeInteger(outcome.conclusive, "有结论样本"),
+      realized: nonNegativeInteger(outcome.realized, "兑现样本"),
+      noneRealized: nonNegativeInteger(outcome.none_realized, "未兑现样本"),
+      ambiguous: nonNegativeInteger(outcome.ambiguous, "多情景冲突样本"),
+      inconclusive: nonNegativeInteger(outcome.inconclusive, "无法判定样本"),
+      pending: nonNegativeInteger(outcome.pending, "窗口未满样本"),
+      realizedRateOverConclusive: outcome.realized_rate_over_conclusive == null
+        ? null
+        : text(outcome.realized_rate_over_conclusive, "有结论兑现率"),
+      realizedRateOverEvaluated: outcome.realized_rate_over_evaluated == null
+        ? null
+        : text(outcome.realized_rate_over_evaluated, "已评估兑现率"),
+      byCase: cases,
     },
   };
 }

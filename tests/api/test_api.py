@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 from app.db import Database
@@ -288,6 +288,73 @@ async def test_report_create_returns_202_then_poll_returns_hydrated_report():
     assert completed.json()["report"]["information_snapshot"]["snapshot_id"] == "information-stable"
     assert runtime.calls[0]["lease_epoch"] == 1
     assert market.calls == [("002940.SZ", "2026-08-13", "1w")]
+
+
+@pytest.mark.anyio
+async def test_report_as_of_uses_shanghai_calendar_date_not_utc():
+    market = FakeReportMarketService()
+    information_service = FakeInformationService()
+    scheduler = RecordingScheduler()
+    instance = create_app(
+        market_service=market,
+        information_service=information_service,
+        agent_runtime_client=FakeAgentRuntimeClient(information_service.get_information("002940.SZ")),
+        report_scheduler=scheduler,
+        report_clock=lambda: datetime(2026, 8, 12, 16, 30, tzinfo=UTC),
+    )
+    async with AsyncClient(transport=ASGITransport(app=instance), base_url="http://test") as client:
+        created = await client.post("/api/market/002940.SZ/reports", json={"timeframe": "1d"})
+        job = await client.get(f"/api/reports/{created.json()['report_id']}")
+    assert created.status_code == 202
+    assert job.json()["as_of"] == "2026-08-13"
+    assert market.calls == [("002940.SZ", "2026-08-13", "1d")]
+    assert information_service.calls[-1] == ("002940.SZ", 20, date(2026, 8, 13))
+
+
+@pytest.mark.anyio
+async def test_list_report_jobs_returns_latest_per_symbol():
+    market = FakeReportMarketService()
+    information_service = FakeInformationService()
+    scheduler = RecordingScheduler()
+    instance = create_app(
+        market_service=market,
+        information_service=information_service,
+        agent_runtime_client=FakeAgentRuntimeClient(information_service.get_information("002940.SZ")),
+        report_scheduler=scheduler,
+        report_clock=lambda: datetime(2026, 8, 13, 10, tzinfo=UTC),
+    )
+    async with AsyncClient(transport=ASGITransport(app=instance), base_url="http://test") as client:
+        first = await client.post("/api/market/002940.SZ/reports", json={"timeframe": "1d"})
+        listed = await client.get("/api/reports/jobs", params={"timeframe": "1d"})
+    assert listed.status_code == 200
+    rows = listed.json()
+    assert len(rows) == 1
+    assert rows[0]["report_id"] == first.json()["report_id"]
+    assert rows[0]["symbol"] == "002940.SZ"
+    assert rows[0]["status"] == "queued"
+    assert rows[0]["outcome"] is None
+
+
+@pytest.mark.anyio
+async def test_list_report_jobs_archive_keeps_history_and_attaches_outcomes():
+    scheduler = RecordingScheduler()
+    instance = _closed_loop_app(scheduler)
+    async with AsyncClient(transport=ASGITransport(app=instance), base_url="http://test") as client:
+        daily = await client.post("/api/market/002940.SZ/reports", json={"timeframe": "1d"})
+        weekly = await client.post("/api/market/002940.SZ/reports", json={"timeframe": "1w"})
+        scheduler.run_next()
+        scheduler.run_next()
+        report_id = daily.json()["report_id"]
+        await client.post(f"/api/reports/{report_id}/outcome")
+        latest_daily = await client.get("/api/reports/jobs", params={"timeframe": "1d"})
+        archive = await client.get("/api/reports/jobs", params={"latest_per_symbol": False})
+
+    daily_id, weekly_id = daily.json()["report_id"], weekly.json()["report_id"]
+    assert [row["report_id"] for row in latest_daily.json()] == [daily_id]
+    assert {row["report_id"] for row in archive.json()} == {daily_id, weekly_id}
+    attached = {row["report_id"]: row["outcome"] for row in archive.json()}
+    assert attached[daily_id]["status"] == "realized"
+    assert attached[weekly_id] is None
 
 
 @pytest.mark.anyio

@@ -150,6 +150,26 @@ def create_router(
     def report_quality(scope: Literal["published", "all"] = "published") -> dict[str, Any]:
         return _outcomes().quality(scope=scope)
 
+    @router.get("/reports/jobs")
+    def list_report_jobs(
+        timeframe: str | None = None,
+        as_of: str | None = None,
+        latest_per_symbol: bool = True,
+    ) -> list[dict[str, Any]]:
+        outcomes = {
+            item["report_id"]: item
+            for item in db.list_report_outcomes()
+            if isinstance(item.get("report_id"), str)
+        }
+        return [
+            _report_job_envelope(job, outcomes.get(job["report_id"]))
+            for job in db.list_investment_report_jobs(
+                timeframe=timeframe or None,
+                as_of=as_of,
+                latest_per_symbol=latest_per_symbol,
+            )
+        ]
+
     @router.get("/reports/published")
     def list_published_reports() -> list[dict[str, Any]]:
         return [

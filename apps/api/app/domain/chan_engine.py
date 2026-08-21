@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -149,8 +149,7 @@ class ChanEngine:
             contains = current.high <= previous.high and current.low >= previous.low
             contained = previous.high <= current.high and previous.low >= current.low
             if not contains and not contained:
-                if direction == 0:
-                    direction = 1 if current.high > previous.high and current.low > previous.low else -1
+                direction = 1 if current.high > previous.high and current.low > previous.low else -1
                 result.append(current)
                 continue
             if direction == 0:
@@ -262,29 +261,61 @@ class ChanEngine:
 
     @staticmethod
     def _centers(strokes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        centers: list[dict[str, Any]] = []
-        for index in range(len(strokes) - 2):
-            window = strokes[index : index + 3]
-            lows = [min(Decimal(item["start_price"]), Decimal(item["end_price"])) for item in window]
-            highs = [max(Decimal(item["start_price"]), Decimal(item["end_price"])) for item in window]
-            lower, upper = max(lows), min(highs)
-            if lower < upper:
-                center = {
-                    "start_index": window[0]["start_index"], "end_index": window[-1]["end_index"],
-                    "lower": str(lower), "upper": str(upper),
-                    "occurred_at": window[-1]["occurred_at"],
-                    "known_at": max(item["known_at"] for item in window),
-                    "stable_through": max(item["stable_through"] for item in window),
-                }
-                for extension in strokes[index + 3 :]:
-                    ext_low = min(Decimal(extension["start_price"]), Decimal(extension["end_price"]))
-                    ext_high = max(Decimal(extension["start_price"]), Decimal(extension["end_price"]))
-                    if ext_low < upper and ext_high > lower:
-                        center["end_index"] = extension["end_index"]
-                        center["occurred_at"] = extension["occurred_at"]
-                        center["known_at"] = max(center["known_at"], extension["known_at"])
-                        center["stable_through"] = max(center["stable_through"], extension["stable_through"])
-                    else:
-                        break
-                centers.append(center)
-        return centers
+        return build_centers(strokes)
+
+
+def build_centers(strokes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按笔顺序构造中枢：找到下一组重叠的三笔，再向前延伸直到离开区间。
+
+    不按每三笔滑窗重复产出重叠中枢。离开后从第一笔不再重叠的笔继续寻找下一个。
+    """
+    centers: list[dict[str, Any]] = []
+    index = 0
+    while index + 2 < len(strokes):
+        window = strokes[index : index + 3]
+        lows = [min(Decimal(item["start_price"]), Decimal(item["end_price"])) for item in window]
+        highs = [max(Decimal(item["start_price"]), Decimal(item["end_price"])) for item in window]
+        lower, upper = max(lows), min(highs)
+        if lower >= upper:
+            index += 1
+            continue
+        center = {
+            "start_index": window[0]["start_index"],
+            "end_index": window[-1]["end_index"],
+            "lower": str(lower),
+            "upper": str(upper),
+            "occurred_at": window[-1]["occurred_at"],
+            "known_at": max(item["known_at"] for item in window),
+            "stable_through": max(item["stable_through"] for item in window),
+        }
+        next_index = index + 3
+        for extension in strokes[index + 3 :]:
+            ext_low = min(Decimal(extension["start_price"]), Decimal(extension["end_price"]))
+            ext_high = max(Decimal(extension["start_price"]), Decimal(extension["end_price"]))
+            if ext_low < upper and ext_high > lower:
+                center["end_index"] = extension["end_index"]
+                center["occurred_at"] = extension["occurred_at"]
+                center["known_at"] = max(center["known_at"], extension["known_at"])
+                center["stable_through"] = max(center["stable_through"], extension["stable_through"])
+                next_index += 1
+            else:
+                break
+        centers.append(center)
+        index = next_index
+    return centers
+
+
+def center_containing_price(
+    centers: Sequence[Mapping[str, Any]],
+    price: Decimal | None,
+) -> Mapping[str, Any] | None:
+    """从后往前找第一个仍然包含给定价格的中枢；没有则返回 None。"""
+    if price is None:
+        return None
+    for center in reversed(centers):
+        if center.get("lower") is None or center.get("upper") is None:
+            continue
+        lower, upper = _decimal(center["lower"]), _decimal(center["upper"])
+        if lower <= price <= upper:
+            return center
+    return None

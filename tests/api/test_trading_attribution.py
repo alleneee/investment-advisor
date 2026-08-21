@@ -1,8 +1,7 @@
 """成交 × 结构位置归因：领域纯函数与端点测试。
 
-行情夹具是一段 38 根日线的锯齿走势（2024-01-01 起，日历日连续），缠论引擎在
-最后一日（2024-02-07）的时点快照给出活跃中枢 [7.5, 10.8]，倒数第二日
-（2024-02-06）的时点快照给出活跃中枢 [7.5, 11]。
+行情夹具是一段 38 根日线的锯齿走势（2024-01-01 起，日历日连续）。顺序笔中枢
+在 2024-02-06 与 2024-02-07 的时点快照上，活跃中枢都是 [7, 11]。
 """
 
 from __future__ import annotations
@@ -91,9 +90,9 @@ def by_id(attributions):
 def test_classifies_above_inside_below_no_center_and_suspension() -> None:
     rows = {"600000.SH": market_rows()}
     executions = [
-        execution("e-above", symbol="600000.SH", day=LAST_DAY, side="buy", price="11"),
+        execution("e-above", symbol="600000.SH", day=LAST_DAY, side="buy", price="11.5"),
         execution("e-inside", symbol="600000.SH", day=LAST_DAY, side="buy", price="10"),
-        execution("e-below", symbol="600000.SH", day=LAST_DAY, side="buy", price="7"),
+        execution("e-below", symbol="600000.SH", day=LAST_DAY, side="buy", price="6.5"),
         execution("e-no-center", symbol="600000.SH", day="2024-01-06", side="buy", price="8"),
         execution("e-suspended", symbol="600000.SH", day="2024-02-08", side="buy", price="10"),
     ]
@@ -101,8 +100,8 @@ def test_classifies_above_inside_below_no_center_and_suspension() -> None:
     result = by_id(attribute_executions(executions, rows))
 
     assert result["e-above"].category == "above_center"
-    assert result["e-above"].center_lower == Decimal("7.5")
-    assert result["e-above"].center_upper == Decimal("10.8")
+    assert result["e-above"].center_lower == Decimal("7")
+    assert result["e-above"].center_upper == Decimal("11")
     assert result["e-inside"].category == "inside_center"
     assert result["e-below"].category == "below_center"
     assert result["e-no-center"].category == "no_center"
@@ -129,7 +128,7 @@ def test_adjusted_price_uses_execution_day_factor_pair() -> None:
 
     result = by_id(attribute_executions(executions, rows))
 
-    # 21.6 × qfq_close(10.5) / close(21) = 10.8，正好落在中枢上沿 → inside。
+    # 21.6 × qfq_close(10.5) / close(21) = 10.8，落在顺序中枢 [7, 11] 内 → inside。
     assert result["e-adjusted"].adjusted_price == Decimal("10.8")
     assert result["e-adjusted"].category == "inside_center"
     assert result["e-adjusted"].as_dict()["adjusted_price"] == "10.8"
@@ -172,10 +171,10 @@ def test_classify_price_and_active_center_units() -> None:
 def test_cycle_is_attributed_to_first_buy_and_open_cycle_skips_win_rate() -> None:
     rows = {"600000.SH": market_rows(), "000001.SZ": market_rows()}
     executions = [
-        # 闭合周期：首买 inside（10），加仓 above（11），清仓获利。
+        # 闭合周期：首买 inside（10），加仓 above（11.5），清仓获利。
         execution("e-first", symbol="600000.SH", day=LAST_DAY, side="buy", price="10",
                   time="09:31:00"),
-        execution("e-add", symbol="600000.SH", day=LAST_DAY, side="buy", price="11",
+        execution("e-add", symbol="600000.SH", day=LAST_DAY, side="buy", price="11.5",
                   time="10:00:00"),
         execution("e-sell", symbol="600000.SH", day=LAST_DAY, side="sell", price="11.5",
                   quantity=200, time="14:00:00"),
@@ -195,8 +194,8 @@ def test_cycle_is_attributed_to_first_buy_and_open_cycle_skips_win_rate() -> Non
         "open_cycles": 1,
         "won": 1,
         "win_rate": "1",
-        "total_pnl": "200",
-        "avg_pnl": "200.00",
+        "total_pnl": "150",
+        "avg_pnl": "150.00",
     }
     # 加仓的 above 成交不重复归因周期。
     assert summary["above_center"]["closed_cycles"] == 0
@@ -284,8 +283,8 @@ async def test_endpoint_attributes_executions_and_caches_market_rows() -> None:
     assert len(body["executions"]) == 2
     assert body["executions"][0]["category"] == "inside_center"
     assert body["executions"][0]["adjusted_price"] == "10"
-    assert body["executions"][0]["center_lower"] == "7.5"
-    assert body["executions"][0]["center_upper"] == "10.8"
+    assert body["executions"][0]["center_lower"] == "7"
+    assert body["executions"][0]["center_upper"] == "11"
     assert body["quality"]["unclassified_executions"] == []
     assert second.json() == body
     assert provider.calls == 1  # 第二次请求命中 market_history_snapshots 缓存
