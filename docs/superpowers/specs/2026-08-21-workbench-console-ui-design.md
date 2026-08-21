@@ -65,7 +65,7 @@ CSS Design Awards 量级的视觉完成度：浏览器是一张完整画布，�
 字体：
 
 - 展示：`Syne`（页标题、空态大字，允许略挤、clip、letter-spacing 负值）。
-- 界面：`IBM Plex Sans`。
+- 界面：`IBM Plex Sans`, `"PingFang SC", "Noto Sans SC", sans-serif`。
 - 数字：`IBM Plex Mono` + `font-variant-numeric: tabular-nums`。
 
 KPI 值约 32px，次级 18px，正文 14px，标签 11px。对比度：正文对底 ≥ 4.5:1。
@@ -110,10 +110,13 @@ KPI 值约 32px，次级 18px，正文 14px，标签 11px。对比度：正文�
   一致。失败回退原文。
 - 比率字段必须走 `formatRate`，禁止只加千分位导致 KPI 显示 `1` 或 `-0.012`。
 - `tone`：`up` 红、`down` 绿、`risk` 橙、`neutral` 主文字。
-- 当日盈亏、周期盈亏、闭合周期盈亏、资金流调整收益率：正 `up`，负 `down`，零 `neutral`。
-- 最大回撤、成立以来回撤：`risk`，展示用 `formatRate`。
-- 胜率、纪律率、审阅通过率、兑现率：`neutral` + `formatRate`。
-- 现金、权益、股数、日期：`neutral`；金额用 `formatMoney`。
+- 当日盈亏、闭合周期盈亏：`formatSignedMoney`；正 `up`，负 `down`，零 `neutral`。
+- 资金流调整收益率、胜率、纪律率、审阅通过率、兑现率：`formatRate`。收益率为正 `up`、
+  负 `down`、零 `neutral`；其余比率 `neutral`。不要把 `0.0198` 显示成 `+0.0198`。
+- 最大回撤、成立以来回撤：`risk` + `formatRate`。
+- 现金、权益、市值、股数、日期：`neutral`；金额用 `formatMoney`。
+- `formatMoney` / `formatSignedMoney` / `formatRate` 用于 KPI、表格、流水、归因里所有
+  给人看的金额和比率。日记测试里的 `"100000.00"` 改为千分位后的可见文本。
 - 指标 `null`：主值 `—`。质量看板比率 `null` 仍显示「样本不足」（现网文案，测试在查）。
 - `MetricTile` 可带 `detail?: string`（对应现有 `unavailableReason` 或「已决定 n/m」），
   显示在数字下方小字。
@@ -161,8 +164,9 @@ KPI 值约 32px，次级 18px，正文 14px，标签 11px。对比度：正文�
 
 1. 周期 `SegmentedControl`、日期、预览/生成（Lucide 辅图标，文字保留）。
 2. 有确定性结果时 `KpiStrip` 六格，与现有 `MetricBand` 标签一致，不删项：
-   报告期已实现盈亏、闭合周期盈亏、资金流调整收益率、周期最大回撤、胜率、纪律执行率。
-   百分比三格走 `formatRate`；`unavailableReason` 放 `detail`。无报告不渲染 KPI。
+   报告期已实现盈亏、闭合周期盈亏（`formatSignedMoney`）；资金流调整收益率、
+   周期最大回撤、胜率、纪律执行率（四格均 `formatRate`）。`unavailableReason` 放
+   `detail`。无报告不渲染 KPI。
 3. `SplitPane`：左版本；右图、理由、周期、比较。
 4. 全宽归因、Pi 总结。
 5. 无历史：`EmptyState`「该周期还没有固化报告。」
@@ -170,8 +174,9 @@ KPI 值约 32px，次级 18px，正文 14px，标签 11px。对比度：正文�
 ### 今日批次
 
 1. `KpiStrip` 四格，只从现有 `watchlist` / `progress` 推导，不新增字段：
-   自选只数 `watchlist.length`；已完成数 `progress` 中 `completed`；运行中数
-   `running`；本批状态 `StatusChip`（不是百分比）。状态优先级：
+   自选只数 `watchlist.length`；已完成数 `state === "completed"`；运行中数仅
+   `state === "running"`（`queued` 不计入第三格，只影响第四格芯片）；本批状态
+   `StatusChip`（不是百分比）。进度区保留「运行中 · n / m」原文（测试在查）。状态优先级：
    有 `failed` →「失败」；否则有 `degraded` →「降级」；否则有 `running`/`queued`
    →「进行中」；否则全完成 →「完成」；`progress` 为空 →「无批次」。
    当前打开报告的 `report.quality` 仍只出现在结构报告卡片上，不充当第四格。
@@ -189,7 +194,8 @@ KPI 值约 32px，次级 18px，正文 14px，标签 11px。对比度：正文�
   `{accepted}/{decided} 已决定`
 - 有结论兑现率：`formatRate(outcome.realizedRateOverConclusive)`，detail 为
   `{realized}/{conclusive} 明确结论`
-- 已评估兑现率：`formatRate(outcome.realizedRateOverEvaluated)`
+- 已评估兑现率：`formatRate(outcome.realizedRateOverEvaluated)`，detail 为
+  `含冲突与无法判定，共 {evaluated} 份`
 - 情景分布：主值仍是看多+基准+看空的合计（现网 `padStart(2,"0")`），detail
   `看多 n · 基准 n · 看空 n`
 
@@ -212,8 +218,8 @@ KPI 值约 32px，次级 18px，正文 14px，标签 11px。对比度：正文�
 - 买入叠加 `--up`，卖出叠加 `--down`。
 - 权益线 `--accent` 或 `--text`，回撤 `--risk`。
 - 笔 `--accent`，中枢 `--muted` 描边 + 低透明填充，不用涨跌红绿。
-- 更新 `chan-chart-option.test.ts` / `trading-review-chart-option.test.ts` 里钉死的旧色
-  `#67baa1` / `#e56548`。
+- 不要全局替换源码里的 `#67baa1` / `#e56548`：K 线/成交量/买卖点改涨跌色；笔、中枢
+  分别改 `--accent` / `--muted`。测试按系列分别改期望值。
 
 ## 状态
 
