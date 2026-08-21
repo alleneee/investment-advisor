@@ -1,10 +1,11 @@
 import copy
 import json
-import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from threading import Barrier
 
+import psycopg
 import pytest
 from app.db import Database
 from app.reporting import (
@@ -193,6 +194,43 @@ def test_prompt_version_invalidates_pre_iso_reference_jobs():
     assert build_input_digest(DIGEST_INPUT) != build_input_digest(previous)
 
 
+def _bar(index, *, high, low, close):
+    occurred_at = f"{(date(2026, 1, 1) + timedelta(days=index)).isoformat()}T00:00:00+00:00"
+    return {
+        "symbol": "002940.SZ",
+        "occurred_at": occurred_at,
+        "known_at": occurred_at,
+        "stable_through": occurred_at,
+        "open": close,
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": "1000",
+        "payload_hash": None,
+    }
+
+
+def long_window_frozen(centers=None):
+    """七十根 K 线：五年极值落在最早一根，近六十根另有自己的高低点。"""
+    bars = [
+        _bar(0, high="99.00", low="1.00", close="50.00"),
+        *(_bar(index, high="30.00", low="28.00", close="29.00") for index in range(1, 10)),
+        *(_bar(index, high="25.00", low="18.00", close="20.00") for index in range(10, 69)),
+        _bar(69, high="21.00", low="19.00", close="20.60"),
+    ]
+    frozen = frozen_input()
+    frozen["timeframe"] = "1d"
+    frozen["market_snapshot"]["bars"] = bars
+    frozen["chan_analysis"]["snapshot"]["bars"] = bars
+    frozen["chan_analysis"]["snapshot"]["centers"] = (
+        [{"start_index": 0, "end_index": 1, "lower": "19.80", "upper": "21.00", "occurred_at": "2026-03-11T00:00:00+00:00"}]
+        if centers is None
+        else centers
+    )
+    frozen["reference_registry"] = build_reference_registry(frozen)
+    return frozen
+
+
 def test_reference_registry_has_typed_market_chan_and_information_entries():
     frozen = frozen_input()
     registry = frozen["reference_registry"]
@@ -234,6 +272,103 @@ def test_reference_registry_serializes_temporal_values_as_iso_8601():
     assert all(entry["occurred_at"] == "2026-08-13" for entry in hot_entries)
 
 
+def test_reference_registry_labels_the_five_year_extremes_and_dates_them_to_their_own_bar():
+    registry = long_window_frozen()["reference_registry"]
+
+    assert registry["market.recent_high"]["value"] == "99.00"
+    assert registry["market.recent_high"]["label"] == "五年窗口最高价"
+    assert registry["market.recent_high"]["occurred_at"] == "2026-01-01T00:00:00+00:00"
+    assert registry["market.recent_low"]["value"] == "1.00"
+    assert registry["market.recent_low"]["label"] == "五年窗口最低价"
+    assert registry["market.recent_low"]["occurred_at"] == "2026-01-01T00:00:00+00:00"
+    # 极值的时间必须是极值那根 K 线，而不是最新那根。
+    assert registry["market.latest_close"]["occurred_at"] == "2026-03-11T00:00:00+00:00"
+
+
+def test_reference_registry_adds_recent_sixty_bar_levels_that_straddle_the_anchor_close():
+    frozen = long_window_frozen()
+    registry = frozen["reference_registry"]
+    anchor = Decimal(registry["market.latest_close"]["value"])
+
+    # 近六十根只覆盖 index 10 之后，被排除的 index 1 到 9（高点 30.00）不参与。
+    assert registry["market.recent_high_60"]["value"] == "25.00"
+    assert registry["market.recent_high_60"]["label"] == "近六十个交易日最高价"
+    assert registry["market.recent_high_60"]["occurred_at"] == "2026-01-11T00:00:00+00:00"
+    assert registry["market.recent_low_60"]["value"] == "18.00"
+    assert registry["market.recent_low_60"]["label"] == "近六十个交易日最低价"
+    # 关键收益：近端水平夹住固化收盘，向上突破与向下跌破都还没有被解决。
+    assert Decimal(registry["market.recent_low_60"]["value"]) < anchor
+    assert anchor < Decimal(registry["market.recent_high_60"]["value"])
+
+
+def test_reference_registry_labels_recent_levels_by_the_frozen_timeframe():
+    frozen = long_window_frozen()
+    frozen["timeframe"] = "1w"
+
+    registry = build_reference_registry(frozen)
+
+    assert registry["market.recent_high_60"]["label"] == "近六十周最高价"
+    assert registry["market.recent_low_60"]["label"] == "近六十周最低价"
+
+
+def test_reference_registry_exposes_only_the_center_that_still_contains_the_close():
+    stale = {
+        "start_index": 2,
+        "end_index": 3,
+        "lower": "3.96",
+        "upper": "5.34",
+        "occurred_at": "2026-02-01T00:00:00+00:00",
+    }
+    holding = {
+        "start_index": 0,
+        "end_index": 1,
+        "lower": "19.80",
+        "upper": "21.00",
+        "occurred_at": "2026-01-20T00:00:00+00:00",
+    }
+
+    registry = long_window_frozen(centers=[holding, stale])["reference_registry"]
+
+    # centers[-1] 早已被价格甩开；从后往前回退到仍然包含现价的那个中枢。
+    assert registry["chan.center.upper"]["value"] == "21.00"
+    assert registry["chan.center.lower"]["value"] == "19.80"
+    assert registry["chan.center.upper"]["label"] == "现价所在中枢上沿"
+    assert registry["chan.center.upper"]["occurred_at"] == "2026-01-20T00:00:00+00:00"
+
+
+def test_reference_registry_omits_both_center_bounds_when_no_center_contains_the_close():
+    stale = [
+        {"start_index": 0, "end_index": 1, "lower": "3.96", "upper": "5.34", "occurred_at": "2026-02-01T00:00:00+00:00"},
+        {"start_index": 2, "end_index": 3, "lower": "40.00", "upper": "45.00", "occurred_at": "2026-02-10T00:00:00+00:00"},
+    ]
+
+    registry = long_window_frozen(centers=stale)["reference_registry"]
+
+    assert "chan.center.upper" not in registry
+    assert "chan.center.lower" not in registry
+    # 缠论结构无条件暴露，省略中枢不会破坏证据覆盖校验。
+    assert registry["chan.structure"]["kind"] == "structure"
+
+
+def test_registry_without_centers_still_supports_a_valid_three_scenario_draft():
+    frozen = long_window_frozen(centers=[])
+    report = valid_draft("run-stable", frozen)
+    report["outlook"]["scenarios"][0]["trigger"] = {
+        "operator": "break_above",
+        "fact_ref": "market.recent_high_60",
+    }
+    report["outlook"]["scenarios"][2]["trigger"] = {
+        "operator": "break_below",
+        "fact_ref": "market.recent_low_60",
+    }
+    report["outlook"]["scenarios"][2]["invalidation"] = {
+        "operator": "break_above",
+        "fact_ref": "market.recent_high_60",
+    }
+
+    validate_report_draft_v2(report, frozen["reference_registry"], "run-stable")
+
+
 def test_reference_registry_uses_quality_only_when_information_has_no_facts():
     frozen = frozen_input()
     frozen["information_snapshot"]["news"] = []
@@ -256,7 +391,7 @@ def test_reference_registry_uses_quality_only_when_information_has_no_facts():
 
 
 def test_report_job_get_or_create_is_atomic_and_has_one_execution_owner(tmp_path):
-    database = Database(str(tmp_path / "jobs.sqlite"))
+    database = Database()
     frozen = frozen_input()
     digest = build_input_digest(DIGEST_INPUT)
 
@@ -276,15 +411,15 @@ def test_report_job_get_or_create_is_atomic_and_has_one_execution_owner(tmp_path
     assert database.get_advisor_state(run_ids.pop())["artifacts"]["as_of"] == "2026-08-13"
 
 
-def test_report_job_get_or_create_is_atomic_across_sqlite_connections(tmp_path):
-    path = str(tmp_path / "jobs.sqlite")
-    Database(path)
+def test_report_job_get_or_create_is_atomic_across_connections(tmp_path):
+    str(tmp_path / "jobs.sqlite")
+    Database()
     barrier = Barrier(8)
     frozen = frozen_input()
     digest = build_input_digest(DIGEST_INPUT)
 
     def create_from_independent_connection():
-        database = Database(path)
+        database = Database()
         barrier.wait()
         return database.get_or_create_investment_report_job(digest, frozen)
 
@@ -297,7 +432,7 @@ def test_report_job_get_or_create_is_atomic_across_sqlite_connections(tmp_path):
 
 
 def test_report_job_reuses_queued_running_and_completed_digest(tmp_path):
-    database = Database(str(tmp_path / "jobs.sqlite"))
+    database = Database()
     frozen = frozen_input()
     digest = build_input_digest(DIGEST_INPUT)
     created, owner = database.get_or_create_investment_report_job(digest, frozen)
@@ -325,7 +460,7 @@ def test_report_job_reuses_queued_running_and_completed_digest(tmp_path):
 
 
 def test_failed_report_job_is_atomically_requeued_for_same_digest(tmp_path):
-    database = Database(str(tmp_path / "jobs.sqlite"))
+    database = Database()
     frozen = frozen_input()
     digest = build_input_digest(DIGEST_INPUT)
     created, _ = database.get_or_create_investment_report_job(digest, frozen)
@@ -352,9 +487,9 @@ def test_failed_report_job_is_atomically_requeued_for_same_digest(tmp_path):
     assert database.get_advisor_state(requeued["run_id"])["lease_epoch"] == 2
 
 
-def test_failed_digest_is_requeued_by_one_owner_across_sqlite_connections(tmp_path):
-    path = str(tmp_path / "jobs.sqlite")
-    database = Database(path)
+def test_failed_digest_is_requeued_by_one_owner_across_connections(tmp_path):
+    str(tmp_path / "jobs.sqlite")
+    database = Database()
     frozen = frozen_input()
     digest = build_input_digest(DIGEST_INPUT)
     created, _ = database.get_or_create_investment_report_job(digest, frozen)
@@ -367,7 +502,7 @@ def test_failed_digest_is_requeued_by_one_owner_across_sqlite_connections(tmp_pa
     barrier = Barrier(8)
 
     def requeue_from_independent_connection():
-        connection = Database(path)
+        connection = Database()
         barrier.wait()
         return connection.get_or_create_investment_report_job(digest, frozen)
 
@@ -378,9 +513,9 @@ def test_failed_digest_is_requeued_by_one_owner_across_sqlite_connections(tmp_pa
     assert {job["lease_epoch"] for job, _ in results} == {2}
 
 
-def test_explicit_retry_has_one_winner_across_sqlite_connections(tmp_path):
-    path = str(tmp_path / "jobs.sqlite")
-    database = Database(path)
+def test_explicit_retry_has_one_winner_across_connections(tmp_path):
+    str(tmp_path / "jobs.sqlite")
+    database = Database()
     frozen = frozen_input()
     created, _ = database.get_or_create_investment_report_job(
         build_input_digest(DIGEST_INPUT), frozen
@@ -394,7 +529,7 @@ def test_explicit_retry_has_one_winner_across_sqlite_connections(tmp_path):
     barrier = Barrier(8)
 
     def retry_from_independent_connection():
-        connection = Database(path)
+        connection = Database()
         barrier.wait()
         return connection.retry_investment_report_job(created["report_id"])
 
@@ -431,7 +566,7 @@ def test_same_version_state_save_is_only_idempotent_for_identical_content():
 
 @pytest.mark.parametrize("retry_mode", ["explicit", "same_digest"])
 def test_retry_preserves_partial_authoritative_advisor_state(tmp_path, retry_mode):
-    database = Database(str(tmp_path / "jobs.sqlite"))
+    database = Database()
     frozen = frozen_input()
     created, _ = database.get_or_create_investment_report_job(
         build_input_digest(DIGEST_INPUT),
@@ -494,7 +629,7 @@ def test_failed_investment_job_rejects_direct_advisor_state_write():
 
 def test_interrupted_running_job_is_failed_during_read(tmp_path):
     now = datetime(2026, 8, 13, 10, tzinfo=UTC)
-    database = Database(str(tmp_path / "jobs.sqlite"))
+    database = Database()
     frozen = frozen_input()
     created, _ = database.get_or_create_investment_report_job(
         build_input_digest(DIGEST_INPUT),
@@ -528,6 +663,142 @@ def test_v2_validation_rejects_unknown_reference_and_operator_kind():
 
     with pytest.raises(ValueError, match="报告草稿无效"):
         validate_report_draft_v2(report, frozen["reference_registry"], "run-stable")
+
+
+@pytest.mark.parametrize(
+    ("trigger_operator", "invalidation_operator"),
+    [
+        ("hold_below", "break_above"),
+        ("break_above", "hold_below"),
+        ("hold_above", "break_below"),
+        ("break_below", "hold_above"),
+        ("break_above", "break_above"),
+    ],
+)
+def test_v2_validation_rejects_tautological_condition_pairs_on_one_fact(
+    trigger_operator, invalidation_operator
+):
+    # 同一事实上互为补集或完全相同的条件对，触发一旦成立就永远无法被否证。
+    frozen = frozen_input()
+    report = valid_draft("run-stable", frozen)
+    scenario = report["outlook"]["scenarios"][1]
+    scenario["trigger"] = {"operator": trigger_operator, "fact_ref": "market.recent_high"}
+    scenario["invalidation"] = {"operator": invalidation_operator, "fact_ref": "market.recent_high"}
+
+    with pytest.raises(ValueError, match="scenario.1 tautological condition pair"):
+        validate_report_draft_v2(report, frozen["reference_registry"], "run-stable")
+
+
+def test_v2_validation_allows_opposite_breakouts_on_one_fact_and_any_cross_fact_pair():
+    frozen = frozen_input()
+    same_fact = valid_draft("run-stable", frozen)
+    # 同一水平上的双向突破只有在该水平正好等于固化收盘时才两侧都未被解决；换成任何
+    # 其他水平，其中一侧在固化那天就已经越线，会被锚点校验拒收。
+    same_fact["outlook"]["scenarios"][1]["trigger"] = {
+        "operator": "break_above",
+        "fact_ref": "market.latest_close",
+    }
+    same_fact["outlook"]["scenarios"][1]["invalidation"] = {
+        "operator": "break_below",
+        "fact_ref": "market.latest_close",
+    }
+    cross_fact = valid_draft("run-stable", frozen)
+    cross_fact["outlook"]["scenarios"][1]["trigger"] = {
+        "operator": "hold_below",
+        "fact_ref": "market.recent_high",
+    }
+    cross_fact["outlook"]["scenarios"][1]["invalidation"] = {
+        "operator": "break_below",
+        "fact_ref": "market.recent_low",
+    }
+
+    validate_report_draft_v2(same_fact, frozen["reference_registry"], "run-stable")
+    validate_report_draft_v2(cross_fact, frozen["reference_registry"], "run-stable")
+
+
+@pytest.mark.parametrize(
+    ("operator", "fact_ref"),
+    [
+        # 固化收盘 20.60，窗口高点 21.00、窗口低点 19.80。
+        ("break_above", "market.recent_low"),
+        ("break_below", "market.recent_high"),
+        ("hold_above", "market.recent_high"),
+        ("hold_below", "market.recent_low"),
+    ],
+)
+def test_v2_validation_rejects_conditions_already_resolved_at_the_anchor_close(operator, fact_ref):
+    # 报告写出来时就已经越线或已被违反的条件，事后必然在窗口第一根 K 线命中，
+    # 不是预测。
+    frozen = frozen_input()
+    report = valid_draft("run-stable", frozen)
+    report["outlook"]["scenarios"][1]["trigger"] = {"operator": operator, "fact_ref": fact_ref}
+
+    with pytest.raises(ValueError, match="scenario.1.trigger resolved at anchor close"):
+        validate_report_draft_v2(report, frozen["reference_registry"], "run-stable")
+
+
+@pytest.mark.parametrize(
+    ("operator", "fact_ref"),
+    [
+        ("break_above", "market.recent_high"),
+        ("break_below", "market.recent_low"),
+        # 固化收盘仍在低点上方，"保持上方"正常且必要，不算退化。
+        ("hold_above", "market.recent_low"),
+        ("hold_below", "market.recent_high"),
+        # 水平正好等于固化收盘时两侧都还没有被解决。
+        ("break_above", "market.latest_close"),
+        ("break_below", "market.latest_close"),
+        ("hold_above", "market.latest_close"),
+        ("hold_below", "market.latest_close"),
+    ],
+)
+def test_v2_validation_keeps_conditions_still_open_at_the_anchor_close(operator, fact_ref):
+    frozen = frozen_input()
+    report = valid_draft("run-stable", frozen)
+    report["outlook"]["scenarios"][1]["trigger"] = {"operator": operator, "fact_ref": fact_ref}
+
+    validate_report_draft_v2(report, frozen["reference_registry"], "run-stable")
+
+
+def test_v2_validation_rejects_a_resolved_invalidation_as_well_as_a_resolved_trigger():
+    frozen = frozen_input()
+    report = valid_draft("run-stable", frozen)
+    report["outlook"]["scenarios"][1]["invalidation"] = {
+        "operator": "hold_above",
+        "fact_ref": "market.recent_high",
+    }
+
+    with pytest.raises(ValueError, match="scenario.1.invalidation resolved at anchor close"):
+        validate_report_draft_v2(report, frozen["reference_registry"], "run-stable")
+
+
+def test_v2_validation_skips_the_anchor_check_when_the_registry_has_no_anchor():
+    # 精简夹具的注册表可能没有 market.latest_close；缺锚点应跳过检查而不是拒收。
+    frozen = frozen_input()
+    registry = copy.deepcopy(frozen["reference_registry"])
+    del registry["market.latest_close"]
+    report = valid_draft("run-stable", frozen)
+    for refs in (report["evidence_refs"], report["outlook"]["scenarios"][0]["evidence_refs"]):
+        refs[refs.index("market.latest_close")] = "market.window"
+    report["outlook"]["scenarios"][1]["trigger"] = {
+        "operator": "break_below",
+        "fact_ref": "market.recent_high",
+    }
+
+    validate_report_draft_v2(report, registry, "run-stable")
+
+
+def test_v2_validation_skips_the_anchor_check_when_the_anchor_is_not_numeric():
+    frozen = frozen_input()
+    registry = copy.deepcopy(frozen["reference_registry"])
+    registry["market.latest_close"]["value"] = "暂无收盘"
+    report = valid_draft("run-stable", frozen)
+    report["outlook"]["scenarios"][1]["trigger"] = {
+        "operator": "break_below",
+        "fact_ref": "market.recent_high",
+    }
+
+    validate_report_draft_v2(report, registry, "run-stable")
 
 
 @pytest.mark.parametrize(
@@ -665,15 +936,15 @@ def test_hydrate_report_uses_only_registry_and_frozen_snapshots():
     assert hydrated["review"] == {"status": "pending"}
 
 
-def test_initializing_new_schema_preserves_legacy_report(tmp_path):
-    path = tmp_path / "legacy.sqlite"
-    conn = sqlite3.connect(path)
-    conn.execute("CREATE TABLE reports(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, payload TEXT NOT NULL)")
+def test_initializing_new_schema_preserves_legacy_report(isolated_database_schema):
     legacy = {"version": "ReportDraftV1", "run_id": "legacy-run", "title": "旧报告"}
-    conn.execute("INSERT INTO reports VALUES (?, ?, ?)", ("legacy-report", "legacy-run", json.dumps(legacy)))
-    conn.commit()
-    conn.close()
+    with psycopg.connect(isolated_database_schema, autocommit=True) as conn:
+        conn.execute("CREATE TABLE reports(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, payload TEXT NOT NULL)")
+        conn.execute(
+            "INSERT INTO reports VALUES (%s, %s, %s)",
+            ("legacy-report", "legacy-run", json.dumps(legacy)),
+        )
 
-    database = Database(str(path))
+    database = Database()
 
     assert database.get_report("legacy-report") == legacy

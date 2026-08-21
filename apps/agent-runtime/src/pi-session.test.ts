@@ -369,6 +369,46 @@ test('report prompt forbids Unicode digits in every generated narrative field', 
   assert.match(prompt, /证券代码、日期、期限、百分比、数值或序号/);
 });
 
+test('report prompt forbids condition pairs that cannot falsify their own scenario', () => {
+  const prompt = buildReportPrompt({
+    tool: REPORT_TOOL_NAME,
+    state: {
+      state: AdvisorRunState.EVIDENCE_READY,
+      state_version: 3,
+      run_id: 'run-condition-pair-policy',
+      lease_epoch: 1,
+      artifacts: {},
+    },
+  });
+
+  assert.match(prompt, /引用同一事实，不得互为逻辑补集，也不得使用相同算子/);
+  assert.match(prompt, /该情景无法被否证/);
+  assert.match(prompt, /基准（震荡）情景的失效条件必须指向相反方向的边界/);
+  assert.match(prompt, /与看多、看空情景互斥/);
+});
+
+test('report prompt forbids conditions that are already resolved when the report is frozen', () => {
+  const prompt = buildReportPrompt({
+    tool: REPORT_TOOL_NAME,
+    state: {
+      state: AdvisorRunState.EVIDENCE_READY,
+      state_version: 3,
+      run_id: 'run-anchor-policy',
+      lease_epoch: 1,
+      artifacts: {},
+    },
+  });
+
+  assert.match(prompt, /触发条件与失效条件都必须在固化时点尚未被解决/);
+  assert.match(prompt, /向上突破只能指向最新固化收盘尚未越过的水平/);
+  assert.match(prompt, /保持上方只能指向最新固化收盘仍在其上方的水平/);
+  assert.match(prompt, /不得引用已被突破或已被跌破的水平/);
+  assert.match(prompt, /没有预测力/);
+  // 现价离开全部中枢时上下沿会被省略，必须改用近端高低价而不是凭印象引用中枢。
+  assert.match(prompt, /允许引用里没有中枢上沿与下沿时/);
+  assert.match(prompt, /改用允许引用中的近端高低价水平当边界/);
+});
+
 test('ReportDraftV2 candidate requires the exact nested V2 shape', () => {
   const valid = draft();
   assert.equal(isReportDraftV2Candidate(valid), true);

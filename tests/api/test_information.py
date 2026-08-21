@@ -1,11 +1,20 @@
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from threading import Barrier, Lock, get_ident
 
 import pytest
 from app.db import Database
-from app.information import StockInformationService
+from app.information import HOT_LIST_NOT_REPLAYABLE, StockInformationService
 from app.providers.a_stock_data import InformationSourceError
+
+UNAVAILABLE_SENTIMENT = {
+    "hot_rank": None,
+    "heat": None,
+    "rank_change": None,
+    "concepts": [],
+    "tag": None,
+    "observed_at": None,
+}
 
 NOW = datetime(2026, 8, 13, 9, 0, tzinfo=UTC)
 
@@ -117,7 +126,7 @@ class CoordinatedMissStore:
 def make_service(tmp_path, provider=None, clock=None):
     provider = provider or FakeInformationProvider()
     clock = clock or MutableClock()
-    database = Database(str(tmp_path / "information.sqlite3"))
+    database = Database()
     return StockInformationService(provider, database, clock=clock), provider, database, clock
 
 
@@ -130,7 +139,7 @@ def make_service(tmp_path, provider=None, clock=None):
     ],
 )
 def test_database_cache_uses_exact_ttl_boundary(tmp_path, source, key, ttl):
-    database = Database(str(tmp_path / "ttl.sqlite3"))
+    database = Database()
     database.save_external_information_cache(key, source, [{"value": "中文"}], NOW, NOW + ttl)
 
     before = database.get_external_information_cache(key, source, now=NOW + ttl - timedelta(microseconds=1))
@@ -157,8 +166,8 @@ def test_first_fetch_then_ttl_hit_uses_sqlite_after_reconnect(tmp_path):
     assert {item["status"] for item in second["quality"]["sources"].values()} == {"cached"}
     assert second["snapshot_id"] == first["snapshot_id"]
 
-    database.conn.close()
-    reconnected = Database(database.path)
+    database.close()
+    reconnected = Database()
     reconnected_service = StockInformationService(provider, reconnected, clock=clock)
     third = reconnected_service.get_information("002940.SZ")
     assert provider.calls == {"news": 1, "irm": 1, "hot": 1}
@@ -199,7 +208,9 @@ def test_ths_refresh_time_does_not_change_fact_snapshot_identity(tmp_path, targe
     assert second["snapshot_id"] == first["snapshot_id"]
 
 
-def test_refresh_failure_returns_stale_but_failure_without_cache_is_unavailable(tmp_path):
+def test_refresh_failure_returns_stale_but_failure_without_cache_is_unavailable(
+    tmp_path, make_isolated_database
+):
     service, provider, _, clock = make_service(tmp_path)
     first = service.get_information("002940.SZ")
     provider.failures = {"news", "irm", "hot"}
@@ -211,18 +222,11 @@ def test_refresh_failure_returns_stale_but_failure_without_cache_is_unavailable(
     assert stale["quality"]["status"] == "degraded"
     assert {item["status"] for item in stale["quality"]["sources"].values()} == {"stale"}
 
-    fresh_database = Database(str(tmp_path / "empty.sqlite3"))
+    fresh_database = make_isolated_database()
     unavailable = StockInformationService(provider, fresh_database, clock=clock).get_information("002940.SZ")
     assert unavailable["news"] == []
     assert unavailable["messages"] == []
-    assert unavailable["sentiment"] == {
-        "hot_rank": None,
-        "heat": None,
-        "rank_change": None,
-        "concepts": [],
-        "tag": None,
-        "observed_at": None,
-    }
+    assert unavailable["sentiment"] == UNAVAILABLE_SENTIMENT
     assert unavailable["quality"]["status"] == "unavailable"
     assert {item["status"] for item in unavailable["quality"]["sources"].values()} == {"unavailable"}
     assert fresh_database.get_external_information_cache("002940", "eastmoney_news", now=clock()) is None
@@ -245,7 +249,7 @@ def test_valid_empty_results_are_cached(tmp_path):
 
 def test_same_source_and_key_are_single_flight(tmp_path):
     provider = FakeInformationProvider()
-    database = Database(str(tmp_path / "single-flight.sqlite3"))
+    database = Database()
     store = CoordinatedMissStore(database, parties=8)
     service = StockInformationService(provider, store, clock=MutableClock())
 
@@ -294,6 +298,87 @@ def test_news_and_messages_are_sorted_and_deduplicated(tmp_path):
 
     assert [item["id"] for item in result["news"]] == ["new", "duplicate"]
     assert [item["id"] for item in result["messages"]] == ["new", "old"]
+
+
+def test_historical_as_of_drops_future_items_and_marks_the_hot_list_unavailable(tmp_path):
+    provider = FakeInformationProvider()
+    provider.news = [
+        {**provider.news[0], "id": "past", "url": "https://example.com/past", "published_at": "2026-08-10T08:00:00+08:00"},
+        {**provider.news[0], "id": "future", "url": "https://example.com/future", "published_at": "2026-08-13T08:00:00+08:00"},
+    ]
+    provider.messages = [
+        {**provider.messages[0], "id": "past", "question": "过去的问题", "published_at": "2026-08-09T16:00:00+08:00"},
+        {**provider.messages[0], "id": "future", "question": "未来的问题", "published_at": "2026-08-12T16:00:00+08:00"},
+    ]
+    service, _, _, _ = make_service(tmp_path, provider=provider)
+
+    live = service.get_information("002940.SZ")
+    historical = service.get_information("002940.SZ", as_of=date(2026, 8, 11))
+
+    assert [item["id"] for item in live["news"]] == ["future", "past"]
+    assert [item["id"] for item in historical["news"]] == ["past"]
+    assert [item["id"] for item in historical["messages"]] == ["past"]
+    # 热榜只有实时快照，不用今天的数据冒充历史时点的情绪面。
+    assert historical["sentiment"] == UNAVAILABLE_SENTIMENT
+    assert historical["quality"]["status"] == "degraded"
+    assert historical["quality"]["sources"]["ths_hot_list"]["status"] == "unavailable"
+    assert HOT_LIST_NOT_REPLAYABLE in historical["quality"]["warnings"]
+    assert historical["snapshot_id"] != live["snapshot_id"]
+
+
+def test_historical_as_of_does_not_refresh_the_hot_list_at_all(tmp_path):
+    service, provider, _, _ = make_service(tmp_path)
+
+    service.get_information("002940.SZ", as_of=date(2026, 8, 11))
+
+    assert provider.calls == {"news": 1, "irm": 1, "hot": 0}
+
+
+def test_as_of_today_keeps_the_live_hot_list_and_same_day_publications(tmp_path):
+    service, provider, _, _ = make_service(tmp_path)
+
+    same_day = service.get_information("002940.SZ", as_of=date(2026, 8, 13))
+
+    assert [item["id"] for item in same_day["news"]] == ["eastmoney:002940:1"]
+    assert same_day["sentiment"]["hot_rank"] == 8
+    assert same_day["quality"]["status"] == "ok"
+    assert provider.calls["hot"] == 1
+
+
+def test_as_of_none_keeps_the_live_behaviour_unchanged(tmp_path):
+    service, provider, _, _ = make_service(tmp_path)
+
+    result = service.get_information("002940.SZ")
+
+    assert [item["id"] for item in result["news"]] == ["eastmoney:002940:1"]
+    assert [item["id"] for item in result["messages"]] == ["cninfo:002940:1"]
+    assert result["sentiment"]["hot_rank"] == 8
+    assert result["quality"] == {
+        "status": "ok",
+        "warnings": [],
+        "sources": {
+            "eastmoney_news": {"status": "fresh", "fetched_at": NOW.isoformat()},
+            "cninfo_irm": {"status": "fresh", "fetched_at": NOW.isoformat()},
+            "ths_hot_list": {"status": "fresh", "fetched_at": NOW.isoformat()},
+        },
+    }
+    assert provider.calls == {"news": 1, "irm": 1, "hot": 1}
+
+
+def test_historical_as_of_reads_naive_timestamps_as_shanghai_and_drops_unverifiable(tmp_path):
+    provider = FakeInformationProvider()
+    provider.news = [
+        {**provider.news[0], "id": "naive-inside", "url": "https://example.com/a", "published_at": "2026-08-11 20:00:00"},
+        {**provider.news[0], "id": "naive-outside", "url": "https://example.com/b", "published_at": "2026-08-12 00:30:00"},
+        {**provider.news[0], "id": "unverifiable", "url": "https://example.com/c", "published_at": ""},
+    ]
+    service, _, _, _ = make_service(tmp_path, provider=provider)
+
+    historical = service.get_information("002940.SZ", as_of=date(2026, 8, 11))
+    live = service.get_information("002940.SZ")
+
+    assert [item["id"] for item in historical["news"]] == ["naive-inside"]
+    assert {item["id"] for item in live["news"]} == {"naive-inside", "naive-outside", "unverifiable"}
 
 
 def test_cache_keeps_twenty_items_while_limit_only_slices_response(tmp_path):

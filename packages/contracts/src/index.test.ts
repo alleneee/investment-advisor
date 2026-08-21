@@ -9,6 +9,7 @@ import {
   REPORT_DRAFT_V1_JSON_SCHEMA,
   REPORT_DRAFT_V2_JSON_SCHEMA,
   validateReportDraftV2,
+  type ConditionOperator,
   type ReferenceRegistry,
   type ReportDraftV2,
 } from './index.js';
@@ -22,6 +23,12 @@ const registry: ReferenceRegistry = {
   'irm.response': { ref: 'irm.response', kind: 'irm', label: '互动回复', value: true },
   'hot.topic': { ref: 'hot.topic', kind: 'hot', label: '热点', value: null },
   'information.quality': { ref: 'information.quality', kind: 'information_quality', label: '信息质量', value: '中' },
+};
+
+// 带固化收盘锚点的注册表：压力位在锚点上方、支撑位在锚点下方，两侧都还没有被解决。
+const anchoredRegistry: ReferenceRegistry = {
+  ...registry,
+  'market.latest_close': { ref: 'market.latest_close', kind: 'price_level', label: '最新固化收盘', value: '11.5' },
 };
 
 function validV2(): ReportDraftV2 {
@@ -111,6 +118,92 @@ test('ReportDraftV2 enforces condition kinds and exact reference-registry keys',
   assert.equal(validateReportDraftV2(validV2(), wrongRegistry).ok, false);
   assert.equal(validateReportDraftV2({ ...validV2(), outlook: { ...validV2().outlook, scenarios: validV2().outlook.scenarios.map((scenario) => ({ ...scenario, trigger: { ...scenario.trigger, threshold: 12 } })) } }, registry).ok, false);
   assert.equal(validateReportDraftV2(validV2(), { ...registry, broken: null } as unknown as ReferenceRegistry).ok, false);
+});
+
+test('ReportDraftV2 rejects trigger and invalidation pairs that cannot be falsified', () => {
+  const tautologies: Array<[ConditionOperator, ConditionOperator]> = [
+    ['hold_below', 'break_above'],
+    ['break_above', 'hold_below'],
+    ['hold_above', 'break_below'],
+    ['break_below', 'hold_above'],
+    ['break_above', 'break_above'],
+  ];
+  for (const [trigger, invalidation] of tautologies) {
+    const report = validV2();
+    report.outlook.scenarios[1].trigger = { operator: trigger, fact_ref: 'market.resistance' };
+    report.outlook.scenarios[1].invalidation = { operator: invalidation, fact_ref: 'market.resistance' };
+    const result = validateReportDraftV2(report, registry);
+    assert.equal(result.ok, false, `${trigger}/${invalidation}`);
+    if (!result.ok) assert.match(result.errors.join('\n'), /scenario\.1 trigger and invalidation must not be identical or logical complements/);
+  }
+});
+
+test('ReportDraftV2 keeps opposite breakouts on one fact and every cross-fact pair valid', () => {
+  const oppositeBreakouts = validV2();
+  oppositeBreakouts.outlook.scenarios[1].trigger = { operator: 'break_above', fact_ref: 'market.resistance' };
+  oppositeBreakouts.outlook.scenarios[1].invalidation = { operator: 'break_below', fact_ref: 'market.resistance' };
+  assert.deepEqual(validateReportDraftV2(oppositeBreakouts, registry), { ok: true });
+  const crossFact = validV2();
+  crossFact.outlook.scenarios[1].trigger = { operator: 'hold_below', fact_ref: 'market.resistance' };
+  crossFact.outlook.scenarios[1].invalidation = { operator: 'break_below', fact_ref: 'market.support' };
+  assert.deepEqual(validateReportDraftV2(crossFact, registry), { ok: true });
+});
+
+test('ReportDraftV2 rejects price conditions already resolved at the anchor close', () => {
+  const resolved: Array<[ConditionOperator, string]> = [
+    ['break_above', 'market.support'],
+    ['break_below', 'market.resistance'],
+    ['hold_above', 'market.resistance'],
+    ['hold_below', 'market.support'],
+  ];
+  for (const [operator, fact_ref] of resolved) {
+    const report = validV2();
+    report.outlook.scenarios[0].trigger = { operator, fact_ref };
+    const result = validateReportDraftV2(report, anchoredRegistry);
+    assert.equal(result.ok, false, `${operator}/${fact_ref}`);
+    if (!result.ok) assert.match(result.errors.join('\n'), /scenario\.0\.trigger references a level already resolved at the anchor close/);
+  }
+  const resolvedInvalidation = validV2();
+  resolvedInvalidation.outlook.scenarios[0].invalidation = { operator: 'hold_above', fact_ref: 'market.resistance' };
+  const result = validateReportDraftV2(resolvedInvalidation, anchoredRegistry);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.errors.join('\n'), /scenario\.0\.invalidation references a level already resolved/);
+});
+
+test('ReportDraftV2 keeps price conditions that are still open at the anchor close', () => {
+  const open: Array<[ConditionOperator, string]> = [
+    ['break_above', 'market.resistance'],
+    ['break_below', 'market.support'],
+    // 收盘仍在支撑上方，"保持上方"正常且必要，不算退化。
+    ['hold_above', 'market.support'],
+    ['hold_below', 'market.resistance'],
+    // 水平正好等于固化收盘时两侧都还没有被解决。
+    ['break_above', 'market.latest_close'],
+    ['break_below', 'market.latest_close'],
+    ['hold_above', 'market.latest_close'],
+    ['hold_below', 'market.latest_close'],
+  ];
+  for (const [operator, fact_ref] of open) {
+    const report = validV2();
+    report.outlook.scenarios[0].trigger = { operator, fact_ref };
+    assert.deepEqual(validateReportDraftV2(report, anchoredRegistry), { ok: true }, `${operator}/${fact_ref}`);
+  }
+});
+
+test('ReportDraftV2 skips the anchor check without a numeric latest close', () => {
+  const report = validV2();
+  report.outlook.scenarios[0].trigger = { operator: 'break_above', fact_ref: 'market.support' };
+  assert.deepEqual(validateReportDraftV2(report, registry), { ok: true });
+  const notNumeric: ReferenceRegistry = {
+    ...anchoredRegistry,
+    'market.latest_close': { ...anchoredRegistry['market.latest_close'], value: '暂无收盘' },
+  };
+  assert.deepEqual(validateReportDraftV2(report, notNumeric), { ok: true });
+  const wrongKind: ReferenceRegistry = {
+    ...anchoredRegistry,
+    'market.latest_close': { ...anchoredRegistry['market.latest_close'], kind: 'market' },
+  };
+  assert.deepEqual(validateReportDraftV2(report, wrongKind), { ok: true });
 });
 
 test('ReportDraftV2 requires three evidence classes at top level and across scenarios plus risks', () => {

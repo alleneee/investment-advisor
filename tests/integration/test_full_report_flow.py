@@ -8,7 +8,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -103,10 +103,10 @@ class StableMarketService:
 
 class StableInformationService:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, int]] = []
+        self.calls: list[tuple[str, int, Any]] = []
 
-    def get_information(self, symbol: str, *, limit: int = 20) -> dict[str, Any]:
-        self.calls.append((symbol, limit))
+    def get_information(self, symbol: str, *, limit: int = 20, as_of: Any = None) -> dict[str, Any]:
+        self.calls.append((symbol, limit, as_of))
         return {
             "symbol": symbol,
             "snapshot_id": "information-stable",
@@ -265,7 +265,7 @@ def test_full_report_crosses_real_python_and_node_http_boundaries(tmp_path, monk
     python_url = f"http://127.0.0.1:{python_port}"
     token = "integration-internal-token"
     audit_path = tmp_path / "tool-audit.jsonl"
-    database = Database(str(tmp_path / "report.sqlite"))
+    database = Database()
     market = StableMarketService()
     information = StableInformationService()
     fixed_now = datetime(2026, 8, 13, 10, 30, tzinfo=UTC)
@@ -359,4 +359,8 @@ def test_full_report_crosses_real_python_and_node_http_boundaries(tmp_path, monk
         ("002940.SZ", "2026-08-13", "1w"),
         ("002940.SZ", "2026-08-13", "1w"),
     ]
-    assert information.calls == [("002940.SZ", 20), ("002940.SZ", 20)]
+    # 资讯必须与行情固化到同一个 as_of，否则历史报告会引用固化日之后的新闻。
+    assert information.calls == [
+        ("002940.SZ", 20, date(2026, 8, 13)),
+        ("002940.SZ", 20, date(2026, 8, 13)),
+    ]

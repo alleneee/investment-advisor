@@ -5,11 +5,17 @@ import json
 import threading
 from collections.abc import Callable
 from concurrent.futures import Future
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, ClassVar
 from urllib.parse import urlsplit, urlunsplit
+from zoneinfo import ZoneInfo
 
 from .providers.a_stock_data import InformationSourceError, normalize_symbol_code
+
+# 资讯的时间语义跟随交易语义：按东八区判断某条资讯是否落在 as_of 当日结束之前。
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+# 同花顺热榜是时点快照、没有历史序列，历史 as_of 无法重建，只能显式标为不可用。
+HOT_LIST_NOT_REPLAYABLE = "同花顺热榜只有实时快照、没有历史序列，历史时点的情绪面无法重建，已置为不可用"
 
 
 class StockInformationService:
@@ -26,12 +32,26 @@ class StockInformationService:
         self._flight_lock = threading.Lock()
         self._flights: dict[tuple[str, str], Future[dict[str, Any]]] = {}
 
-    def get_information(self, symbol: str, *, limit: int = 20) -> dict[str, Any]:
+    def get_information(
+        self,
+        symbol: str,
+        *,
+        limit: int = 20,
+        as_of: date | None = None,
+    ) -> dict[str, Any]:
+        """按需固化到历史时点的资讯快照。
+
+        ``as_of`` 为 ``None`` 时行为与实时查询完全一致。给出历史日期时，新闻与
+        互动问答按发布时间不晚于该日东八区结束时刻过滤；热榜没有历史序列，直接
+        标为不可用而不是拿今天的快照冒充历史。
+        """
         if limit < 1 or limit > 20:
             raise ValueError("limit 必须在 1 到 20 之间")
         code = normalize_symbol_code(symbol)
         normalized_symbol = f"{code}.{'SH' if code.startswith('6') else 'SZ'}"
         generated_at = self._aware_now()
+        cutoff = _day_end(as_of) if as_of is not None else None
+        historical = as_of is not None and as_of < generated_at.astimezone(SHANGHAI).date()
         news_source = self._load_source(
             "eastmoney_news",
             code,
@@ -42,20 +62,23 @@ class StockInformationService:
             code,
             lambda: self.provider.cninfo_questions(code, page_size=20),
         )
-        hot_source = self._load_source(
-            "ths_hot_list",
-            "market",
-            self.provider.ths_hot_list,
+        hot_source = (
+            self._source_result([], "unavailable", None)
+            if historical
+            else self._load_source("ths_hot_list", "market", self.provider.ths_hot_list)
         )
-        news = self._news(news_source["payload"], code)
-        messages = self._messages(irm_source["payload"], code)
+        news = _published_until(self._news(news_source["payload"], code), cutoff)
+        messages = _published_until(self._messages(irm_source["payload"], code), cutoff)
         sentiment = self._sentiment(hot_source, code)
         source_results = {
             "eastmoney_news": news_source,
             "cninfo_irm": irm_source,
             "ths_hot_list": hot_source,
         }
-        quality = self._quality(source_results)
+        quality = self._quality(
+            source_results,
+            extra_warnings=[HOT_LIST_NOT_REPLAYABLE] if historical else [],
+        )
         sentiment_facts = {key: value for key, value in sentiment.items() if key != "observed_at"}
         snapshot_payload = {
             "symbol": normalized_symbol,
@@ -201,7 +224,10 @@ class StockInformationService:
         }
 
     @staticmethod
-    def _quality(sources: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    def _quality(
+        sources: dict[str, dict[str, Any]],
+        extra_warnings: list[str] | None = None,
+    ) -> dict[str, Any]:
         statuses = [source["status"] for source in sources.values()]
         if all(status == "unavailable" for status in statuses):
             status = "unavailable"
@@ -210,9 +236,12 @@ class StockInformationService:
         else:
             status = "ok"
         warnings = [
-            f"{source} 数据源状态为 {result['status']}"
-            for source, result in sources.items()
-            if result["status"] in {"stale", "unavailable"}
+            *(
+                f"{source} 数据源状态为 {result['status']}"
+                for source, result in sources.items()
+                if result["status"] in {"stale", "unavailable"}
+            ),
+            *(extra_warnings or []),
         ]
         return {
             "status": status,
@@ -230,11 +259,38 @@ class StockInformationService:
         return value
 
 
-def _occurred_at(value: Any) -> datetime:
+def _published_at(value: Any) -> datetime | None:
+    """解析发布时间；缺少时区信息时按东八区处理（交易语义）。"""
     try:
-        return datetime.fromisoformat(str(value))
+        moment = datetime.fromisoformat(str(value))
     except ValueError:
-        return datetime.min.replace(tzinfo=UTC)
+        return None
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=SHANGHAI)
+
+
+def _occurred_at(value: Any) -> datetime:
+    return _published_at(value) or datetime.min.replace(tzinfo=UTC)
+
+
+def _day_end(value: date) -> datetime:
+    return datetime.combine(value, time.max, tzinfo=SHANGHAI)
+
+
+def _published_until(
+    items: list[dict[str, Any]],
+    cutoff: datetime | None,
+) -> list[dict[str, Any]]:
+    """历史快照只保留发布时间可核验、且不晚于截止时刻的条目。
+
+    无法解析发布时间的条目无法证明属于历史，按"不用推测值填充"的一贯口径剔除。
+    """
+    if cutoff is None:
+        return items
+    return [
+        item
+        for item in items
+        if (moment := _published_at(item.get("published_at"))) is not None and moment <= cutoff
+    ]
 
 
 def _normalized_url(value: str) -> str:

@@ -4,15 +4,18 @@ import copy
 import hashlib
 import json
 import re
-import sqlite3
 import threading
 import unicodedata
 import uuid
 from collections.abc import Callable
 from datetime import UTC, date, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
+import psycopg
+
+from .domain.report_outcome import condition_resolved_at_anchor
 
 REPORT_SCHEMA_VERSION = "investment_report.v2"
 PROMPT_VERSION = "pi-advisor.v2.1"
@@ -30,8 +33,19 @@ DIGEST_FIELDS = (
     "model",
 )
 REFERENCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+# 固化日收盘：价格类条件的锚点，用来拒收在报告写出来时就已经被解决的条件。
+ANCHOR_REFERENCE = "market.latest_close"
+# 近端价格水平取最近这么多根固化 K 线，给模型贴近现价、不会在固化日就已越线的选择。
+RECENT_LEVEL_BARS = 60
 PRICE_OPERATORS = {"break_above", "hold_above", "break_below", "hold_below"}
 STRUCTURE_OPERATORS = {"structure_confirmed", "structure_invalidated"}
+# 同一事实上互为逻辑补集的算子：一旦触发成立，失效条件在数学上永远无法成立。
+COMPLEMENT_OPERATORS = {
+    "hold_above": "break_below",
+    "break_below": "hold_above",
+    "hold_below": "break_above",
+    "break_above": "hold_below",
+}
 REFERENCE_KINDS = {
     "market",
     "price_level",
@@ -138,7 +152,8 @@ class InvestmentReportService:
         current = self._now()
         as_of = current.date()
         analysis = self.market_service.analyze(symbol, as_of=as_of, timeframe=timeframe)
-        information = self.information_service.get_information(symbol, limit=20)
+        # 资讯必须固化到同一个 as_of，否则历史报告会引用固化日之后的新闻（前视偏差）。
+        information = self.information_service.get_information(symbol, limit=20, as_of=as_of)
         market = analysis["market_snapshot"]
         chan = analysis["chan_analysis"]
         frozen = {
@@ -254,7 +269,7 @@ class InvestmentReportService:
                     retryable=False,
                 ).as_dict(),
             )
-        except (KeyError, RuntimeError, TypeError, httpx.HTTPError, sqlite3.Error):
+        except (KeyError, RuntimeError, TypeError, httpx.HTTPError, psycopg.Error):
             self._fail(
                 report_id,
                 job["lease_epoch"],
@@ -311,9 +326,9 @@ def build_reference_registry(frozen_input: dict[str, Any]) -> dict[str, dict[str
     bars = market.get("bars") if isinstance(market.get("bars"), list) else []
     valid_bars = [bar for bar in bars if isinstance(bar, dict)]
     latest = valid_bars[-1] if valid_bars else {}
-    recent_high = max((bar.get("high") for bar in valid_bars), key=_number, default=None)
-    recent_low = min((bar.get("low") for bar in valid_bars), key=_number, default=None)
-    occurred_at = _string_or_none(latest.get("occurred_at"))
+    latest_close = _decimal_or_none(latest.get("close"))
+    recent_bars = valid_bars[-RECENT_LEVEL_BARS:]
+    recent_span = _recent_span_label(frozen_input.get("timeframe"))
     registry: dict[str, dict[str, Any]] = {}
     _add_reference(
         registry,
@@ -324,27 +339,21 @@ def build_reference_registry(frozen_input: dict[str, Any]) -> dict[str, dict[str
     )
     _add_reference(
         registry,
-        "market.latest_close",
+        ANCHOR_REFERENCE,
         "price_level",
         "最新固化收盘",
         latest.get("close"),
-        occurred_at=occurred_at,
+        occurred_at=_string_or_none(latest.get("occurred_at")),
     )
-    _add_reference(
-        registry,
-        "market.recent_high",
-        "price_level",
-        "固化窗口高点",
-        recent_high,
-        occurred_at=occurred_at,
+    # 固化窗口是五年，窗口极值离现价可能很远；标签写明真实跨度，并把 occurred_at
+    # 指向极值实际发生的那根 K 线，避免模型误当成近期高低点使用。
+    _add_extreme_reference(registry, "market.recent_high", "五年窗口最高价", valid_bars, "high", highest=True)
+    _add_extreme_reference(registry, "market.recent_low", "五年窗口最低价", valid_bars, "low", highest=False)
+    _add_extreme_reference(
+        registry, "market.recent_high_60", f"近六十{recent_span}最高价", recent_bars, "high", highest=True
     )
-    _add_reference(
-        registry,
-        "market.recent_low",
-        "price_level",
-        "固化窗口低点",
-        recent_low,
-        occurred_at=occurred_at,
+    _add_extreme_reference(
+        registry, "market.recent_low_60", f"近六十{recent_span}最低价", recent_bars, "low", highest=False
     )
 
     snapshot = chan.get("snapshot") if isinstance(chan.get("snapshot"), dict) else {}
@@ -362,13 +371,13 @@ def build_reference_registry(frozen_input: dict[str, Any]) -> dict[str, dict[str
         occurred_at=_string_or_none(snapshot.get("occurred_at")),
     )
     centers = [value for value in _list(snapshot.get("centers")) if isinstance(value, dict)]
-    if centers:
-        center = centers[-1]
+    center = _center_holding_close(centers, latest_close)
+    if center is not None:
         _add_reference(
             registry,
             "chan.center.upper",
             "price_level",
-            "最新中枢上沿",
+            "现价所在中枢上沿",
             center.get("upper"),
             occurred_at=_string_or_none(center.get("occurred_at")),
         )
@@ -376,7 +385,7 @@ def build_reference_registry(frozen_input: dict[str, Any]) -> dict[str, dict[str
             registry,
             "chan.center.lower",
             "price_level",
-            "最新中枢下沿",
+            "现价所在中枢下沿",
             center.get("lower"),
             occurred_at=_string_or_none(center.get("occurred_at")),
         )
@@ -474,6 +483,7 @@ def validate_report_draft_v2(
         errors.append("evidence coverage")
 
     narrative_refs: list[str] = []
+    anchor = _anchor_close(registry)
     outlook = report.get("outlook")
     if not isinstance(outlook, dict):
         errors.append("outlook")
@@ -502,6 +512,13 @@ def validate_report_draft_v2(
                 )
                 _validate_condition(scenario.get("trigger"), registry, errors)
                 _validate_condition(scenario.get("invalidation"), registry, errors)
+                _validate_condition_pair(
+                    scenario.get("trigger"), scenario.get("invalidation"), index, errors
+                )
+                for name in ("trigger", "invalidation"):
+                    _validate_condition_anchor(
+                        scenario.get(name), registry, anchor, index, name, errors
+                    )
                 narrative_refs.extend(
                     _validate_refs(scenario.get("evidence_refs"), registry, f"scenario.{index}.evidence_refs", errors)
                 )
@@ -587,17 +604,78 @@ def _add_reference(
     registry[ref] = entry
 
 
+def _add_extreme_reference(
+    registry: dict[str, dict[str, Any]],
+    ref: str,
+    label: str,
+    bars: list[dict[str, Any]],
+    field: str,
+    *,
+    highest: bool,
+) -> None:
+    """暴露一段 K 线的极值水平，occurred_at 指向极值真正发生的那根 K 线。"""
+    bar = _extreme_bar(bars, field, highest=highest)
+    _add_reference(
+        registry,
+        ref,
+        "price_level",
+        label,
+        bar.get(field) if bar is not None else None,
+        occurred_at=_string_or_none(bar.get("occurred_at")) if bar is not None else None,
+    )
+
+
+def _extreme_bar(bars: list[dict[str, Any]], field: str, *, highest: bool) -> dict[str, Any] | None:
+    numeric = [
+        (bar, value)
+        for bar, value in ((bar, _decimal_or_none(bar.get(field))) for bar in bars)
+        if value is not None
+    ]
+    if not numeric:
+        return None
+    picker = max if highest else min
+    return picker(numeric, key=lambda item: item[1])[0]
+
+
+def _center_holding_close(
+    centers: list[dict[str, Any]],
+    close: Decimal | None,
+) -> dict[str, Any] | None:
+    """从后往前找第一个仍然包含最新收盘的中枢。
+
+    缠论引擎对每三笔滑窗都产出一个中枢，"最新"那个可能是几周前、价格已经离开的
+    区间；只暴露仍然约束现价的中枢，否则模型写出的「跌破下沿」在报告固化那天就
+    已经成立。没有任何中枢包含现价时返回 ``None``，上下沿一并省略。
+    """
+    if close is None:
+        return None
+    for center in reversed(centers):
+        lower = _decimal_or_none(center.get("lower"))
+        upper = _decimal_or_none(center.get("upper"))
+        if lower is not None and upper is not None and lower <= close <= upper:
+            return center
+    return None
+
+
+def _recent_span_label(timeframe: Any) -> str:
+    """近端水平的跨度单位：日线按交易日计，周线按周计。"""
+    return "周" if str(timeframe) == "1w" else "个交易日"
+
+
 def _json_value(value: Any) -> str | int | float | bool | None:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     return str(value)
 
 
-def _number(value: Any) -> float:
+def _decimal_or_none(value: Any) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
     try:
-        return float(value)
-    except (TypeError, ValueError):
-        return float("-inf")
+        result = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return result if result.is_finite() else None
 
 
 def _list(value: Any) -> list[Any]:
@@ -673,6 +751,59 @@ def _validate_condition(value: Any, registry: dict[str, dict[str, Any]], errors:
         return
     if not isinstance(entry, dict) or entry.get("kind") != expected:
         errors.append("condition fact kind")
+
+
+def _anchor_close(registry: dict[str, dict[str, Any]]) -> Any:
+    """固化日收盘价，取自引用注册表本身，不改校验函数签名。
+
+    注册表缺少 ``market.latest_close``、类型不对或值不是数值时返回 ``None``，
+    此时跳过锚点校验：精简夹具的注册表允许没有锚点，缺锚点不应导致拒收。
+    """
+    entry = registry.get(ANCHOR_REFERENCE) if isinstance(registry, dict) else None
+    if not isinstance(entry, dict) or entry.get("kind") != "price_level":
+        return None
+    return entry.get("value")
+
+
+def _validate_condition_anchor(
+    value: Any,
+    registry: dict[str, dict[str, Any]],
+    anchor: Any,
+    index: int,
+    name: str,
+    errors: list[str],
+) -> None:
+    """拒收在报告固化时点就已经被解决的价格条件。
+
+    固化日收盘已经越过 break 水平、或已经跌破（越过）hold 水平的条件，在展望
+    窗口第一根 K 线上必然命中：这是复述既成事实，不是预测。判据与
+    ``app.domain.report_outcome.condition_resolved_at_anchor`` 同一事实源。
+    """
+    if anchor is None or not isinstance(value, dict):
+        return
+    ref = value.get("fact_ref")
+    entry = registry.get(ref) if isinstance(ref, str) else None
+    level = entry.get("value") if isinstance(entry, dict) else None
+    if condition_resolved_at_anchor(value.get("operator"), anchor, level):
+        errors.append(f"scenario.{index}.{name} resolved at anchor close")
+
+
+def _validate_condition_pair(trigger: Any, invalidation: Any, index: int, errors: list[str]) -> None:
+    """同一事实上的触发与失效条件不得同义反复，否则情景无法被否证。"""
+    if not isinstance(trigger, dict) or not isinstance(invalidation, dict):
+        return
+    trigger_operator = trigger.get("operator")
+    invalidation_operator = invalidation.get("operator")
+    if not isinstance(trigger_operator, str) or not isinstance(invalidation_operator, str):
+        return
+    ref = trigger.get("fact_ref")
+    if not isinstance(ref, str) or ref != invalidation.get("fact_ref"):
+        return
+    if (
+        trigger_operator == invalidation_operator
+        or COMPLEMENT_OPERATORS.get(trigger_operator) == invalidation_operator
+    ):
+        errors.append(f"scenario.{index} tautological condition pair")
 
 
 def _coverage(refs: list[str]) -> bool:

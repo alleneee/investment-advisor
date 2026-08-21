@@ -226,6 +226,25 @@ const FORBIDDEN_SEMANTICS = /(买入|卖出|做多|做空|仓位|止损|目标�
 const ARABIC_DIGIT = /\p{N}/u;
 const PRICE_LEVEL_OPERATORS = new Set<ConditionOperator>(['break_above', 'hold_above', 'break_below', 'hold_below']);
 const STRUCTURE_OPERATORS = new Set<ConditionOperator>(['structure_confirmed', 'structure_invalidated']);
+// 同一事实上互为逻辑补集的算子：一旦触发成立，失效条件在数学上永远无法成立。
+const COMPLEMENT_OPERATORS: Partial<Record<string, ConditionOperator>> = {
+  hold_above: 'break_below',
+  break_below: 'hold_above',
+  hold_below: 'break_above',
+  break_above: 'hold_below',
+};
+// 固化日收盘的引用：价格类条件的锚点。
+const ANCHOR_REFERENCE = 'market.latest_close';
+// 固化收盘落在哪一侧就意味着条件已经被解决：break_* 已经越线，hold_* 已被违反。
+// 这类条件在展望窗口第一根 K 线上必然命中，只是复述既成事实，没有预测力。
+// 注意 hold_above 在固化日收盘正好位于水平上方是正常且必要的，只有已跌破才无效。
+// 与 apps/api/app/domain/report_outcome.py 的 condition_resolved_at_anchor 同一判据。
+const ANCHOR_RESOLVED: Partial<Record<string, (anchor: number, level: number) => boolean>> = {
+  break_above: (anchor, level) => anchor > level,
+  break_below: (anchor, level) => anchor < level,
+  hold_above: (anchor, level) => anchor < level,
+  hold_below: (anchor, level) => anchor > level,
+};
 
 export function validateReferenceId(value: unknown): value is string {
   return typeof value === 'string' && REFERENCE_ID.test(value);
@@ -303,6 +322,41 @@ function validateCondition(value: unknown, registry: ReferenceRegistry, errors: 
   if (registry[factRef].kind !== expectedKind) errors.push(`${name} fact_ref must reference ${expectedKind}`);
 }
 
+function numericLevel(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== 'string' || value.trim() === '') return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+// 注册表缺少 market.latest_close、类型不对或值不是数值时返回 undefined，锚点校验整项跳过：
+// 精简夹具的注册表允许没有锚点，缺锚点不应导致拒收。
+function anchorClose(registry: ReferenceRegistry): number | undefined {
+  const entry = registry[ANCHOR_REFERENCE];
+  if (!entry || typeof entry !== 'object' || entry.kind !== 'price_level') return undefined;
+  return numericLevel(entry.value);
+}
+
+function validateConditionAnchor(value: unknown, registry: ReferenceRegistry, anchor: number | undefined, errors: string[], name: string): void {
+  if (anchor === undefined || !value || typeof value !== 'object' || Array.isArray(value)) return;
+  const condition = value as Partial<ConditionRef>;
+  const resolved = ANCHOR_RESOLVED[String(condition.operator)];
+  const level = typeof condition.fact_ref === 'string' ? numericLevel(registry[condition.fact_ref]?.value) : undefined;
+  if (resolved && level !== undefined && resolved(anchor, level)) {
+    errors.push(`${name} references a level already resolved at the anchor close`);
+  }
+}
+
+function validateConditionPair(trigger: unknown, invalidation: unknown, errors: string[], name: string): void {
+  const first = trigger as Partial<ConditionRef> | null;
+  const second = invalidation as Partial<ConditionRef> | null;
+  if (!first || !second || typeof first.operator !== 'string' || typeof second.operator !== 'string') return;
+  if (typeof first.fact_ref !== 'string' || first.fact_ref !== second.fact_ref) return;
+  if (first.operator === second.operator || COMPLEMENT_OPERATORS[first.operator] === second.operator) {
+    errors.push(`${name} trigger and invalidation must not be identical or logical complements on the same fact_ref`);
+  }
+}
+
 function validateRegistry(registry: ReferenceRegistry, errors: string[]): void {
   const allowedKinds = new Set<ReferenceKind>(['market', 'price_level', 'structure', 'news', 'irm', 'hot', 'information_quality']);
   for (const [key, candidate] of Object.entries(registry)) {
@@ -331,6 +385,7 @@ export function validateReportDraftV2(report: unknown, registry: ReferenceRegist
   if (!hasEvidenceCoverage(topRefs)) errors.push('evidence_refs must cover market, chan, and information evidence');
 
   const narrativeRefs: string[] = [];
+  const anchor = anchorClose(registry);
   if (exactObject(report.outlook, ['horizon', 'direction', 'confidence', 'thesis', 'scenarios'], errors, 'outlook')) {
     if (report.outlook.horizon !== '5-20-trading-days') errors.push('invalid outlook horizon');
     if (!['bullish', 'sideways', 'bearish', 'uncertain'].includes(String(report.outlook.direction))) errors.push('invalid outlook direction');
@@ -345,6 +400,9 @@ export function validateReportDraftV2(report: unknown, registry: ReferenceRegist
         validateNarrative(scenario.narrative, errors, `scenario.${index}.narrative`);
         validateCondition(scenario.trigger, registry, errors, `scenario.${index}.trigger`);
         validateCondition(scenario.invalidation, registry, errors, `scenario.${index}.invalidation`);
+        validateConditionPair(scenario.trigger, scenario.invalidation, errors, `scenario.${index}`);
+        validateConditionAnchor(scenario.trigger, registry, anchor, errors, `scenario.${index}.trigger`);
+        validateConditionAnchor(scenario.invalidation, registry, anchor, errors, `scenario.${index}.invalidation`);
         narrativeRefs.push(...validateRefs(scenario.evidence_refs, registry, errors, `scenario.${index}.evidence_refs`));
       });
       if (new Set(cases).size !== 3 || !['bullish', 'base', 'bearish'].every((item) => cases.includes(item))) errors.push('scenario cases must be bullish, base, and bearish exactly once');
