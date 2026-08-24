@@ -10,12 +10,15 @@ interface StockInformationPanelProps {
 }
 
 export function StockInformationPanel({ information, loading = false, error = null }: StockInformationPanelProps) {
-  const [newsExpanded, setNewsExpanded] = useState(false);
-  const [messagesExpanded, setMessagesExpanded] = useState(false);
+  const symbol = information?.symbol ?? null;
+  const [newsExpansion, setNewsExpansion] = useState({ symbol, expanded: false });
+  const [messagesExpansion, setMessagesExpansion] = useState({ symbol, expanded: false });
   useEffect(() => {
-    setNewsExpanded(false);
-    setMessagesExpanded(false);
-  }, [information?.symbol]);
+    setNewsExpansion({ symbol, expanded: false });
+    setMessagesExpansion({ symbol, expanded: false });
+  }, [symbol]);
+  const newsExpanded = newsExpansion.symbol === symbol && newsExpansion.expanded;
+  const messagesExpanded = messagesExpansion.symbol === symbol && messagesExpansion.expanded;
   const visibleNews = information
     ? information.news.slice(0, newsExpanded ? information.news.length : DEFAULT_VISIBLE_INFORMATION_ITEMS)
     : [];
@@ -53,7 +56,7 @@ export function StockInformationPanel({ information, loading = false, error = nu
           type="button"
           className="information-toggle"
           aria-expanded={newsExpanded}
-          onClick={() => setNewsExpanded((expanded) => !expanded)}
+          onClick={() => setNewsExpansion({ symbol, expanded: !newsExpanded })}
         >{newsExpanded ? "收起全部新闻" : `展开全部新闻（还有 ${information.news.length - DEFAULT_VISIBLE_INFORMATION_ITEMS} 条）`}</button>}
       </div>
       <div className="information-column message-column">
@@ -70,7 +73,7 @@ export function StockInformationPanel({ information, loading = false, error = nu
           type="button"
           className="information-toggle"
           aria-expanded={messagesExpanded}
-          onClick={() => setMessagesExpanded((expanded) => !expanded)}
+          onClick={() => setMessagesExpansion({ symbol, expanded: !messagesExpanded })}
         >{messagesExpanded ? "收起全部问答" : `展开全部问答（还有 ${information.messages.length - DEFAULT_VISIBLE_INFORMATION_ITEMS} 条）`}</button>}
       </div>
       <div className="information-column sentiment-column">

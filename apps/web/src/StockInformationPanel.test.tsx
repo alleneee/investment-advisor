@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { StockInformationPanel } from "./StockInformationPanel";
@@ -149,6 +150,20 @@ function longInformation(): StockInformation {
   return value;
 }
 
+function StockInformationCommitProbe({
+  information,
+  onCommit,
+}: {
+  information: StockInformation;
+  onCommit: (content: string) => void;
+}) {
+  const container = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    onCommit(container.current?.textContent ?? "");
+  }, [information, onCommit]);
+  return <div ref={container}><StockInformationPanel information={information} /></div>;
+}
+
 describe("StockInformationPanel", () => {
   it("shows news, investor messages, and the hot-list snapshot", () => {
     render(<StockInformationPanel information={information()} />);
@@ -205,8 +220,14 @@ describe("StockInformationPanel", () => {
     expect(screen.getByText("互动问答 4")).toBeInTheDocument();
     expect(screen.queryByText("互动问答 5")).not.toBeInTheDocument();
     expect(screen.getAllByText("04 / 06")).toHaveLength(2);
-    expect(screen.getByRole("button", { name: "展开全部新闻（还有 2 条）" })).toHaveAttribute("aria-expanded", "false");
-    expect(screen.getByRole("button", { name: "展开全部问答（还有 2 条）" })).toHaveAttribute("aria-expanded", "false");
+    const newsToggle = screen.getByRole("button", { name: "展开全部新闻（还有 2 条）" });
+    const messagesToggle = screen.getByRole("button", { name: "展开全部问答（还有 2 条）" });
+    expect(newsToggle).toHaveAttribute("aria-expanded", "false");
+    expect(newsToggle).toHaveAttribute("type", "button");
+    expect(newsToggle).toHaveClass("information-toggle");
+    expect(messagesToggle).toHaveAttribute("aria-expanded", "false");
+    expect(messagesToggle).toHaveAttribute("type", "button");
+    expect(messagesToggle).toHaveClass("information-toggle");
   });
 
   it("expands and collapses news and messages independently", () => {
@@ -238,25 +259,50 @@ describe("StockInformationPanel", () => {
     expect(screen.getByRole("button", { name: "展开全部问答（还有 2 条）" })).toHaveAttribute("aria-expanded", "false");
   });
 
-  it("does not show expand buttons for feeds with no more than four items", () => {
-    render(<StockInformationPanel information={information()} />);
+  it("does not show expand buttons for feeds with exactly four items", () => {
+    const bounded = longInformation();
+    bounded.news = bounded.news.slice(0, 4);
+    bounded.messages = bounded.messages.slice(0, 4);
+
+    render(<StockInformationPanel information={bounded} />);
 
     expect(screen.queryByRole("button", { name: /全部新闻/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /全部问答/ })).not.toBeInTheDocument();
-    expect(screen.getAllByText("01 / 01")).toHaveLength(2);
+    expect(screen.getAllByText("04 / 04")).toHaveLength(2);
   });
 
-  it("collapses both feeds when the information symbol changes", () => {
-    const { rerender } = render(<StockInformationPanel information={longInformation()} />);
+  it("shows a local empty state when only news is empty", () => {
+    const partial = information();
+    partial.news = [];
+
+    render(<StockInformationPanel information={partial} />);
+
+    expect(screen.getByText("暂无新闻")).toBeInTheDocument();
+    expect(screen.getByText("产能进展如何？")).toBeInTheDocument();
+    expect(screen.getByText("00 / 00")).toBeInTheDocument();
+    expect(screen.getByText("01 / 01")).toBeInTheDocument();
+  });
+
+  it("does not commit expanded feeds for a new information symbol", () => {
+    const commits: string[] = [];
+    const recordCommit = (content: string) => commits.push(content);
+    const { rerender } = render(<StockInformationCommitProbe information={longInformation()} onCommit={recordCommit} />);
     fireEvent.click(screen.getByRole("button", { name: "展开全部新闻（还有 2 条）" }));
     fireEvent.click(screen.getByRole("button", { name: "展开全部问答（还有 2 条）" }));
     const nextInformation = longInformation();
     nextInformation.symbol = "600519.SH";
+    nextInformation.news = nextInformation.news.map((item, index) => ({ ...item, title: `新股票新闻 ${index + 1}` }));
+    nextInformation.messages = nextInformation.messages.map((item, index) => ({ ...item, question: `新股票问答 ${index + 1}` }));
 
-    rerender(<StockInformationPanel information={nextInformation} />);
+    rerender(<StockInformationCommitProbe information={nextInformation} onCommit={recordCommit} />);
 
-    expect(screen.queryByRole("heading", { name: "公司新闻 5" })).not.toBeInTheDocument();
-    expect(screen.queryByText("互动问答 5")).not.toBeInTheDocument();
+    const newSymbolCommit = commits[commits.length - 1];
+    expect(newSymbolCommit).toContain("新股票新闻 4");
+    expect(newSymbolCommit).not.toContain("新股票新闻 5");
+    expect(newSymbolCommit).toContain("新股票问答 4");
+    expect(newSymbolCommit).not.toContain("新股票问答 5");
+    expect(screen.queryByRole("heading", { name: "新股票新闻 5" })).not.toBeInTheDocument();
+    expect(screen.queryByText("新股票问答 5")).not.toBeInTheDocument();
     expect(screen.getAllByText("04 / 06")).toHaveLength(2);
     expect(screen.getByRole("button", { name: "展开全部新闻（还有 2 条）" })).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByRole("button", { name: "展开全部问答（还有 2 条）" })).toHaveAttribute("aria-expanded", "false");
