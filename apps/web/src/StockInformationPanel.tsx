@@ -1,4 +1,7 @@
+import { useEffect, useState } from "react";
 import type { StockInformation, StockNews } from "./types";
+
+const DEFAULT_VISIBLE_INFORMATION_ITEMS = 4;
 
 interface StockInformationPanelProps {
   information: StockInformation | null;
@@ -7,6 +10,18 @@ interface StockInformationPanelProps {
 }
 
 export function StockInformationPanel({ information, loading = false, error = null }: StockInformationPanelProps) {
+  const [newsExpanded, setNewsExpanded] = useState(false);
+  const [messagesExpanded, setMessagesExpanded] = useState(false);
+  useEffect(() => {
+    setNewsExpanded(false);
+    setMessagesExpanded(false);
+  }, [information?.symbol]);
+  const visibleNews = information
+    ? information.news.slice(0, newsExpanded ? information.news.length : DEFAULT_VISIBLE_INFORMATION_ITEMS)
+    : [];
+  const visibleMessages = information
+    ? information.messages.slice(0, messagesExpanded ? information.messages.length : DEFAULT_VISIBLE_INFORMATION_ITEMS)
+    : [];
   const empty = information != null
     && information.news.length === 0
     && information.messages.length === 0
@@ -30,21 +45,33 @@ export function StockInformationPanel({ information, loading = false, error = nu
     {empty && <div className="information-empty">暂无可用资讯证据</div>}
     {information && !empty && <div className="information-grid">
       <div className="information-column news-column">
-        <div className="information-column-heading"><span>01</span><strong>公司新闻</strong><small>{information.news.length.toString().padStart(2, "0")}</small></div>
+        <div className="information-column-heading"><span>01</span><strong>公司新闻</strong><small>{visibleNews.length.toString().padStart(2, "0")} / {information.news.length.toString().padStart(2, "0")}</small></div>
         <div className="information-list">
-          {information.news.length ? information.news.map((item) => <NewsItem item={item} key={item.id} />) : <div className="information-column-empty">暂无新闻</div>}
+          {information.news.length ? visibleNews.map((item) => <NewsItem item={item} key={item.id} />) : <div className="information-column-empty">暂无新闻</div>}
         </div>
+        {information.news.length > DEFAULT_VISIBLE_INFORMATION_ITEMS && <button
+          type="button"
+          className="information-toggle"
+          aria-expanded={newsExpanded}
+          onClick={() => setNewsExpanded((expanded) => !expanded)}
+        >{newsExpanded ? "收起全部新闻" : `展开全部新闻（还有 ${information.news.length - DEFAULT_VISIBLE_INFORMATION_ITEMS} 条）`}</button>}
       </div>
       <div className="information-column message-column">
-        <div className="information-column-heading"><span>02</span><strong>互动问答</strong><small>{information.messages.length.toString().padStart(2, "0")}</small></div>
+        <div className="information-column-heading"><span>02</span><strong>互动问答</strong><small>{visibleMessages.length.toString().padStart(2, "0")} / {information.messages.length.toString().padStart(2, "0")}</small></div>
         <div className="information-list">
-          {information.messages.length ? information.messages.map((item) => <article className="message-item" key={item.id}>
+          {information.messages.length ? visibleMessages.map((item) => <article className="message-item" key={item.id}>
             <div className="information-meta"><span>{item.source}</span><time dateTime={item.publishedAt}>{item.publishedAt}</time></div>
             <strong className="message-question">{item.question}</strong>
             <p>{item.answer ?? "尚未回复"}</p>
             {item.answerer && <small>答复方 / {item.answerer}</small>}
           </article>) : <div className="information-column-empty">暂无互动问答</div>}
         </div>
+        {information.messages.length > DEFAULT_VISIBLE_INFORMATION_ITEMS && <button
+          type="button"
+          className="information-toggle"
+          aria-expanded={messagesExpanded}
+          onClick={() => setMessagesExpanded((expanded) => !expanded)}
+        >{messagesExpanded ? "收起全部问答" : `展开全部问答（还有 ${information.messages.length - DEFAULT_VISIBLE_INFORMATION_ITEMS} 条）`}</button>}
       </div>
       <div className="information-column sentiment-column">
         <div className="information-column-heading"><span>03</span><strong>市场热度</strong><small>THS</small></div>

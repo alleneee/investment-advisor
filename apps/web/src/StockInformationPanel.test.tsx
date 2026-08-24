@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { StockInformationPanel } from "./StockInformationPanel";
 import type { StockInformation } from "./types";
@@ -42,6 +42,111 @@ function information(): StockInformation {
       },
     },
   };
+}
+
+function longInformation(): StockInformation {
+  const value = information();
+  value.news = [
+    {
+      id: "news-1",
+      title: "公司新闻 1",
+      summary: "新闻摘要 1",
+      publishedAt: "2026-08-13T08:00:00+08:00",
+      source: "东财",
+      url: "https://example.com/news/1",
+    },
+    {
+      id: "news-2",
+      title: "公司新闻 2",
+      summary: "新闻摘要 2",
+      publishedAt: "2026-08-13T07:00:00+08:00",
+      source: "东财",
+      url: "https://example.com/news/2",
+    },
+    {
+      id: "news-3",
+      title: "公司新闻 3",
+      summary: "新闻摘要 3",
+      publishedAt: "2026-08-13T06:00:00+08:00",
+      source: "东财",
+      url: "https://example.com/news/3",
+    },
+    {
+      id: "news-4",
+      title: "公司新闻 4",
+      summary: "新闻摘要 4",
+      publishedAt: "2026-08-13T05:00:00+08:00",
+      source: "东财",
+      url: "https://example.com/news/4",
+    },
+    {
+      id: "news-5",
+      title: "公司新闻 5",
+      summary: "新闻摘要 5",
+      publishedAt: "2026-08-13T04:00:00+08:00",
+      source: "东财",
+      url: "https://example.com/news/5",
+    },
+    {
+      id: "news-6",
+      title: "公司新闻 6",
+      summary: "新闻摘要 6",
+      publishedAt: "2026-08-13T03:00:00+08:00",
+      source: "东财",
+      url: "https://example.com/news/6",
+    },
+  ];
+  value.messages = [
+    {
+      id: "irm-1",
+      question: "互动问答 1",
+      answer: "问答回复 1",
+      answerer: "证券部",
+      publishedAt: "2026-08-12T16:00:00+08:00",
+      source: "cninfo",
+    },
+    {
+      id: "irm-2",
+      question: "互动问答 2",
+      answer: "问答回复 2",
+      answerer: "证券部",
+      publishedAt: "2026-08-12T15:00:00+08:00",
+      source: "cninfo",
+    },
+    {
+      id: "irm-3",
+      question: "互动问答 3",
+      answer: "问答回复 3",
+      answerer: "证券部",
+      publishedAt: "2026-08-12T14:00:00+08:00",
+      source: "cninfo",
+    },
+    {
+      id: "irm-4",
+      question: "互动问答 4",
+      answer: "问答回复 4",
+      answerer: "证券部",
+      publishedAt: "2026-08-12T13:00:00+08:00",
+      source: "cninfo",
+    },
+    {
+      id: "irm-5",
+      question: "互动问答 5",
+      answer: "问答回复 5",
+      answerer: "证券部",
+      publishedAt: "2026-08-12T12:00:00+08:00",
+      source: "cninfo",
+    },
+    {
+      id: "irm-6",
+      question: "互动问答 6",
+      answer: "问答回复 6",
+      answerer: "证券部",
+      publishedAt: "2026-08-12T11:00:00+08:00",
+      source: "cninfo",
+    },
+  ];
+  return value;
 }
 
 describe("StockInformationPanel", () => {
@@ -90,5 +195,70 @@ describe("StockInformationPanel", () => {
 
     expect(screen.queryByRole("link", { name: "公司发布经营进展" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "公司发布经营进展" })).toBeInTheDocument();
+  });
+
+  it("shows only four news and four messages by default", () => {
+    render(<StockInformationPanel information={longInformation()} />);
+
+    expect(screen.getByRole("heading", { name: "公司新闻 4" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "公司新闻 5" })).not.toBeInTheDocument();
+    expect(screen.getByText("互动问答 4")).toBeInTheDocument();
+    expect(screen.queryByText("互动问答 5")).not.toBeInTheDocument();
+    expect(screen.getAllByText("04 / 06")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "展开全部新闻（还有 2 条）" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("button", { name: "展开全部问答（还有 2 条）" })).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("expands and collapses news and messages independently", () => {
+    render(<StockInformationPanel information={longInformation()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "展开全部新闻（还有 2 条）" }));
+
+    expect(screen.getByRole("heading", { name: "公司新闻 6" })).toBeInTheDocument();
+    expect(screen.queryByText("互动问答 5")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "收起全部新闻" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "展开全部问答（还有 2 条）" })).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(screen.getByRole("button", { name: "展开全部问答（还有 2 条）" }));
+
+    expect(screen.getByText("互动问答 6")).toBeInTheDocument();
+    expect(screen.getAllByText("06 / 06")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "收起全部问答" })).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "收起全部新闻" }));
+
+    expect(screen.queryByRole("heading", { name: "公司新闻 5" })).not.toBeInTheDocument();
+    expect(screen.getByText("互动问答 6")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "展开全部新闻（还有 2 条）" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("button", { name: "收起全部问答" })).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "收起全部问答" }));
+
+    expect(screen.queryByText("互动问答 5")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "展开全部问答（还有 2 条）" })).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("does not show expand buttons for feeds with no more than four items", () => {
+    render(<StockInformationPanel information={information()} />);
+
+    expect(screen.queryByRole("button", { name: /全部新闻/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /全部问答/ })).not.toBeInTheDocument();
+    expect(screen.getAllByText("01 / 01")).toHaveLength(2);
+  });
+
+  it("collapses both feeds when the information symbol changes", () => {
+    const { rerender } = render(<StockInformationPanel information={longInformation()} />);
+    fireEvent.click(screen.getByRole("button", { name: "展开全部新闻（还有 2 条）" }));
+    fireEvent.click(screen.getByRole("button", { name: "展开全部问答（还有 2 条）" }));
+    const nextInformation = longInformation();
+    nextInformation.symbol = "600519.SH";
+
+    rerender(<StockInformationPanel information={nextInformation} />);
+
+    expect(screen.queryByRole("heading", { name: "公司新闻 5" })).not.toBeInTheDocument();
+    expect(screen.queryByText("互动问答 5")).not.toBeInTheDocument();
+    expect(screen.getAllByText("04 / 06")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "展开全部新闻（还有 2 条）" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("button", { name: "展开全部问答（还有 2 条）" })).toHaveAttribute("aria-expanded", "false");
   });
 });
