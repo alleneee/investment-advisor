@@ -257,6 +257,7 @@ describe("OutlookPanel", () => {
       onRevokeShare={onRevokeShare}
     />);
 
+    expect(screen.queryByRole("link", { name: "打开对客报告" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "生成分享链接" }));
     expect(onCreateShare).toHaveBeenCalledOnce();
 
@@ -271,6 +272,10 @@ describe("OutlookPanel", () => {
 
     expect(screen.queryByRole("button", { name: "生成分享链接" })).not.toBeInTheDocument();
     expect(screen.getByText(/#\/share\/token-1$/)).toBeInTheDocument();
+    const reportLink = screen.getByRole("link", { name: "打开对客报告" });
+    expect(reportLink.getAttribute("href")).toContain("#/share/token-1");
+    expect(reportLink).toHaveAttribute("target", "_blank");
+    expect(reportLink).toHaveAttribute("rel", "noreferrer");
 
     await user.click(screen.getByRole("button", { name: "复制链接" }));
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining("#/share/token-1"));

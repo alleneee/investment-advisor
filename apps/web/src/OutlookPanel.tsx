@@ -126,6 +126,7 @@ function DeliverySection({
         ? <>
           <p className="share-link-text">{shareUrl(job.shareToken)}</p>
           <div className="delivery-actions">
+            <a className="delivery-action-link" href={shareUrl(job.shareToken)} target="_blank" rel="noreferrer">打开对客报告</a>
             <button
               type="button"
               disabled={busy}
