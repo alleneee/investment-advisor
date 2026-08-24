@@ -207,6 +207,48 @@ def adjudicate(
     return _verdict("none_realized", None, [], "no_candidate")
 
 
+def with_adjudication(outcome: Mapping[str, Any]) -> dict[str, Any]:
+    """为评估时尚未写入 ``adjudication`` 的存量结果补上裁决规则。
+
+    只填字段，不重跑 ``adjudicate``：旧评估把「主动突破 + 被动保持」记为
+    ambiguous，现行规则会改成 realized / active_breakout_precedence。
+    """
+    value = dict(outcome)
+    if value.get("adjudication") in {
+        "window_pending",
+        "single_candidate",
+        "active_breakout_precedence",
+        "multiple_active_breakouts",
+        "passive_only",
+        "no_candidate",
+    }:
+        return value
+    status = value.get("status")
+    realized_cases = value.get("realized_cases")
+    cases = realized_cases if isinstance(realized_cases, list) else []
+    if status == "pending":
+        rule: AdjudicationRule = "window_pending"
+    elif status == "realized":
+        rule = "active_breakout_precedence" if len(cases) > 1 else "single_candidate"
+    elif status == "ambiguous":
+        scenarios = [item for item in (value.get("scenarios") or []) if isinstance(item, Mapping)]
+        has_active = any(
+            isinstance(item.get("trigger"), Mapping)
+            and item["trigger"].get("hit") is True
+            and item["trigger"].get("operator") in BREAK_OPERATORS
+            and not (
+                isinstance(item.get("invalidation"), Mapping)
+                and item["invalidation"].get("hit") is True
+            )
+            for item in scenarios
+        )
+        rule = "multiple_active_breakouts" if has_active else "passive_only"
+    else:
+        rule = "no_candidate"
+    value["adjudication"] = rule
+    return value
+
+
 def condition_resolved_at_anchor(operator: Any, anchor_close: Any, level: Any) -> bool:
     """判断价格类条件在报告固化收盘上是否已经被解决。
 
@@ -431,4 +473,5 @@ __all__ = [
     "evaluate_report_outcome",
     "rebase_window_bars",
     "summarize_quality",
+    "with_adjudication",
 ]

@@ -846,10 +846,11 @@ export function toReportQuality(payload: unknown): ReportQualityDashboard {
 }
 
 export function toReportOutcome(payload: unknown): ReportOutcome {
-  const value = exactRecord(payload, [
+  const value = record(payload, "报告兑现结果");
+  exactKeys(value, [
     "schema_version", "report_id", "symbol", "as_of", "evaluated_at", "window",
-    "scenarios", "quality", "status", "adjudication", "realized_case", "realized_cases",
-  ], "报告兑现结果");
+    "scenarios", "quality", "status", "realized_case", "realized_cases",
+  ], ["adjudication"], "报告兑现结果");
   const window = exactRecord(value.window, ["start", "end", "bar_count", "required_bars"], "兑现窗口");
   const quality = exactRecord(value.quality, ["status", "warnings"], "兑现质量");
   return {
@@ -858,7 +859,11 @@ export function toReportOutcome(payload: unknown): ReportOutcome {
     asOf: requiredDate(value.as_of, "报告数据日期"),
     evaluatedAt: requiredDate(value.evaluated_at, "兑现评估时间"),
     status: enumText(value.status, OUTCOME_STATUSES, "兑现状态"),
-    adjudication: enumText(value.adjudication, OUTCOME_ADJUDICATIONS, "兑现裁决规则"),
+    adjudication: enumText(
+      value.adjudication == null ? inferredAdjudication(value) : value.adjudication,
+      OUTCOME_ADJUDICATIONS,
+      "兑现裁决规则",
+    ),
     realizedCase: value.realized_case == null
       ? null
       : enumText(value.realized_case, SCENARIO_CASES, "兑现情景"),
@@ -876,6 +881,25 @@ export function toReportOutcome(payload: unknown): ReportOutcome {
       warnings: stringArray(quality.warnings, "兑现质量警告"),
     },
   };
+}
+
+function inferredAdjudication(value: Record<string, unknown>): string {
+  if (value.status === "pending") return "window_pending";
+  const realizedCases = Array.isArray(value.realized_cases) ? value.realized_cases : [];
+  if (value.status === "realized") {
+    return realizedCases.length > 1 ? "active_breakout_precedence" : "single_candidate";
+  }
+  if (value.status === "ambiguous") {
+    const scenarios = Array.isArray(value.scenarios) ? value.scenarios : [];
+    const hasActiveBreakout = scenarios.some((item) => {
+      if (!isRecord(item) || !isRecord(item.trigger)) return false;
+      if (item.trigger.hit !== true) return false;
+      if (isRecord(item.invalidation) && item.invalidation.hit === true) return false;
+      return item.trigger.operator === "break_above" || item.trigger.operator === "break_below";
+    });
+    return hasActiveBreakout ? "multiple_active_breakouts" : "passive_only";
+  }
+  return "no_candidate";
 }
 
 function toScenarioOutcome(payload: unknown, index: number): ReportScenarioOutcome {

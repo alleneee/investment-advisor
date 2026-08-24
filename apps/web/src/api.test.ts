@@ -757,6 +757,62 @@ describe("report delivery adapter", () => {
     expect(toInvestmentReportJob(raw).outcome?.realizedCase).toBe("bullish");
   });
 
+  it("hydrates adjudication when a stored outcome omitted the field", () => {
+    const raw = outcomePayload() as Record<string, unknown>;
+    delete raw.adjudication;
+
+    expect(toReportOutcome(raw).adjudication).toBe("single_candidate");
+  });
+
+  it("hydrates pending and ambiguous stored outcomes without adjudication", () => {
+    const pending = outcomePayload() as Record<string, unknown>;
+    delete pending.adjudication;
+    pending.status = "pending";
+    pending.realized_case = null;
+    pending.realized_cases = [];
+
+    const ambiguous = outcomePayload() as Record<string, unknown>;
+    delete ambiguous.adjudication;
+    ambiguous.status = "ambiguous";
+    ambiguous.realized_case = null;
+    ambiguous.realized_cases = ["base", "bearish"];
+    ambiguous.scenarios = [
+      {
+        case: "bullish",
+        trigger: { operator: "break_above", fact_ref: "market.recent_high", level: "21.00", hit: false, decisive_date: null, unevaluable_reason: null },
+        invalidation: { operator: "structure_invalidated", fact_ref: "chan.structure", hit: true, decisive_date: "20260818", unevaluable_reason: null },
+      },
+      {
+        case: "base",
+        trigger: { operator: "hold_below", fact_ref: "market.recent_high", level: "21.00", hit: true, decisive_date: null, unevaluable_reason: null },
+        invalidation: { operator: "break_below", fact_ref: "market.recent_low", level: "18.00", hit: false, decisive_date: null, unevaluable_reason: null },
+      },
+      {
+        case: "bearish",
+        trigger: { operator: "break_below", fact_ref: "market.recent_low", level: "18.00", hit: true, decisive_date: "20260818", unevaluable_reason: null },
+        invalidation: { operator: "hold_above", fact_ref: "market.recent_low", level: "18.00", hit: false, decisive_date: null, unevaluable_reason: null },
+      },
+    ];
+
+    const precedence = outcomePayload() as Record<string, unknown>;
+    delete precedence.adjudication;
+    precedence.realized_case = "bearish";
+    precedence.realized_cases = ["base", "bearish"];
+
+    expect(toReportOutcome(pending).adjudication).toBe("window_pending");
+    expect(toReportOutcome(ambiguous).adjudication).toBe("multiple_active_breakouts");
+    expect(toReportOutcome(precedence).adjudication).toBe("active_breakout_precedence");
+  });
+
+  it("maps a job envelope whose stored outcome omitted adjudication", () => {
+    const raw = mutableReportEnvelope();
+    const outcome = outcomePayload() as Record<string, unknown>;
+    delete outcome.adjudication;
+    raw.outcome = outcome;
+
+    expect(toInvestmentReportJob(raw).outcome?.adjudication).toBe("single_candidate");
+  });
+
   it("rejects an unknown outcome status", () => {
     const raw = outcomePayload() as Record<string, unknown>;
     raw.status = "partially_realized";

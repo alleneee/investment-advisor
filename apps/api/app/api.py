@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .analysis import MarketAnalysisService
 from .db import Database
+from .domain.report_outcome import with_adjudication
 from .information import StockInformationService
 from .outcome import ReportOutcomeError, ReportOutcomeService
 from .providers.a_stock_data import normalize_symbol_code
@@ -268,7 +269,7 @@ def create_router(
         value = _outcomes().get(report_id)
         if value is None:
             raise HTTPException(404, "报告兑现结果尚未评估")
-        return value
+        return with_adjudication(value)
 
     @router.post("/reports/{report_id}/outcome")
     def evaluate_report_outcome(report_id: str) -> dict[str, Any]:
@@ -310,7 +311,7 @@ def _report_job_envelope(
         "reviewed_at": job.get("reviewed_at"),
         "published_at": job.get("published_at"),
         "share_token": job.get("share_token"),
-        "outcome": outcome,
+        "outcome": None if outcome is None else with_adjudication(outcome),
     }
 
 

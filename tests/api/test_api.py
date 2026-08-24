@@ -358,6 +358,31 @@ async def test_list_report_jobs_archive_keeps_history_and_attaches_outcomes():
 
 
 @pytest.mark.anyio
+async def test_legacy_outcome_without_adjudication_is_hydrated_on_read():
+    scheduler = RecordingScheduler()
+    database = Database()
+    instance = _closed_loop_app(scheduler, database=database)
+    async with AsyncClient(transport=ASGITransport(app=instance), base_url="http://test") as client:
+        report_id = await _completed_report(client, scheduler)
+        await client.post(f"/api/reports/{report_id}/outcome")
+        stored = database.get_report_outcome(report_id)
+        assert stored is not None
+        stored.pop("adjudication")
+        database.save_report_outcome(report_id, stored)
+        assert "adjudication" not in (database.get_report_outcome(report_id) or {})
+
+        fetched = await client.get(f"/api/reports/{report_id}/outcome")
+        envelope = await client.get(f"/api/reports/{report_id}")
+        jobs = await client.get("/api/reports/jobs", params={"latest_per_symbol": False})
+
+    attached = next(row for row in jobs.json() if row["report_id"] == report_id)
+    assert fetched.json()["status"] == "realized"
+    assert fetched.json()["adjudication"] == "single_candidate"
+    assert envelope.json()["outcome"]["adjudication"] == "single_candidate"
+    assert attached["outcome"]["adjudication"] == "single_candidate"
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("field", ["provider", "model", "api_key", "token", "snapshot_id", "as_of"])
 async def test_report_create_rejects_browser_control_of_server_fields(field):
     instance = create_app(

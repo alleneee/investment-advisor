@@ -11,6 +11,7 @@ from app.domain.report_outcome import (
     evaluate_report_outcome,
     rebase_window_bars,
     summarize_quality,
+    with_adjudication,
 )
 from app.outcome import ReportOutcomeError, ReportOutcomeService
 
@@ -224,6 +225,41 @@ def test_adjudicate_keeps_passive_only_candidates_ambiguous():
     assert verdict["status"] == "ambiguous"
     assert verdict["adjudication"] == "passive_only"
     assert verdict["realized_cases"] == ["base", "bearish"]
+
+
+def test_with_adjudication_fills_legacy_payloads_without_rewriting_status():
+    pending = {"status": "pending", "realized_cases": [], "scenarios": []}
+    realized = {"status": "realized", "realized_cases": ["bearish"], "scenarios": []}
+    precedence = {"status": "realized", "realized_cases": ["base", "bearish"], "scenarios": []}
+    mixed_ambiguous = {
+        "status": "ambiguous",
+        "realized_cases": ["base", "bearish"],
+        "scenarios": [
+            {"case": "base", "trigger": {"operator": "hold_below", "hit": True}, "invalidation": {"hit": False}},
+            {"case": "bearish", "trigger": {"operator": "break_below", "hit": True}, "invalidation": {"hit": False}},
+        ],
+    }
+    passive = {
+        "status": "ambiguous",
+        "realized_cases": ["base", "bearish"],
+        "scenarios": [
+            {"case": "base", "trigger": {"operator": "hold_below", "hit": True}, "invalidation": {"hit": False}},
+            {"case": "bearish", "trigger": {"operator": "hold_above", "hit": True}, "invalidation": {"hit": False}},
+        ],
+    }
+    none_realized = {"status": "none_realized", "realized_cases": [], "scenarios": []}
+    existing = {"status": "realized", "realized_cases": ["bullish"], "adjudication": "single_candidate"}
+
+    assert with_adjudication(pending)["adjudication"] == "window_pending"
+    assert with_adjudication(realized)["adjudication"] == "single_candidate"
+    assert with_adjudication(precedence)["adjudication"] == "active_breakout_precedence"
+    filled_ambiguous = with_adjudication(mixed_ambiguous)
+    assert filled_ambiguous["status"] == "ambiguous"
+    assert filled_ambiguous["adjudication"] == "multiple_active_breakouts"
+    assert with_adjudication(passive)["adjudication"] == "passive_only"
+    assert with_adjudication(none_realized)["adjudication"] == "no_candidate"
+    assert with_adjudication(existing)["adjudication"] == "single_candidate"
+    assert "adjudication" not in pending
 
 
 def test_rebase_converts_window_to_report_adjustment_base():
