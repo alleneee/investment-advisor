@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { toBlob } from "html-to-image";
+import { useEffect, useRef, useState } from "react";
 import { ApiError, type WorkbenchApi } from "./api";
 import { ChanChart } from "./ChanChart";
 import {
@@ -20,15 +21,22 @@ interface SharedReportPageProps {
 const INVALID_LINK_MESSAGE = "分享链接无效或已撤销，请与您的顾问确认最新链接。";
 
 export function SharedReportPage({ token, api }: SharedReportPageProps) {
+  const reportRef = useRef<HTMLElement | null>(null);
+  const exportGenerationRef = useRef(0);
   const [report, setReport] = useState<SharedReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportingImage, setExportingImage] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let active = true;
+    exportGenerationRef.current += 1;
     setLoading(true);
     setError(null);
     setReport(null);
+    setExportError(null);
+    setExportingImage(false);
     api.getSharedReport(token)
       .then((value) => {
         if (!active) return;
@@ -46,8 +54,36 @@ export function SharedReportPage({ token, api }: SharedReportPageProps) {
       });
     return () => {
       active = false;
+      exportGenerationRef.current += 1;
     };
   }, [api, token]);
+
+  async function exportLongImage() {
+    if (exportingImage || reportRef.current == null || report == null) return;
+    const generation = exportGenerationRef.current + 1;
+    exportGenerationRef.current = generation;
+    setExportingImage(true);
+    setExportError(null);
+    try {
+      const blob = await toBlob(reportRef.current, {
+        backgroundColor: "#101920",
+        cacheBust: true,
+        pixelRatio: 2,
+        filter: (node) => !(node instanceof HTMLElement && node.hasAttribute("data-export-ignore")),
+      });
+      if (exportGenerationRef.current !== generation) return;
+      if (blob == null) throw new Error();
+      downloadBlob(blob, `${report.symbol}-${report.asOf}-研究报告.png`);
+    } catch {
+      if (exportGenerationRef.current === generation) {
+        setExportError("长图导出失败，请稍后重试。");
+      }
+    } finally {
+      if (exportGenerationRef.current === generation) {
+        setExportingImage(false);
+      }
+    }
+  }
 
   if (loading) {
     return <div className="share-page">
@@ -65,14 +101,20 @@ export function SharedReportPage({ token, api }: SharedReportPageProps) {
   }
 
   return <div className="share-page">
-    <article className="share-report" aria-label="对客研究报告">
+    <article ref={reportRef} className="share-report" aria-label="对客研究报告">
       <header className="share-header">
         <div className="share-header-top">
           <span className="share-kicker">结构投研 · 对客研究报告</span>
-          <button type="button" className="share-print-button" onClick={() => window.print()}>
-            导出 PDF
-          </button>
+          <div className="share-export-actions" data-export-ignore="true">
+            <button type="button" className="share-print-button" disabled={exportingImage} onClick={exportLongImage}>
+              {exportingImage ? "正在导出…" : "导出长图"}
+            </button>
+            <button type="button" className="share-print-button" onClick={() => window.print()}>
+              导出 PDF
+            </button>
+          </div>
         </div>
+        {exportError && <p role="alert">{exportError}</p>}
         <h1>{report.title}</h1>
         <dl className="share-meta">
           <div><dt>标的</dt><dd>{report.symbol}</dd></div>
@@ -133,6 +175,20 @@ export function SharedReportPage({ token, api }: SharedReportPageProps) {
       </footer>
     </article>
   </div>;
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  try {
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+  } finally {
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
 }
 
 function SharedScenarioCard({ scenario }: { scenario: InvestmentScenario }) {

@@ -1,9 +1,15 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, type WorkbenchApi } from "./api";
 import { SharedReportPage } from "./SharedReportPage";
 import type { ChanChartData, ReferenceFact, SharedReport } from "./types";
+
+const { toBlob } = vi.hoisted(() => ({
+  toBlob: vi.fn(),
+}));
+
+vi.mock("html-to-image", () => ({ toBlob }));
 
 vi.mock("./ChanChart", () => ({
   ChanChart: ({ symbol, data }: { symbol: string; data: ChanChartData }) => data.bars.length
@@ -73,7 +79,9 @@ function apiWith(getSharedReport: WorkbenchApi["getSharedReport"]): WorkbenchApi
 }
 
 afterEach(() => {
+  toBlob.mockReset();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("SharedReportPage", () => {
@@ -121,7 +129,175 @@ describe("SharedReportPage", () => {
     await user.click(await screen.findByRole("button", { name: "导出 PDF" }));
 
     expect(print).toHaveBeenCalledOnce();
-    vi.unstubAllGlobals();
+  });
+
+  it("downloads the complete report as a PNG long image", async () => {
+    const user = userEvent.setup();
+    const blob = new Blob(["report"], { type: "image/png" });
+    const blobUrl = "blob:shared-report";
+    const createObjectURL = vi.fn(() => blobUrl);
+    const revokeObjectURL = vi.fn();
+    let resolveToBlob: (value: Blob | null) => void = () => {};
+    const download = { anchor: undefined as HTMLAnchorElement | undefined };
+    toBlob.mockImplementation(() => new Promise<Blob | null>((resolve) => {
+      resolveToBlob = resolve;
+    }));
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function captureDownload(this: HTMLAnchorElement) {
+      download.anchor = this;
+    });
+    render(<SharedReportPage token="token-1" api={apiWith(async () => sharedReport())} />);
+
+    const report = await screen.findByRole("article", { name: "对客研究报告" });
+    const exportButton = screen.getByRole("button", { name: "导出长图" });
+    await user.click(exportButton);
+
+    expect(exportButton).toBeDisabled();
+    expect(exportButton).toHaveTextContent("正在导出…");
+    expect(toBlob).toHaveBeenCalledWith(report, expect.objectContaining({
+      backgroundColor: "#101920",
+      cacheBust: true,
+      pixelRatio: 2,
+    }));
+    const options = toBlob.mock.calls[0]?.[1];
+    const actions = screen.getByRole("button", { name: "导出 PDF" }).parentElement;
+    expect(actions).toHaveAttribute("data-export-ignore", "true");
+    expect(options.filter(actions)).toBe(false);
+    expect(options.filter(screen.getByText("结构处于等待确认阶段。"))).toBe(true);
+
+    resolveToBlob(blob);
+
+    await waitFor(() => expect(exportButton).toBeEnabled());
+    expect(exportButton).toHaveTextContent("导出长图");
+    expect(createObjectURL).toHaveBeenCalledWith(blob);
+    expect(download.anchor).toBeDefined();
+    expect(download.anchor?.href).toBe(blobUrl);
+    expect(download.anchor?.download).toBe("002940.SZ-2026-08-13-研究报告.png");
+    await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith(blobUrl));
+  });
+
+  it("shows an error when long image export returns no blob", async () => {
+    const user = userEvent.setup();
+    toBlob.mockResolvedValue(null);
+    render(<SharedReportPage token="token-1" api={apiWith(async () => sharedReport())} />);
+
+    await user.click(await screen.findByRole("button", { name: "导出长图" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("长图导出失败，请稍后重试。");
+  });
+
+  it("shows the same error when long image export rejects", async () => {
+    const user = userEvent.setup();
+    toBlob.mockRejectedValue(new Error("capture failed"));
+    render(<SharedReportPage token="token-1" api={apiWith(async () => sharedReport())} />);
+
+    await user.click(await screen.findByRole("button", { name: "导出长图" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("长图导出失败，请稍后重试。");
+  });
+
+  it("discards a pending export when the share token changes", async () => {
+    const user = userEvent.setup();
+    const blob = new Blob(["old report"], { type: "image/png" });
+    const createObjectURL = vi.fn(() => "blob:old-report");
+    const revokeObjectURL = vi.fn();
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    let resolveToBlob: (value: Blob | null) => void = () => {};
+    toBlob.mockImplementation(() => new Promise<Blob | null>((resolve) => {
+      resolveToBlob = resolve;
+    }));
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+    const getSharedReport = vi.fn(async (requestedToken: string) => requestedToken === "token-2"
+      ? { ...sharedReport(), symbol: "600000.SH" }
+      : sharedReport());
+    const api = apiWith(getSharedReport);
+    const { rerender } = render(<SharedReportPage token="token-1" api={api} />);
+
+    await user.click(await screen.findByRole("button", { name: "导出长图" }));
+    rerender(<SharedReportPage token="token-2" api={api} />);
+
+    expect(await screen.findByText("600000.SH")).toBeInTheDocument();
+    const nextExportButton = screen.getByRole("button", { name: /^(导出长图|正在导出…)$/ });
+    const nextButtonWasAvailable = !nextExportButton.hasAttribute("disabled")
+      && nextExportButton.textContent === "导出长图";
+
+    await act(async () => {
+      resolveToBlob(blob);
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(nextButtonWasAvailable).toBe(true);
+    expect(nextExportButton).toBeEnabled();
+    expect(nextExportButton).toHaveTextContent("导出长图");
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(anchorClick).not.toHaveBeenCalled();
+  });
+
+  it("clears an export error when the share token changes", async () => {
+    const user = userEvent.setup();
+    toBlob.mockResolvedValueOnce(null);
+    const getSharedReport = vi.fn(async (requestedToken: string) => requestedToken === "token-2"
+      ? { ...sharedReport(), symbol: "600000.SH" }
+      : sharedReport());
+    const api = apiWith(getSharedReport);
+    const { rerender } = render(<SharedReportPage token="token-1" api={api} />);
+
+    await user.click(await screen.findByRole("button", { name: "导出长图" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("长图导出失败，请稍后重试。");
+
+    rerender(<SharedReportPage token="token-2" api={api} />);
+
+    expect(await screen.findByText("600000.SH")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "导出长图" })).toBeEnabled();
+  });
+
+  it("discards a pending export after unmount", async () => {
+    const user = userEvent.setup();
+    const blob = new Blob(["report"], { type: "image/png" });
+    const createObjectURL = vi.fn(() => "blob:unmounted-report");
+    const revokeObjectURL = vi.fn();
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    let resolveToBlob: (value: Blob | null) => void = () => {};
+    toBlob.mockImplementation(() => new Promise<Blob | null>((resolve) => {
+      resolveToBlob = resolve;
+    }));
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+    const { unmount } = render(<SharedReportPage token="token-1" api={apiWith(async () => sharedReport())} />);
+
+    await user.click(await screen.findByRole("button", { name: "导出长图" }));
+    unmount();
+
+    await act(async () => {
+      resolveToBlob(blob);
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(anchorClick).not.toHaveBeenCalled();
+  });
+
+  it("cleans up the temporary download when the anchor click fails", async () => {
+    const user = userEvent.setup();
+    const blob = new Blob(["report"], { type: "image/png" });
+    const blobUrl = "blob:failed-download";
+    const createObjectURL = vi.fn(() => blobUrl);
+    const revokeObjectURL = vi.fn();
+    const download = { anchor: undefined as HTMLAnchorElement | undefined };
+    toBlob.mockResolvedValue(blob);
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function failDownload(this: HTMLAnchorElement) {
+      download.anchor = this;
+      throw new Error("download failed");
+    });
+    render(<SharedReportPage token="token-1" api={apiWith(async () => sharedReport())} />);
+
+    await user.click(await screen.findByRole("button", { name: "导出长图" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("长图导出失败，请稍后重试。");
+    expect(download.anchor).toBeDefined();
+    expect(download.anchor?.isConnected).toBe(false);
+    await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith(blobUrl));
   });
 
   it("shows the loading state before the report arrives", () => {
