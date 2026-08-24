@@ -11,6 +11,7 @@
   --up: #f6465d;
   --down: #0ecb81;
   --risk: #f0b429;
+  --error: #d08a6f;
   --radius-control: 2px;
   --radius-card: 18px;
   font-family: "IBM Plex Sans", "PingFang SC", "Noto Sans SC", sans-serif;
@@ -397,26 +398,27 @@ h2 { display: inline; font-family: Syne, sans-serif; font-size: 19px; font-weigh
 .delivery-status dt { color: #536e68; font-size: 8px; letter-spacing: .1em; }
 .delivery-status dd { margin: 6px 0 0; color: #9fb2aa; font-size: 10px; }
 .delivery-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 17px; }
-.delivery-actions button { padding: 8px 15px; border: 1px solid rgba(103, 186, 161, .3); background: transparent; color: #8fc4b2; font-size: 9px; letter-spacing: .06em; cursor: pointer; }
-.delivery-actions button:hover:not(:disabled) { border-color: rgba(103, 186, 161, .55); color: #a9d6c6; }
+.delivery-actions :is(button, .delivery-action-link) {
+  padding: 8px 15px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  background: transparent;
+  color: var(--accent);
+  font-size: 9px;
+  letter-spacing: .06em;
+}
+.delivery-actions :is(button:not(:disabled), .delivery-action-link):hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent);
+}
+.delivery-actions :is(button, .delivery-action-link):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .delivery-actions button:disabled { opacity: .4; cursor: not-allowed; }
 .delivery-actions .delivery-action-link {
   display: inline-flex;
   align-items: center;
-  padding: 8px 15px;
-  border: 1px solid rgba(103, 186, 161, .3);
-  color: #8fc4b2;
-  font-size: 9px;
-  letter-spacing: .06em;
   text-decoration: none;
-}
-.delivery-actions .delivery-action-link:hover {
-  border-color: rgba(103, 186, 161, .55);
-  color: #a9d6c6;
-}
-.delivery-actions .delivery-action-link:focus-visible {
-  outline: 2px solid #67baa1;
-  outline-offset: 2px;
 }
 .delivery-error { margin-top: 13px; color: #d08a6f; font-size: 9px; line-height: 1.7; }
 .delivery-outcome { margin-top: 19px; padding-top: 17px; border-top: 1px solid rgba(213, 228, 218, .08); }
@@ -529,19 +531,19 @@ textarea { min-height: 74px; padding: 9px; resize: vertical; line-height: 1.65; 
   gap: 8px;
 }
 .share-export-button {
-  border: 1px solid rgba(228, 161, 95, .42);
+  border: 1px solid color-mix(in srgb, var(--risk) 42%, transparent);
   padding: 10px 14px;
-  background: rgba(228, 161, 95, .08);
-  color: #e4a15f;
+  background: color-mix(in srgb, var(--risk) 8%, transparent);
+  color: var(--risk);
   font-size: 10px;
   letter-spacing: .05em;
 }
 .share-export-button:hover:not(:disabled) {
-  background: #e4a15f;
-  color: #07131e;
+  background: var(--risk);
+  color: var(--bg);
 }
 .share-export-button:focus-visible {
-  outline: 2px solid #67baa1;
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 .share-export-button:disabled {
@@ -549,17 +551,17 @@ textarea { min-height: 74px; padding: 9px; resize: vertical; line-height: 1.65; 
   cursor: wait;
 }
 .share-export-image-button {
-  border-color: rgba(103, 186, 161, .42);
-  background: rgba(103, 186, 161, .08);
-  color: #8fc4b2;
+  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--accent);
 }
 .share-export-image-button:hover:not(:disabled) {
-  background: #67baa1;
-  color: #07131e;
+  background: var(--accent);
+  color: var(--bg);
 }
 .share-export-error {
   margin: 0;
-  color: #d08a6f;
+  color: var(--error);
   font-size: 9px;
   line-height: 1.5;
   text-align: right;
@@ -731,7 +733,8 @@ textarea { min-height: 74px; padding: 9px; resize: vertical; line-height: 1.65; 
   .scenario-conditions dt,
   .outlook-subheading,
   .delivery-status dt,
-  .delivery-actions button
+  .delivery-actions button,
+  .delivery-action-link
 ) { font-size: 10px; }
 
 .batch-page .market-chip { font-size: 10px !important; }
