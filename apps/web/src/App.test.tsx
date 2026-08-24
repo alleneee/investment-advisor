@@ -1148,6 +1148,7 @@ describe("research workbench", () => {
       ".outlook-subheading",
       ".delivery-status dt",
       ".delivery-actions button",
+      ".delivery-action-link",
     ];
     expect(selectorsForFontSize(12)).toHaveLength(bodySelectors.length);
     expect(selectorsForFontSize(12)).toEqual(expect.arrayContaining(bodySelectors));
