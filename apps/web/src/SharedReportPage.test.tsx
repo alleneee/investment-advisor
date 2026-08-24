@@ -160,9 +160,17 @@ describe("SharedReportPage", () => {
       pixelRatio: 2,
     }));
     const options = toBlob.mock.calls[0]?.[1];
-    const actions = screen.getByRole("button", { name: "导出 PDF" }).parentElement;
-    expect(actions).toHaveAttribute("data-export-ignore", "true");
-    expect(options.filter(actions)).toBe(false);
+    const tools = report.querySelector<HTMLElement>('.share-export-tools[data-export-ignore="true"]');
+    const actions = tools?.querySelector<HTMLElement>(".share-export-actions");
+    const pdfButton = screen.getByRole("button", { name: "导出 PDF" });
+    expect(tools).toBeInTheDocument();
+    expect(actions).toBeInTheDocument();
+    expect(actions?.children).toHaveLength(2);
+    expect(actions?.children[0]).toBe(pdfButton);
+    expect(actions?.children[1]).toBe(exportButton);
+    expect(pdfButton).toHaveClass("share-export-button");
+    expect(exportButton).toHaveClass("share-export-button", "share-export-image-button");
+    expect(options.filter(tools)).toBe(false);
     expect(options.filter(screen.getByText("结构处于等待确认阶段。"))).toBe(true);
 
     resolveToBlob(blob);
@@ -183,7 +191,10 @@ describe("SharedReportPage", () => {
 
     await user.click(await screen.findByRole("button", { name: "导出长图" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("长图导出失败，请稍后重试。");
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("长图导出失败，请稍后重试。");
+    expect(alert).toHaveClass("share-export-error");
+    expect(alert.closest(".share-export-tools")).toHaveAttribute("data-export-ignore", "true");
   });
 
   it("shows the same error when long image export rejects", async () => {

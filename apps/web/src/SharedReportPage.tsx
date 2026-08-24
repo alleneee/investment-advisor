@@ -105,16 +105,23 @@ export function SharedReportPage({ token, api }: SharedReportPageProps) {
       <header className="share-header">
         <div className="share-header-top">
           <span className="share-kicker">结构投研 · 对客研究报告</span>
-          <div className="share-export-actions" data-export-ignore="true">
-            <button type="button" className="share-print-button" disabled={exportingImage} onClick={exportLongImage}>
-              {exportingImage ? "正在导出…" : "导出长图"}
-            </button>
-            <button type="button" className="share-print-button" onClick={() => window.print()}>
-              导出 PDF
-            </button>
+          <div className="share-export-tools" data-export-ignore="true">
+            <div className="share-export-actions">
+              <button type="button" className="share-export-button" onClick={() => window.print()}>
+                导出 PDF
+              </button>
+              <button
+                type="button"
+                className="share-export-button share-export-image-button"
+                disabled={exportingImage}
+                onClick={exportLongImage}
+              >
+                {exportingImage ? "正在导出…" : "导出长图"}
+              </button>
+            </div>
+            {exportError && <p className="share-export-error" role="alert">{exportError}</p>}
           </div>
         </div>
-        {exportError && <p role="alert">{exportError}</p>}
         <h1>{report.title}</h1>
         <dl className="share-meta">
           <div><dt>标的</dt><dd>{report.symbol}</dd></div>
