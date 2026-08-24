@@ -400,6 +400,24 @@ h2 { display: inline; font-family: Syne, sans-serif; font-size: 19px; font-weigh
 .delivery-actions button { padding: 8px 15px; border: 1px solid rgba(103, 186, 161, .3); background: transparent; color: #8fc4b2; font-size: 9px; letter-spacing: .06em; cursor: pointer; }
 .delivery-actions button:hover:not(:disabled) { border-color: rgba(103, 186, 161, .55); color: #a9d6c6; }
 .delivery-actions button:disabled { opacity: .4; cursor: not-allowed; }
+.delivery-actions .delivery-action-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 15px;
+  border: 1px solid rgba(103, 186, 161, .3);
+  color: #8fc4b2;
+  font-size: 9px;
+  letter-spacing: .06em;
+  text-decoration: none;
+}
+.delivery-actions .delivery-action-link:hover {
+  border-color: rgba(103, 186, 161, .55);
+  color: #a9d6c6;
+}
+.delivery-actions .delivery-action-link:focus-visible {
+  outline: 2px solid #67baa1;
+  outline-offset: 2px;
+}
 .delivery-error { margin-top: 13px; color: #d08a6f; font-size: 9px; line-height: 1.7; }
 .delivery-outcome { margin-top: 19px; padding-top: 17px; border-top: 1px solid rgba(213, 228, 218, .08); }
 .delivery-warnings { margin: 12px 0 0; padding-left: 15px; display: grid; gap: 5px; color: #8c8170; font-size: 8px; line-height: 1.7; }
@@ -499,8 +517,53 @@ textarea { min-height: 74px; padding: 9px; resize: vertical; line-height: 1.65; 
 .share-header { padding: 30px 34px 24px; border-bottom: 1px solid rgba(213, 228, 218, .12); }
 .share-header-top { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
 .share-kicker { color: #66827c; font-size: 10px; letter-spacing: .14em; }
-.share-print-button { border: 1px solid rgba(228, 161, 95, .42); padding: 10px 14px; background: rgba(228, 161, 95, .08); color: #e4a15f; font-size: 10px; letter-spacing: .05em; }
-.share-print-button:hover { background: #e4a15f; color: #07131e; }
+.share-export-tools {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+}
+.share-export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.share-export-button {
+  border: 1px solid rgba(228, 161, 95, .42);
+  padding: 10px 14px;
+  background: rgba(228, 161, 95, .08);
+  color: #e4a15f;
+  font-size: 10px;
+  letter-spacing: .05em;
+}
+.share-export-button:hover:not(:disabled) {
+  background: #e4a15f;
+  color: #07131e;
+}
+.share-export-button:focus-visible {
+  outline: 2px solid #67baa1;
+  outline-offset: 2px;
+}
+.share-export-button:disabled {
+  opacity: .5;
+  cursor: wait;
+}
+.share-export-image-button {
+  border-color: rgba(103, 186, 161, .42);
+  background: rgba(103, 186, 161, .08);
+  color: #8fc4b2;
+}
+.share-export-image-button:hover:not(:disabled) {
+  background: #67baa1;
+  color: #07131e;
+}
+.share-export-error {
+  margin: 0;
+  color: #d08a6f;
+  font-size: 9px;
+  line-height: 1.5;
+  text-align: right;
+}
 .share-header h1 { margin-top: 18px; font-size: clamp(24px, 3.4vw, 34px); letter-spacing: -.06em; }
 .share-meta { display: flex; flex-wrap: wrap; gap: 14px 34px; margin: 22px 0 0; }
 .share-meta dt { color: #536e68; font-size: 9px; letter-spacing: .1em; }
@@ -535,7 +598,7 @@ textarea { min-height: 74px; padding: 9px; resize: vertical; line-height: 1.65; 
 .share-disclaimer strong { display: block; margin-bottom: 8px; color: #e4a15f; font-size: 11px; letter-spacing: .1em; }
 .share-disclaimer p { color: #a99b82; font-size: 10px; line-height: 1.8; }
 .chan-chart-print-image { display: none; }
-@media (max-width: 760px) { .share-scenarios { grid-template-columns: 1fr; }.share-header, .share-section, .share-disclaimer { padding-left: 20px; padding-right: 20px; }.share-header-top { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 760px) { .share-scenarios { grid-template-columns: 1fr; }.share-header, .share-section, .share-disclaimer { padding-left: 20px; padding-right: 20px; }.share-header-top { align-items: flex-start; flex-direction: column; }.share-export-tools { justify-items: start; } }
 
 /* 导出 PDF：打印版面白底黑字、隐藏交互元素、关键区块不跨页截断 */
 @page { margin: 14mm; }
@@ -545,7 +608,7 @@ textarea { min-height: 74px; padding: 9px; resize: vertical; line-height: 1.65; 
   .share-page * { color: #000 !important; background: transparent !important; box-shadow: none !important; }
   .share-report { max-width: none; border: 0; }
   .share-header, .share-section, .share-disclaimer { padding-left: 0; padding-right: 0; border-color: #bbb !important; }
-  .share-print-button, .rail, .primary-button, .delivery-actions, .timeframe-switch, .ui-atmosphere { display: none !important; }
+  .share-export-tools, .rail, .primary-button, .delivery-actions, .timeframe-switch, .ui-atmosphere { display: none !important; }
   .share-evidence-label a { color: #000 !important; }
   .share-scenario { border: 1pt solid #999 !important; }
   .share-conditions dt, .share-kicker, .share-meta dt { color: #444 !important; }
