@@ -72,7 +72,7 @@ Lightweight Charts 当前由 Canvas 渲染，`html-to-image` 会在克隆 DOM �
 
 ## 实现范围
 
-- `apps/web/package.json` 和根 `package-lock.json`：增加 `html-to-image`。
+- `apps/web/package.json` 和 `apps/web/package-lock.json`：增加 `html-to-image`。
 - `apps/web/src/SharedReportPage.tsx`：增加报告节点引用、长图导出状态和下载操作。
 - `apps/web/src/SharedReportPage.test.tsx`：覆盖 Blob 下载、文件名、处理中状态与失败提示。
 - `apps/web/src/OutlookPanel.tsx`：增加“打开对客报告”链接。
