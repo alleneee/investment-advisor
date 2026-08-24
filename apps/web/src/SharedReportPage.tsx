@@ -69,6 +69,7 @@ export function SharedReportPage({ token, api }: SharedReportPageProps) {
         backgroundColor: "#101920",
         cacheBust: true,
         pixelRatio: 2,
+        style: { margin: "0" },
         filter: (node) => !(node instanceof HTMLElement && node.hasAttribute("data-export-ignore")),
       });
       if (exportGenerationRef.current !== generation) return;

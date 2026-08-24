@@ -158,6 +158,7 @@ describe("SharedReportPage", () => {
       backgroundColor: "#101920",
       cacheBust: true,
       pixelRatio: 2,
+      style: { margin: "0" },
     }));
     const options = toBlob.mock.calls[0]?.[1];
     const tools = report.querySelector<HTMLElement>('.share-export-tools[data-export-ignore="true"]');
