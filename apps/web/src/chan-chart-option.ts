@@ -1,200 +1,182 @@
-import type { EChartsOption } from "echarts";
-import type { ChanChartData } from "./types";
+import type {
+  CandlestickData,
+  HistogramData,
+  IPrimitivePaneRenderer,
+  IPrimitivePaneView,
+  ISeriesPrimitive,
+  SeriesAttachedParameter,
+  Time,
+  WhitespaceData,
+} from "lightweight-charts";
+import type { ChanChartData, StructureState } from "./types";
 
 const UP = "#f6465d";
 const DOWN = "#0ecb81";
 const ACCENT = "#7ee0c8";
 const MUTED = "#8a9b96";
 
-interface TooltipParam {
-  axisValue?: string;
-  seriesType?: string;
-  seriesName?: string;
-  data?: unknown;
+export interface OverlayStroke {
+  startAt: string;
+  endAt: string;
+  startPrice: number;
+  endPrice: number;
+  state: StructureState;
 }
 
-export function buildChanChartOption(data: ChanChartData): EChartsOption {
-  const visibleCount = data.timeframe === "1d" ? 126 : 26;
-  const start = data.bars.length
-    ? Math.max(0, ((data.bars.length - visibleCount) / data.bars.length) * 100)
-    : 0;
-  const strokeSeries = data.strokes.map((stroke, index) => {
-    const confirmed = stroke.state === "confirmed";
-    return {
-      name: `${confirmed ? "已确认笔" : "形成中笔"} ${index + 1}`,
-      type: "line" as const,
-      xAxisIndex: 0,
-      yAxisIndex: 0,
-      data: [
-        [stroke.startAt, stroke.startPrice],
-        [stroke.endAt, stroke.endPrice],
-      ],
-      symbol: "none",
-      silent: false,
-      connectNulls: false,
-      lineStyle: {
-        color: ACCENT,
-        width: confirmed ? 1.8 : 2.2,
-        type: confirmed ? "solid" as const : "dashed" as const,
-      },
-      z: confirmed ? 4 : 5,
-    };
-  });
-  const centerData = data.centers.map((center): [
-    { name: string; xAxis: string; yAxis: number },
-    { xAxis: string; yAxis: number },
-  ] => [
-      {
-        name: `笔中枢 ${center.lower}–${center.upper}`,
-        xAxis: center.startAt,
-        yAxis: center.lower,
-      },
-      { xAxis: center.endAt, yAxis: center.upper },
-    ]);
-  const dates = data.bars.map((bar) => bar.occurredAt);
+export interface OverlayCenter {
+  startAt: string;
+  endAt: string;
+  lower: number;
+  upper: number;
+}
 
+export interface ChanChartModel {
+  candlesticks: CandlestickData<string>[];
+  volume: Array<HistogramData<string> | WhitespaceData<string>>;
+  strokes: OverlayStroke[];
+  centers: OverlayCenter[];
+  visibleRange: { from: number; to: number };
+}
+
+export function buildChanChartModel(data: ChanChartData): ChanChartModel {
+  const visibleCount = data.timeframe === "1d" ? 126 : 26;
   return {
-    animation: false,
-    backgroundColor: "transparent",
-    grid: [
-      { left: 54, right: 18, top: 25, height: "58%" },
-      { left: 54, right: 18, top: "70%", height: "14%" },
-    ],
-    axisPointer: { link: [{ xAxisIndex: "all" }] },
-    tooltip: {
-      trigger: "axis",
-      axisPointer: { type: "cross", lineStyle: { color: "#46635f" } },
-      backgroundColor: "rgba(5, 18, 26, 0.96)",
-      borderColor: "#294a4c",
-      textStyle: { color: "#dce8df", fontSize: 10 },
-      formatter: (value: unknown) => formatTooltip(value, data.bars),
-    },
-    xAxis: [
-      {
-        type: "category",
-        gridIndex: 0,
-        data: dates,
-        boundaryGap: true,
-        axisLine: { lineStyle: { color: "#294248" } },
-        axisTick: { show: false },
-        axisLabel: { show: false },
-        splitLine: { show: false },
-      },
-      {
-        type: "category",
-        gridIndex: 1,
-        data: dates,
-        boundaryGap: true,
-        axisLine: { lineStyle: { color: "#294248" } },
-        axisTick: { show: false },
-        axisLabel: { color: "#66827c", fontSize: 9, formatter: (value: string) => value.slice(0, 10) },
-        splitLine: { show: false },
-      },
-    ],
-    yAxis: [
-      {
-        type: "value",
-        gridIndex: 0,
-        scale: true,
-        position: "right",
-        axisLabel: { color: "#66827c", fontSize: 9 },
-        splitLine: { lineStyle: { color: "rgba(97, 144, 135, 0.11)" } },
-      },
-      {
-        type: "value",
-        gridIndex: 1,
-        scale: true,
-        position: "right",
-        axisLabel: { color: "#66827c", fontSize: 9 },
-        splitLine: { lineStyle: { color: "rgba(97, 144, 135, 0.08)" } },
-      },
-    ],
-    dataZoom: [
-      { type: "inside", xAxisIndex: [0, 1], start, end: 100, zoomOnMouseWheel: true, moveOnMouseMove: true },
-      {
-        type: "slider",
-        xAxisIndex: [0, 1],
-        start,
-        end: 100,
-        height: 16,
-        bottom: 14,
-        borderColor: "#294248",
-        backgroundColor: "#07151e",
-        fillerColor: "rgba(103, 186, 161, 0.16)",
-        handleStyle: { color: ACCENT, borderColor: ACCENT },
-        textStyle: { color: "#66827c", fontSize: 8 },
-      },
-    ],
-    series: [
-      {
-        name: "前复权 K 线",
-        type: "candlestick",
-        xAxisIndex: 0,
-        yAxisIndex: 0,
-        data: data.bars.map((bar) => [bar.open, bar.close, bar.low, bar.high]),
-        itemStyle: {
-          color: UP,
-          color0: DOWN,
-          borderColor: UP,
-          borderColor0: DOWN,
-        },
-        z: 2,
-      },
-      ...strokeSeries,
-      {
-        name: "笔中枢",
-        type: "line",
-        xAxisIndex: 0,
-        yAxisIndex: 0,
-        data: [],
-        symbol: "none",
-        silent: false,
-        markArea: {
-          silent: false,
-          itemStyle: {
-            color: "rgba(138, 155, 150, 0.14)",
-            borderColor: MUTED,
-            borderWidth: 1,
-          },
-          label: { show: false },
-          tooltip: { formatter: formatCenterTooltip },
-          data: centerData,
-        },
-        z: 1,
-      },
-      {
-        name: "成交量",
-        type: "bar",
-        xAxisIndex: 1,
-        yAxisIndex: 1,
-        data: data.bars.map((bar) => ({
+    candlesticks: data.bars.map((bar) => ({
+      time: bar.occurredAt.slice(0, 10),
+      open: bar.open,
+      high: bar.high,
+      low: bar.low,
+      close: bar.close,
+    })),
+    volume: data.bars.map((bar) => bar.volume === null
+      ? { time: bar.occurredAt.slice(0, 10) }
+      : {
+          time: bar.occurredAt.slice(0, 10),
           value: bar.volume,
-          itemStyle: { color: bar.close >= bar.open ? UP : DOWN },
-        })),
-        z: 1,
-      },
-    ],
+          color: bar.close >= bar.open ? UP : DOWN,
+        }),
+    strokes: data.strokes.map((stroke) => ({
+      startAt: stroke.startAt.slice(0, 10),
+      endAt: stroke.endAt.slice(0, 10),
+      startPrice: stroke.startPrice,
+      endPrice: stroke.endPrice,
+      state: stroke.state,
+    })),
+    centers: data.centers.map((center) => ({
+      startAt: center.startAt.slice(0, 10),
+      endAt: center.endAt.slice(0, 10),
+      lower: center.lower,
+      upper: center.upper,
+    })),
+    visibleRange: {
+      from: Math.max(0, data.bars.length - visibleCount),
+      to: Math.max(0, data.bars.length - 1),
+    },
   };
 }
 
-function formatTooltip(value: unknown, bars: ChanChartData["bars"]): string {
-  const params = Array.isArray(value) ? value as TooltipParam[] : [value as TooltipParam];
-  const date = params.find((item) => item.axisValue)?.axisValue ?? "";
-  const lines = date ? [date.slice(0, 10)] : [];
-  const bar = bars.find((item) => item.occurredAt === date);
-  if (bar) {
-    lines.push(`开 ${bar.open}　高 ${bar.high}　低 ${bar.low}　收 ${bar.close}`);
-    lines.push(`成交量 ${bar.volume === null ? "—" : `${bar.volume} 手`}`);
-  }
-  for (const item of params) {
-    if (item.seriesType === "line" && item.seriesName && item.seriesName !== "笔中枢") {
-      lines.push(item.seriesName);
+export function formatChanTooltip(data: ChanChartData, date: string): string {
+  const bar = data.bars.find((item) => item.occurredAt.slice(0, 10) === date);
+  if (!bar) return "";
+  const lines = [
+    date,
+    `开 ${bar.open}　高 ${bar.high}　低 ${bar.low}　收 ${bar.close}`,
+    `成交量 ${bar.volume === null ? "—" : `${bar.volume} 手`}`,
+  ];
+  const labels = new Set<string>();
+  for (const stroke of data.strokes) {
+    if (stroke.startAt.slice(0, 10) === date || stroke.endAt.slice(0, 10) === date) {
+      labels.add(stroke.state === "confirmed" ? "已确认笔" : "形成中笔");
     }
   }
-  return lines.join("<br/>");
+  for (const center of data.centers) {
+    const startAt = center.startAt.slice(0, 10);
+    const endAt = center.endAt.slice(0, 10);
+    if (startAt <= date && date <= endAt) labels.add(`笔中枢 ${center.lower}–${center.upper}`);
+  }
+  return [...lines, ...labels].join("\n");
 }
 
-function formatCenterTooltip(value: unknown): string {
-  if (typeof value === "object" && value !== null && "name" in value && typeof value.name === "string") return value.name;
-  return "笔中枢";
+export class ChanOverlayPrimitive implements ISeriesPrimitive<Time> {
+  private strokes: OverlayStroke[];
+  private centers: OverlayCenter[];
+  private chart: SeriesAttachedParameter<Time>["chart"] | null = null;
+  private series: SeriesAttachedParameter<Time>["series"] | null = null;
+  private requestUpdate: (() => void) | null = null;
+  private readonly views: readonly IPrimitivePaneView[];
+
+  constructor(strokes: OverlayStroke[], centers: OverlayCenter[]) {
+    this.strokes = strokes;
+    this.centers = centers;
+    this.views = [{
+      zOrder: () => "top",
+      renderer: () => ({ draw: (target) => this.draw(target) }),
+    }];
+  }
+
+  attached(param: SeriesAttachedParameter<Time>): void {
+    this.chart = param.chart;
+    this.series = param.series;
+    this.requestUpdate = param.requestUpdate;
+  }
+
+  detached(): void {
+    this.chart = null;
+    this.series = null;
+    this.requestUpdate = null;
+  }
+
+  updateAllViews(): void {}
+
+  paneViews(): readonly IPrimitivePaneView[] {
+    return this.views;
+  }
+
+  setData(strokes: OverlayStroke[], centers: OverlayCenter[]): void {
+    this.strokes = strokes;
+    this.centers = centers;
+    this.requestUpdate?.();
+  }
+
+  private draw(target: Parameters<IPrimitivePaneRenderer["draw"]>[0]): void {
+    const chart = this.chart;
+    const series = this.series;
+    if (!chart || !series) return;
+    const timeScale = chart.timeScale();
+    target.useBitmapCoordinateSpace((scope) => {
+      const { context, horizontalPixelRatio, verticalPixelRatio } = scope;
+      context.save();
+      for (const center of this.centers) {
+        const startX = timeScale.timeToCoordinate(center.startAt);
+        const endX = timeScale.timeToCoordinate(center.endAt);
+        const upperY = series.priceToCoordinate(center.upper);
+        const lowerY = series.priceToCoordinate(center.lower);
+        if (startX === null || endX === null || upperY === null || lowerY === null) continue;
+        const x = Math.min(startX, endX) * horizontalPixelRatio;
+        const y = Math.min(upperY, lowerY) * verticalPixelRatio;
+        const width = Math.max(1, Math.abs(endX - startX) * horizontalPixelRatio);
+        const height = Math.max(1, Math.abs(lowerY - upperY) * verticalPixelRatio);
+        context.fillStyle = "rgba(138, 155, 150, 0.14)";
+        context.fillRect(x, y, width, height);
+        context.strokeStyle = MUTED;
+        context.lineWidth = Math.max(1, horizontalPixelRatio);
+        context.strokeRect(x, y, width, height);
+      }
+      context.strokeStyle = ACCENT;
+      for (const stroke of this.strokes) {
+        const startX = timeScale.timeToCoordinate(stroke.startAt);
+        const endX = timeScale.timeToCoordinate(stroke.endAt);
+        const startY = series.priceToCoordinate(stroke.startPrice);
+        const endY = series.priceToCoordinate(stroke.endPrice);
+        if (startX === null || endX === null || startY === null || endY === null) continue;
+        context.beginPath();
+        context.setLineDash(stroke.state === "confirmed" ? [] : [8, 6]);
+        context.lineWidth = (stroke.state === "confirmed" ? 1.8 : 2.2) * horizontalPixelRatio;
+        context.moveTo(startX * horizontalPixelRatio, startY * verticalPixelRatio);
+        context.lineTo(endX * horizontalPixelRatio, endY * verticalPixelRatio);
+        context.stroke();
+      }
+      context.restore();
+    });
+  }
 }

@@ -6,6 +6,16 @@ import { ReviewCenterPage } from "./ReviewCenterPage";
 import { SharedReportPage } from "./SharedReportPage";
 import { StockInformationPanel } from "./StockInformationPanel";
 import { TradeJournalPage } from "./TradeJournalPage";
+import {
+  activeCenter,
+  centerPositionLabel,
+  centerPositionTone,
+  deriveQuote,
+  formatTradeDate,
+  quoteTone,
+  signedAmount,
+  signedPercent,
+} from "./quote";
 import { createMockTradingApi, type TradingApi } from "./trading-api";
 import { Atmosphere } from "./ui/Atmosphere";
 import { EmptyState } from "./ui/EmptyState";
@@ -15,6 +25,7 @@ import { KpiStrip } from "./ui/KpiStrip";
 import { MetricTile } from "./ui/MetricTile";
 import { Notice } from "./ui/Notice";
 import { Panel } from "./ui/Panel";
+import { QuoteBand } from "./ui/QuoteBand";
 import { SplitPane } from "./ui/SplitPane";
 import { StatusChip } from "./ui/StatusChip";
 import { ArrowUpRight, CandlestickChart, Database, LayoutDashboard, NotebookPen, Plus, ScrollText, X } from "lucide-react";
@@ -161,6 +172,9 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
   const runningCount = useMemo(() => progress.filter((item) => item.state === "running").length, [progress]);
   const runningLabel = progress.length ? `运行中 · ${completed} / ${progress.length}` : "暂无运行";
   const batchChip = batchStatus(progress);
+  // 顶部 KPI 条优先展示当前标的的行情事实；没有报告时才退回批次计数。
+  const quote = useMemo(() => (report ? deriveQuote(report.chart) : null), [report]);
+  const quoteCenter = useMemo(() => (report ? activeCenter(report.chart) : null), [report]);
 
   async function loadReport(symbol: string, timeframe: Timeframe, clear = false) {
     const key = `${symbol}:${timeframe}`;
@@ -545,25 +559,55 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
 
         {notice && <Notice title="数据服务暂不可用" detail={notice} />}
 
-        {view === "batch" && <><KpiStrip>
-          <MetricTile label="自选" value={String(watchlist.length).padStart(2, "0")} />
-          <MetricTile label="已完成" value={String(completed).padStart(2, "0")} />
-          <MetricTile label="运行中" value={String(runningCount).padStart(2, "0")} />
-          <MetricTile label="本批状态" value={<StatusChip tone={batchChip.tone} label={batchChip.label} />} />
+        {view === "batch" && <div className="batch-page"><KpiStrip>
+          {quote
+            ? <>
+              <MetricTile
+                label={`最新收盘 · ${report?.symbol ?? ""}`}
+                value={quote.last.toFixed(2)}
+                tone={quoteTone(quote.changeRate)}
+                detail={`AS OF ${report ? formatTradeDate(report.asOf) : "—"}`}
+              />
+              <MetricTile
+                label="涨跌幅"
+                value={signedPercent(quote.changeRate)}
+                tone={quoteTone(quote.changeRate)}
+                detail={`涨跌额 ${signedAmount(quote.change)}`}
+              />
+              <MetricTile
+                label="中枢位置"
+                value={quoteCenter ? centerPositionLabel(quoteCenter.position) : "无中枢"}
+                tone={quoteCenter ? centerPositionTone(quoteCenter.position) : "neutral"}
+                detail={quoteCenter ? `${quoteCenter.lower.toFixed(2)} – ${quoteCenter.upper.toFixed(2)}` : "现价未落在任何笔中枢"}
+              />
+              <MetricTile
+                label="本批状态"
+                value={<StatusChip tone={batchChip.tone} label={batchChip.label} />}
+                detail={`自选 ${watchlist.length} · 完成 ${completed} · 运行 ${runningCount}`}
+              />
+            </>
+            : <>
+              <MetricTile label="自选" value={String(watchlist.length).padStart(2, "0")} />
+              <MetricTile label="已完成" value={String(completed).padStart(2, "0")} />
+              <MetricTile label="运行中" value={String(runningCount).padStart(2, "0")} />
+              <MetricTile label="本批状态" value={<StatusChip tone={batchChip.tone} label={batchChip.label} />} />
+            </>}
         </KpiStrip>
+        <div className="batch-cockpit">
         <SplitPane
-          left={<Panel title="自选池" className="watchlist-panel">
+          left={<>
+          <Panel title="自选池" className="watchlist-panel">
             <div className="watch-input"><label htmlFor="watch-code">股票代码</label><input id="watch-code" value={code} onChange={(event) => setCode(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void addSymbol(); }} placeholder="例如 600519" /><button onClick={() => void addSymbol()}><Icon icon={Plus} />加入自选</button></div>
             <div className="watch-items">{watchlist.length ? watchlist.map((item, index) => <div className={`watch-row${currentSymbol === item.symbol ? " selected" : ""}`} key={item.symbol}><button type="button" className="watch-select" aria-label={`选择 ${item.symbol} ${item.name}`} aria-pressed={currentSymbol === item.symbol} onClick={() => selectSymbol(item.symbol)}><span className="row-number">{String(index + 1).padStart(2, "0")}</span><span className="market-dot" data-market={item.market} /><span className="watch-name"><strong>{item.symbol}</strong><small>{item.name}</small></span></button><button type="button" className="icon-button" aria-label={`移除 ${item.symbol}`} onClick={() => void removeSymbol(item.symbol)}><Icon icon={X} /></button></div>) : <EmptyState title="自选池还是空的。" />}</div>
-          </Panel>}
-          right={<>
+          </Panel>
           <Panel title="本批进度" className="pulse-panel">
             <span className="live-pill"><i />LIVE</span>
             <div className="progress-summary"><strong>{runningLabel}</strong><span>盘后手动触发</span></div>
             <div className="progress-track"><div style={{ width: `${progress.length ? Math.max(16, (completed / progress.length) * 100) : 0}%` }} /></div>
             <div className="run-list">{progress.slice(0, 6).map((item) => <div className="run-row" key={item.symbol}><span className={`status-dot ${item.state}`} /><strong>{item.symbol}</strong><span>{item.stage}</span><small>{stateLabel(item.state)}</small></div>)}</div>
           </Panel>
-          <Panel title="结构报告" className="report-section">
+          </>}
+          right={<Panel title="结构报告" className="report-section">
             {report && <ReportView
               report={report}
               loadingTimeframe={loadingTimeframe}
@@ -577,9 +621,9 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
             />}
             {!report && loadingTimeframe && <div className="report-loading">正在加载结构报告…</div>}
             {!report && !loadingTimeframe && <EmptyState title="还没有结构报告。" />}
-          </Panel>
-          </>}
+          </Panel>}
         />
+        </div>
 
         <section className="evidence-section">
           <div className="section-heading"><h2>资讯与市场热度</h2><div className="data-line"><span className={`status-dot ${informationError ? "degraded" : "completed"}`} />EASTMONEY · CNINFO · THS</div></div>
@@ -603,7 +647,7 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
             onCreateShare={() => void runDeliveryAction((reportId) => service.createInvestmentReportShare(reportId))}
             onRevokeShare={() => void runDeliveryAction((reportId) => service.revokeInvestmentReportShare(reportId))}
           />
-        </section></>}
+        </section></div>}
 
         {view === "records" && <ResearchRecords api={service} />}
         {view === "snapshots" && <DataSnapshots api={service} watchlist={watchlist} />}
@@ -707,7 +751,8 @@ function ReportView({
 }) {
   const market = report.symbol.endsWith(".SZ") ? "SZ" : "SH";
   return <article className="report-card">
-    <div className="report-header"><div><div className="report-symbol"><span className="market-chip">{market}</span>{report.symbol} <span>{report.name}</span></div><h3>{report.headline}</h3></div><div className="report-header-actions">{onTimeframeChange && <div className="timeframe-switch" aria-label="图表周期"><button type="button" aria-pressed={report.timeframe === "1d"} onClick={() => onTimeframeChange("1d")}>日线</button><button type="button" aria-label={loadingTimeframe === "1w" ? "周线加载中" : "周线"} aria-pressed={report.timeframe === "1w"} disabled={loadingTimeframe === "1w"} onClick={() => onTimeframeChange("1w")}>{loadingTimeframe === "1w" ? "加载中…" : "周线"}</button></div>}<div className="report-meta"><span>AS OF</span><strong>{report.asOf}</strong><span className={`quality-tag ${report.quality}`}>{report.quality === "ok" ? "数据完整" : "部分降级"}</span></div></div></div>
+    <div className="report-header"><div><div className="report-symbol"><span className="market-chip">{market}</span>{report.symbol} <span>{report.name}</span></div><h3>{report.headline}</h3></div><div className="report-header-actions">{onTimeframeChange && <div className="timeframe-switch" aria-label="图表周期"><button type="button" aria-pressed={report.timeframe === "1d"} onClick={() => onTimeframeChange("1d")}>日线</button><button type="button" aria-label={loadingTimeframe === "1w" ? "周线加载中" : "周线"} aria-pressed={report.timeframe === "1w"} disabled={loadingTimeframe === "1w"} onClick={() => onTimeframeChange("1w")}>{loadingTimeframe === "1w" ? "加载中…" : "周线"}</button></div>}<div className="report-meta"><span>AS OF</span><strong>{formatTradeDate(report.asOf)}</strong><span className={`quality-tag ${report.quality}`}>{report.quality === "ok" ? "数据完整" : "部分降级"}</span></div></div></div>
+    <QuoteBand chart={report.chart} />
     <div className="report-body"><div className="chart-pane">{chartNotice && <div className="chart-notice" role="status">{chartNotice}</div>}<ChanChart symbol={report.symbol} data={report.chart} /></div></div>
     <div className="report-footer"><div className="sources"><span>来源</span>{report.sources.map((source) => <span className="source-chip" key={source}>{source}</span>)}</div><div className="review-state">审阅状态：<strong>{report.review}</strong></div><div className="quality-note">{report.qualityNote}</div></div>
   </article>;

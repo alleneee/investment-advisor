@@ -63,7 +63,7 @@ export function buildTradingReviewChartOption(report: TradingReviewDeterministic
     ],
     dataZoom: [
       { type: "inside", xAxisIndex: [1, 2], start: zoomStart(priceDates.length), end: 100 },
-      { type: "slider", xAxisIndex: [1, 2], start: zoomStart(priceDates.length), end: 100, height: 16, bottom: 14, borderColor: "#294248", backgroundColor: "#07151e", fillerColor: "rgba(126, 224, 200, 0.16)", handleStyle: { color: ACCENT, borderColor: ACCENT }, textStyle: { color: "#66827c", fontSize: 8 } },
+      { type: "slider", xAxisIndex: [1, 2], start: zoomStart(priceDates.length), end: 100, height: 16, bottom: 14, borderColor: "#294248", backgroundColor: "#101920", fillerColor: "rgba(126, 224, 200, 0.16)", handleStyle: { color: ACCENT, borderColor: ACCENT }, textStyle: { color: "#66827c", fontSize: 8 } },
     ],
     series: [
       {

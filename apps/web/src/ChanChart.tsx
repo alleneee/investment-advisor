@@ -1,53 +1,136 @@
 import { useEffect, useRef } from "react";
-import { BarChart, CandlestickChart, LineChart } from "echarts/charts";
 import {
-  DataZoomComponent,
-  GridComponent,
-  MarkAreaComponent,
-  TooltipComponent,
-} from "echarts/components";
-import { init, use, type EChartsType } from "echarts/core";
-import { CanvasRenderer } from "echarts/renderers";
-import { buildChanChartOption } from "./chan-chart-option";
+  CandlestickSeries,
+  ColorType,
+  CrosshairMode,
+  HistogramSeries,
+  createChart,
+  type IChartApi,
+  type ISeriesApi,
+  type MouseEventParams,
+  type Time,
+} from "lightweight-charts";
+import {
+  buildChanChartModel,
+  ChanOverlayPrimitive,
+  formatChanTooltip,
+} from "./chan-chart-option";
 import type { ChanChartData } from "./types";
-
-use([
-  BarChart,
-  CandlestickChart,
-  LineChart,
-  DataZoomComponent,
-  GridComponent,
-  MarkAreaComponent,
-  TooltipComponent,
-  CanvasRenderer,
-]);
 
 export function ChanChart({ symbol, data }: { symbol: string; data: ChanChartData }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<EChartsType | null>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const candlestickRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const overlayRef = useRef<ChanOverlayPrimitive | null>(null);
   const observerRef = useRef<ResizeObserver | null>(null);
   const printImageRef = useRef<HTMLImageElement | null>(null);
+  const dataRef = useRef(data);
+  const hasData = data.bars.length > 0;
+  dataRef.current = data;
 
   useEffect(() => {
     const container = containerRef.current;
-    if (!container || !data.bars.length) {
-      observerRef.current?.disconnect();
-      observerRef.current = null;
-      chartRef.current?.dispose();
-      chartRef.current = null;
-      return;
-    }
-    const chart = chartRef.current ?? init(container, undefined, { renderer: "canvas" });
+    if (!hasData || !container) return;
+    const chart = createChart(container, {
+      width: container.clientWidth || 800,
+      height: container.clientHeight || 411,
+      layout: {
+        background: { type: ColorType.Solid, color: "#101920" },
+        textColor: "#66827c",
+        fontSize: 10,
+        fontFamily: '"IBM Plex Mono", ui-monospace, monospace',
+        panes: {
+          enableResize: false,
+          separatorColor: "#294248",
+          separatorHoverColor: "#294248",
+        },
+      },
+      grid: {
+        vertLines: { color: "rgba(97, 144, 135, 0.07)" },
+        horzLines: { color: "rgba(97, 144, 135, 0.11)" },
+      },
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: { color: "#46635f", labelBackgroundColor: "#294a4c" },
+        horzLine: { color: "#46635f", labelBackgroundColor: "#294a4c" },
+      },
+      rightPriceScale: { borderColor: "#294248" },
+      timeScale: {
+        borderColor: "#294248",
+        timeVisible: false,
+        secondsVisible: false,
+        rightOffset: 2,
+      },
+      localization: { locale: "zh-CN" },
+    });
+    const candlestick = chart.addSeries(CandlestickSeries, {
+      upColor: "#f6465d",
+      downColor: "#0ecb81",
+      borderUpColor: "#f6465d",
+      borderDownColor: "#0ecb81",
+      wickUpColor: "#f6465d",
+      wickDownColor: "#0ecb81",
+      priceLineVisible: false,
+      lastValueVisible: false,
+    }, 0);
+    chart.addPane();
+    const volume = chart.addSeries(HistogramSeries, {
+      priceFormat: { type: "volume" },
+      priceLineVisible: false,
+      lastValueVisible: false,
+    }, 1);
+    const panes = chart.panes();
+    panes[0]?.setStretchFactor(4);
+    panes[1]?.setStretchFactor(1);
+    const overlay = new ChanOverlayPrimitive([], []);
+    candlestick.attachPrimitive(overlay);
+    const handleCrosshairMove = (param: MouseEventParams<Time>) => {
+      const tooltip = tooltipRef.current;
+      if (!tooltip || param.time === undefined || param.point === undefined) {
+        if (tooltip) tooltip.hidden = true;
+        return;
+      }
+      const date = typeof param.time === "string"
+        ? param.time
+        : typeof param.time === "number"
+          ? new Date(param.time * 1000).toISOString().slice(0, 10)
+          : `${param.time.year}-${String(param.time.month).padStart(2, "0")}-${String(param.time.day).padStart(2, "0")}`;
+      const text = formatChanTooltip(dataRef.current, date);
+      tooltip.textContent = text;
+      tooltip.hidden = !text;
+    };
+    chart.subscribeCrosshairMove(handleCrosshairMove);
+    const observer = new ResizeObserver(() => chart.resize(container.clientWidth, container.clientHeight));
+    observer.observe(container);
     chartRef.current = chart;
-    chart.setOption(buildChanChartOption(data), { notMerge: true });
-    if (!observerRef.current) {
-      observerRef.current = new ResizeObserver(() => chartRef.current?.resize());
-      observerRef.current.observe(container);
-    }
-  }, [data]);
+    candlestickRef.current = candlestick;
+    volumeRef.current = volume;
+    overlayRef.current = overlay;
+    observerRef.current = observer;
+    return () => {
+      chart.unsubscribeCrosshairMove(handleCrosshairMove);
+      observer.disconnect();
+      chart.remove();
+      if (chartRef.current === chart) chartRef.current = null;
+      if (candlestickRef.current === candlestick) candlestickRef.current = null;
+      if (volumeRef.current === volume) volumeRef.current = null;
+      if (overlayRef.current === overlay) overlayRef.current = null;
+      if (observerRef.current === observer) observerRef.current = null;
+    };
+  }, [hasData]);
 
-  // 打印时 canvas 尺寸不会随打印版面重排，改为临时插入等比静态图，打印后移除。
+  useEffect(() => {
+    if (!hasData) return;
+    const model = buildChanChartModel(data);
+    candlestickRef.current?.setData(model.candlesticks);
+    volumeRef.current?.setData(model.volume);
+    overlayRef.current?.setData(model.strokes, model.centers);
+    chartRef.current?.timeScale().setVisibleLogicalRange(model.visibleRange);
+  }, [data, hasData]);
+
   useEffect(() => {
     const swapInPrintImage = () => {
       const chart = chartRef.current;
@@ -56,11 +139,7 @@ export function ChanChart({ symbol, data }: { symbol: string; data: ChanChartDat
       const image = document.createElement("img");
       image.className = "chan-chart-print-image";
       image.alt = "缠论结构图（打印版）";
-      image.src = chart.getDataURL({
-        pixelRatio: 2,
-        backgroundColor: "#081924",
-        excludeComponents: ["dataZoom"],
-      });
+      image.src = chart.takeScreenshot(true, false).toDataURL("image/png");
       shell.appendChild(image);
       printImageRef.current = image;
     };
@@ -77,14 +156,7 @@ export function ChanChart({ symbol, data }: { symbol: string; data: ChanChartDat
     };
   }, []);
 
-  useEffect(() => () => {
-    observerRef.current?.disconnect();
-    observerRef.current = null;
-    chartRef.current?.dispose();
-    chartRef.current = null;
-  }, []);
-
-  if (!data.bars.length) return <div className="chart-empty">当前周期暂无可绘制行情</div>;
+  if (!hasData) return <div className="chart-empty">当前周期暂无可绘制行情</div>;
 
   return <div className="chan-chart-shell" ref={shellRef}>
     <div className="chan-chart-legend" aria-label="缠论图例">
@@ -93,6 +165,7 @@ export function ChanChart({ symbol, data }: { symbol: string; data: ChanChartDat
       <span><i className="legend-center" />笔中枢</span>
       <span><i className="legend-volume" />成交量</span>
     </div>
+    <div ref={tooltipRef} className="chan-chart-tooltip" hidden />
     <div
       ref={containerRef}
       className="chan-chart"

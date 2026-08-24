@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, type WorkbenchApi } from "./api";
@@ -240,6 +240,23 @@ function deferred<T>() {
 }
 
 describe("research workbench", () => {
+  it("organizes the batch view as a two-column analysis cockpit", async () => {
+    const { container } = render(<App />);
+
+    await screen.findByRole("heading", { name: "自选池" });
+    const batchPage = container.querySelector(".batch-page");
+    const batchCockpit = batchPage?.querySelector(".batch-cockpit");
+    const panes = batchCockpit?.querySelectorAll(":scope > .ui-split > .ui-split-pane") ?? [];
+
+    expect(batchPage).toBeInTheDocument();
+    expect(batchCockpit).toBeInTheDocument();
+    expect(panes).toHaveLength(2);
+    expect(within(panes[0] as HTMLElement).getByRole("heading", { name: "自选池" })).toBeInTheDocument();
+    expect(within(panes[0] as HTMLElement).getByRole("heading", { name: "本批进度" })).toBeInTheDocument();
+    expect(within(panes[1] as HTMLElement).getByRole("heading", { name: "结构报告" })).toBeInTheDocument();
+    expect(within(panes[1] as HTMLElement).queryByRole("heading", { name: "本批进度" })).not.toBeInTheDocument();
+  });
+
   it("navigates between batch, research records, and data snapshots", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -1012,6 +1029,165 @@ describe("research workbench", () => {
 
     expect(await screen.findByRole("heading", { name: "切回后的完整报告" })).toBeInTheDocument();
     expect(getInvestmentReport).toHaveBeenCalledWith("report-600519.SH-1d");
+  });
+
+  it("defines the batch cockpit visual hierarchy and responsive contracts", async () => {
+    const moduleName = "node:fs";
+    const { readFileSync } = await import(moduleName);
+    const processModuleName = "node:process";
+    const { cwd } = await import(processModuleName);
+    const styles = readFileSync(`${cwd()}/src/styles.css`, "utf8") as string;
+    const declarations = (pattern: RegExp, source = styles) => source.match(pattern)?.[1] ?? "";
+    const mediaBlock = (maxWidth: number) => {
+      const marker = `@media (max-width: ${maxWidth}px)`;
+      const start = styles.lastIndexOf(marker);
+      if (start < 0) return "";
+      const open = styles.indexOf("{", start);
+      let depth = 0;
+      for (let index = open; index < styles.length; index += 1) {
+        if (styles[index] === "{") depth += 1;
+        if (styles[index] === "}") depth -= 1;
+        if (depth === 0) return styles.slice(start, index + 1);
+      }
+      return "";
+    };
+    const scopedFontRules = [...styles.matchAll(/\.batch-page\s+:is\(\s*([\s\S]*?)\s*\)\s*\{([^}]*)\}/g)];
+    const selectorsForFontSize = (fontSize: number) => scopedFontRules
+      .find(([, , rule]) => new RegExp(`font-size:\\s*${fontSize}px`).test(rule))?.[1]
+      .split(",")
+      .map((selector) => selector.trim()) ?? [];
+    const expectDeclarations = (rule: string, expected: RegExp[]) => {
+      for (const property of expected) expect(rule).toMatch(property);
+    };
+
+    expectDeclarations(declarations(/\.batch-cockpit\s*\{([^}]*)\}/), [/margin-top:\s*12px/]);
+    expectDeclarations(declarations(/\.batch-cockpit\s+\.ui-split\s*\{([^}]*)\}/), [
+      /grid-template-columns:\s*minmax\(260px,\s*\.62fr\)\s+minmax\(0,\s*1\.5fr\)/,
+      /gap:\s*12px/,
+    ]);
+    expectDeclarations(declarations(/\.batch-cockpit\s+\.ui-split-pane\s*\{([^}]*)\}/), [/gap:\s*12px/]);
+    expectDeclarations(declarations(/\.batch-cockpit\s+\.watch-input\s+input\s*\{([^}]*)\}/), [/min-width:\s*0/]);
+    expectDeclarations(declarations(/\.batch-cockpit\s+\.watch-input\s+button\s*\{([^}]*)\}/), [/flex-shrink:\s*0/]);
+    expectDeclarations(declarations(/\.batch-cockpit\s+\.watch-name\s*\{([^}]*)\}/), [
+      /min-width:\s*0/,
+      /display:\s*grid/,
+      /gap:\s*3px/,
+    ]);
+    expectDeclarations(declarations(/\.batch-cockpit\s+\.watch-name\s+:is\(strong,\s*small\)\s*\{([^}]*)\}/), [
+      /overflow:\s*hidden/,
+      /text-overflow:\s*ellipsis/,
+      /white-space:\s*nowrap/,
+    ]);
+    expectDeclarations(declarations(/\.batch-cockpit\s+\.run-list\s*\{([^}]*)\}/), [/grid-template-columns:\s*1fr/]);
+    expectDeclarations(declarations(/\.batch-cockpit\s+\.run-row\s*\{([^}]*)\}/), [
+      /grid-template-columns:\s*8px\s+minmax\(72px,\s*84px\)\s+minmax\(0,\s*1fr\)\s+auto/,
+    ]);
+    expectDeclarations(declarations(/\.batch-cockpit\s+\.report-section\s*\{([^}]*)\}/), [
+      /min-height:\s*100%/,
+      /margin-top:\s*0/,
+    ]);
+    expect(styles).toMatch(/\.batch-page\s+\.evidence-section,\s*\.batch-page\s+\.outlook-section\s*\{[^}]*margin-top:\s*44px/);
+    expectDeclarations(declarations(/\.batch-page\s+\.outlook-header\s*\{([^}]*)\}/), [/padding:\s*20px\s+24px/]);
+    expectDeclarations(declarations(/\.batch-page\s+:is\(\.outlook-idle,\s*\.outlook-failed,\s*\.outlook-progress\)\s*\{([^}]*)\}/), [
+      /padding:\s*22px\s+24px/,
+    ]);
+    expectDeclarations(declarations(/\.batch-page\s+:is\(\s*\.outlook-summary,\s*\.outlook-risk-section,\s*\.outlook-disclaimer,\s*\.outlook-delivery\s*\)\s*\{([^}]*)\}/), [
+      /padding-right:\s*24px/,
+      /padding-left:\s*24px/,
+    ]);
+
+    const bodySelectors = [
+      ".news-item p",
+      ".message-item p",
+      ".information-column-empty",
+      ".evidence-loading",
+      ".information-empty",
+      ".evidence-local-error",
+      ".information-quality",
+      ".chart-notice",
+      ".chart-empty",
+      ".report-loading",
+      ".outlook-idle p",
+      ".outlook-error",
+      ".outlook-summary p",
+      ".outlook-summary blockquote",
+      ".scenario-card > p",
+      ".scenario-conditions dd",
+      ".risk-list p",
+      ".outlook-disclaimer",
+      ".delivery-status dd",
+      ".delivery-error",
+      ".delivery-warnings",
+    ];
+    const labelSelectors = [
+      ".evidence-kicker",
+      ".evidence-timestamp",
+      ".information-column-heading",
+      ".information-column-heading small",
+      ".information-meta",
+      ".message-item > small",
+      ".run-row small",
+      ".report-meta",
+      ".timeframe-switch button",
+      ".chan-chart-legend",
+      ".report-footer",
+      ".sentiment-rank span",
+      ".sentiment-card dt",
+      ".sentiment-card dd",
+      ".concept-list span",
+      ".sentiment-time",
+      ".outlook-meta",
+      ".outlook-meta strong",
+      ".outlook-action",
+      ".outlook-failed button",
+      ".outlook-progress small",
+      ".outlook-failed span",
+      ".outlook-summary > span",
+      ".scenario-heading span",
+      ".scenario-conditions dt",
+      ".outlook-subheading",
+      ".delivery-status dt",
+      ".delivery-actions button",
+    ];
+    expect(selectorsForFontSize(12)).toHaveLength(bodySelectors.length);
+    expect(selectorsForFontSize(12)).toEqual(expect.arrayContaining(bodySelectors));
+    expect(selectorsForFontSize(10)).toHaveLength(labelSelectors.length);
+    expect(selectorsForFontSize(10)).toEqual(expect.arrayContaining(labelSelectors));
+    expectDeclarations(declarations(/\.batch-page\s+\.market-chip\s*\{([^}]*)\}/), [/font-size:\s*10px\s*!important/]);
+
+    expectDeclarations(declarations(/\.information-toggle\s*\{([^}]*)\}/), [
+      /width:\s*100%/,
+      /margin-top:\s*14px/,
+      /padding:\s*9px\s+11px/,
+      /border:\s*1px\s+solid\s+var\(--border\)/,
+      /border-radius:\s*var\(--radius-control\)/,
+      /background:\s*transparent/,
+      /color:\s*var\(--muted\)/,
+      /font-size:\s*10px/,
+    ]);
+    expectDeclarations(declarations(/\.information-toggle:hover,\s*\.information-toggle:focus-visible\s*\{([^}]*)\}/), [
+      /border-color:\s*color-mix\(in srgb,\s*var\(--accent\)\s+45%,\s*transparent\)/,
+      /color:\s*var\(--accent\)/,
+    ]);
+
+    const tablet = mediaBlock(1100);
+    expect(tablet).toMatch(/\.batch-cockpit\s+\.ui-split\s*\{[^}]*grid-template-columns:\s*1fr/);
+    expect(tablet).toMatch(/\.batch-page\s+\.information-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+    expect(tablet).toMatch(/\.batch-page\s+\.message-column\s*\{[^}]*border-right:\s*0/);
+    expectDeclarations(declarations(/\.batch-page\s+\.sentiment-column\s*\{([^}]*)\}/, tablet), [
+      /grid-column:\s*1\s*\/\s*-1/,
+      /border-top:\s*1px\s+solid\s+rgba\(213,\s*228,\s*218,\s*\.09\)/,
+    ]);
+
+    const narrow = mediaBlock(900);
+    expect(narrow).toMatch(/\.batch-page\s+\.information-grid\s*\{[^}]*grid-template-columns:\s*1fr/);
+    expectDeclarations(declarations(/\.batch-page\s+\.information-column\s*\{([^}]*)\}/, narrow), [
+      /grid-column:\s*auto/,
+      /border-right:\s*0/,
+    ]);
+    expectDeclarations(declarations(/\.batch-page\s+\.sentiment-column\s*\{([^}]*)\}/, narrow), [
+      /border-top:\s*0/,
+    ]);
   });
 
   it("declares 320px containment rules for the rail, stock input, and AI action", async () => {
