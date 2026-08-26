@@ -62,7 +62,7 @@ export function BsChart({
     if (dataIndex < 0) return;
     instance.dispatchAction({ type: "highlight", seriesIndex: 0, dataIndex });
     instance.dispatchAction({ type: "updateAxisPointer", seriesIndex: 0, dataIndex });
-  }, [chart, hasBars, highlightOccurredAt]);
+  }, [chart, hasBars, highlightOccurredAt, marks, periodEnd, periodStart, types]);
 
   useEffect(() => () => {
     observerRef.current?.disconnect();

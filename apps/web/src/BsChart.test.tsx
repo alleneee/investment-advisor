@@ -73,13 +73,14 @@ const marks: ChartMark[] = [];
 
 function renderChart(overrides: {
   chart?: BsChartData;
+  marks?: ChartMark[];
   highlightOccurredAt?: string | null;
   onSelectBar?: (occurredAt: string) => void;
 } = {}) {
   return render(
     <BsChart
       chart={overrides.chart ?? chartData()}
-      marks={marks}
+      marks={overrides.marks ?? marks}
       types={types}
       periodStart="2026-08-01"
       periodEnd="2026-08-31"
@@ -141,6 +142,44 @@ describe("BsChart", () => {
 
   it("highlightOccurredAt 非空时对对应类目 dispatch highlight 与 updateAxisPointer", () => {
     renderChart({ highlightOccurredAt: "2026-08-11T00:00:00+08:00" });
+
+    expect(mocks.chart.dispatchAction).toHaveBeenCalledWith({
+      type: "highlight",
+      seriesIndex: 0,
+      dataIndex: 1,
+    });
+    expect(mocks.chart.dispatchAction).toHaveBeenCalledWith({
+      type: "updateAxisPointer",
+      seriesIndex: 0,
+      dataIndex: 1,
+    });
+  });
+
+  it("手标变化后仍按已有 highlightOccurredAt 重新 dispatch", () => {
+    const data = chartData();
+    const { rerender } = renderChart({ chart: data, highlightOccurredAt: "2026-08-11T00:00:00+08:00" });
+    mocks.chart.dispatchAction.mockClear();
+
+    rerender(
+      <BsChart
+        chart={data}
+        marks={[{
+          markId: "mark-1",
+          accountId: "account-1",
+          symbol: "600000.SH",
+          occurredAt: "2026-08-10T00:00:00+08:00",
+          typeId: "type-1",
+          comment: "理想买",
+          revision: 1,
+          createdAt: "2026-08-10T10:00:00+08:00",
+          updatedAt: "2026-08-10T10:00:00+08:00",
+        }]}
+        types={types}
+        periodStart="2026-08-01"
+        periodEnd="2026-08-31"
+        highlightOccurredAt="2026-08-11T00:00:00+08:00"
+      />,
+    );
 
     expect(mocks.chart.dispatchAction).toHaveBeenCalledWith({
       type: "highlight",
