@@ -8,10 +8,26 @@ from decimal import Decimal
 from statistics import median
 from typing import Any
 
-from .metrics import LedgerMetrics, _business_date, _cycle_holding_days, _parse_datetime
+from app.domain.chan_macd import compute_macd
+
+from .metrics import (
+    LedgerMetrics,
+    _business_date,
+    _cycle_holding_days,
+    _decimal,
+    _parse_datetime,
+    _provider_daily,
+    _raw_bar,
+)
 from .reducer import canonical_decimal_text, money_text
 
 MINUTE_BAR_WIDTH = timedelta(minutes=30)
+DAILY_LOOKBACK_DAYS = 180
+MINUTE_LOOKBACK_CALENDAR_DAYS = 40
+
+
+class BarNotFoundError(ValueError):
+    code = "BAR_NOT_FOUND"
 
 
 def _event_id(row: Mapping[str, Any]) -> str:
@@ -182,7 +198,151 @@ def project_executions(
     return {"daily": daily, "minute": minute}
 
 
+def assert_bar_exists(bars: Sequence[Mapping[str, Any]], occurred_at: datetime | str) -> Mapping[str, Any]:
+    target = _parse_datetime(occurred_at)
+    for bar in bars:
+        if _bar_at(bar) == target:
+            return bar
+    raise BarNotFoundError("行情柱不存在")
+
+
+def build_bs_chart(
+    *,
+    symbol: str,
+    timeframe: str,
+    period_start: date,
+    period_end: date,
+    executions: Sequence[Mapping[str, Any]] = (),
+    provider: Any,
+    store: Any | None = None,
+    account_id: str | None = None,
+) -> dict[str, Any]:
+    if timeframe == "1d":
+        start = period_start - timedelta(days=DAILY_LOOKBACK_DAYS)
+        try:
+            bars = _load_daily_bars(symbol, start, period_end, provider, store, account_id)
+        except Exception:
+            return _unavailable_chart(symbol, timeframe)
+    elif timeframe == "30m":
+        start = period_end - timedelta(days=MINUTE_LOOKBACK_CALENDAR_DAYS)
+        try:
+            bars = _load_minute_bars(symbol, start, period_end, provider)
+        except Exception:
+            return _unavailable_chart(symbol, timeframe)
+    else:
+        raise ValueError("timeframe 仅支持 1d 或 30m")
+    if not bars:
+        return _unavailable_chart(symbol, timeframe)
+    bars = _sorted_bars(bars)
+    daily_bars = bars if timeframe == "1d" else []
+    minute_bars = bars if timeframe == "30m" else []
+    macd = compute_macd([Decimal(str(bar["close"])) for bar in bars])
+    projected = project_executions(
+        _period_symbol_executions(executions, symbol, period_start, period_end),
+        daily_bars,
+        minute_bars,
+    )["daily" if timeframe == "1d" else "minute"]
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "available": True,
+        "adjustment": "none",
+        "bars": list(bars),
+        "executions": projected,
+        "macd": macd,
+        "quality": {"status": "ok", "warnings": []},
+    }
+
+
+def _unavailable_chart(symbol: str, timeframe: str) -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "available": False,
+        "adjustment": "none",
+        "bars": [],
+        "executions": [],
+        "macd": {"ready": False, "dif": [], "dea": [], "histogram": []},
+        "quality": {"status": "unavailable", "warnings": []},
+    }
+
+
+def _period_symbol_executions(
+    executions: Sequence[Mapping[str, Any]],
+    symbol: str,
+    period_start: date,
+    period_end: date,
+) -> list[Mapping[str, Any]]:
+    rows: list[Mapping[str, Any]] = []
+    for row in executions:
+        if str(row.get("symbol")) != symbol:
+            continue
+        occurred = row.get("occurred_at", row.get("executed_at"))
+        if occurred is None:
+            continue
+        day = _business_date(occurred)
+        if period_start <= day <= period_end:
+            rows.append(row)
+    return rows
+
+
+def _load_daily_bars(
+    symbol: str,
+    start: date,
+    end: date,
+    provider: Any,
+    store: Any | None,
+    account_id: str | None,
+) -> list[Mapping[str, Any]]:
+    cached: dict[str, dict[str, Any]] = {}
+    if store is not None and account_id:
+        for row in store.list_market_bars(account_id, symbol, start, end):
+            if row.get("close") is None:
+                continue
+            bar = _raw_bar(row)
+            cached[str(bar["trade_date"])] = bar
+    try:
+        raw = _provider_daily(provider, symbol, start, end)
+    except Exception:
+        raw = []
+    for row in raw:
+        if row.get("close") is None:
+            continue
+        bar = _raw_bar(row)
+        cached.setdefault(str(bar["trade_date"]), bar)
+    return [cached[key] for key in sorted(cached)]
+
+
+def _load_minute_bars(symbol: str, start: date, end: date, provider: Any) -> list[dict[str, Any]]:
+    rows = provider.minutes(symbol, freq="30m", as_of=end, start_date=start, end_date=end)
+    bars: list[dict[str, Any]] = []
+    for row in rows or []:
+        if not isinstance(row, Mapping) or row.get("close") is None:
+            continue
+        bars.append(_raw_minute_bar(row))
+    return bars
+
+
+def _raw_minute_bar(row: Mapping[str, Any]) -> dict[str, Any]:
+    occurred = _parse_datetime(row.get("trade_time", row.get("occurred_at")))
+    volume = row.get("vol", row.get("volume"))
+    return {
+        "trade_date": occurred.date().isoformat(),
+        "occurred_at": occurred.isoformat(),
+        "open": canonical_decimal_text(_decimal(row.get("open"), field="open")),
+        "high": canonical_decimal_text(_decimal(row.get("high"), field="high")),
+        "low": canonical_decimal_text(_decimal(row.get("low"), field="low")),
+        "close": canonical_decimal_text(_decimal(row.get("close"), field="close")),
+        "volume": None
+        if volume is None
+        else canonical_decimal_text(_decimal(volume, field="vol")),
+    }
+
+
 __all__ = [
+    "BarNotFoundError",
+    "assert_bar_exists",
+    "build_bs_chart",
     "project_executions",
     "project_marks",
     "symbol_bs_summary",

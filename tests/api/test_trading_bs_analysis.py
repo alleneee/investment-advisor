@@ -1,9 +1,17 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
-from app.trading.bs_analysis import project_executions, project_marks, symbol_bs_summary
+import pytest
+from app.trading.bs_analysis import (
+    BarNotFoundError,
+    assert_bar_exists,
+    build_bs_chart,
+    project_executions,
+    project_marks,
+    symbol_bs_summary,
+)
 from app.trading.metrics import calculate_review_metrics, replay_rows
 from app.trading.reducer import money_text
 
@@ -269,3 +277,187 @@ def test_project_executions_covering_uses_chronological_windows_when_bars_are_re
     assert minute["just-after-first"]["bar_occurred_at"] == "2026-01-09T10:30:00+08:00"
     assert minute["at-last-close"]["bar_occurred_at"] == "2026-01-09T11:00:00+08:00"
     assert "at-left-open" not in minute
+
+
+class _FakeProvider:
+    def __init__(
+        self,
+        *,
+        daily_rows: list[dict] | None = None,
+        minute_rows: list[dict] | None = None,
+        minutes_error: Exception | None = None,
+    ) -> None:
+        self.daily_rows = daily_rows or []
+        self.minute_rows = minute_rows or []
+        self.minutes_error = minutes_error
+        self.daily_calls: list[dict] = []
+        self.minute_calls: list[dict] = []
+
+    def daily(self, symbol: str, *, as_of=None, start_date=None, end_date=None) -> list[dict]:
+        self.daily_calls.append(
+            {"symbol": symbol, "as_of": as_of, "start_date": start_date, "end_date": end_date}
+        )
+        return list(self.daily_rows)
+
+    def minutes(self, symbol: str, *, freq: str, as_of, start_date, end_date) -> list[dict]:
+        self.minute_calls.append(
+            {
+                "symbol": symbol,
+                "freq": freq,
+                "as_of": as_of,
+                "start_date": start_date,
+                "end_date": end_date,
+            }
+        )
+        if self.minutes_error is not None:
+            raise self.minutes_error
+        return list(self.minute_rows)
+
+
+def _daily_row(day: date, close: str = "10") -> dict:
+    return {
+        "trade_date": day.strftime("%Y%m%d"),
+        "open": close,
+        "high": close,
+        "low": close,
+        "close": close,
+        "vol": "1000",
+    }
+
+
+def _n_daily_rows(count: int, *, end: date = PERIOD_END) -> list[dict]:
+    start = end - timedelta(days=count - 1)
+    return [_daily_row(start + timedelta(days=offset)) for offset in range(count)]
+
+
+def test_build_bs_chart_daily_macd_not_ready_before_warmup() -> None:
+    provider = _FakeProvider(daily_rows=_n_daily_rows(34))
+    chart = build_bs_chart(
+        symbol="600000.SH",
+        timeframe="1d",
+        period_start=PERIOD_START,
+        period_end=PERIOD_END,
+        executions=[],
+        provider=provider,
+    )
+
+    assert chart["available"] is True
+    assert chart["adjustment"] == "none"
+    assert "executions" in chart
+    assert chart["executions"] == []
+    assert chart["macd"]["ready"] is False
+    assert chart["macd"]["dif"] == []
+    assert chart["macd"]["dea"] == []
+    assert chart["macd"]["histogram"] == []
+    assert provider.daily_calls[0]["start_date"] == PERIOD_START - timedelta(days=180)
+    assert provider.daily_calls[0]["end_date"] == PERIOD_END
+    assert provider.daily_calls[0]["as_of"] == PERIOD_END
+
+
+def test_build_bs_chart_daily_macd_ready_matches_bar_length() -> None:
+    provider = _FakeProvider(daily_rows=list(reversed(_n_daily_rows(35))))
+    chart = build_bs_chart(
+        symbol="600000.SH",
+        timeframe="1d",
+        period_start=PERIOD_START,
+        period_end=PERIOD_END,
+        executions=[],
+        provider=provider,
+    )
+
+    assert chart["available"] is True
+    assert chart["adjustment"] == "none"
+    assert len(chart["bars"]) == 35
+    assert [bar["occurred_at"] for bar in chart["bars"]] == sorted(bar["occurred_at"] for bar in chart["bars"])
+    assert chart["macd"]["ready"] is True
+    assert len(chart["macd"]["dif"]) == 35
+    assert len(chart["macd"]["dea"]) == 35
+    assert len(chart["macd"]["histogram"]) == 35
+
+
+def test_build_bs_chart_projects_executions_onto_current_timeframe() -> None:
+    provider = _FakeProvider(daily_rows=_n_daily_rows(35))
+    executions = [
+        _execution("buy-1", "2026-01-09", "buy", "10.5"),
+        _execution("other", "2026-01-09", "buy", symbol="000001.SZ", name="平安银行"),
+    ]
+    chart = build_bs_chart(
+        symbol="600000.SH",
+        timeframe="1d",
+        period_start=PERIOD_START,
+        period_end=PERIOD_END,
+        executions=executions,
+        provider=provider,
+    )
+
+    by_id = _by_id(chart["executions"], "execution_id")
+    assert set(by_id) == {"buy-1"}
+    row = by_id["buy-1"]
+    assert row["side"] == "buy"
+    assert row["price"] == "10.5"
+    assert "occurred_at" in row or "trade_date" in row
+
+
+def test_build_bs_chart_minutes_provider_error_is_unavailable() -> None:
+    provider = _FakeProvider(minutes_error=RuntimeError("stk_mins failed"))
+    chart = build_bs_chart(
+        symbol="600000.SH",
+        timeframe="30m",
+        period_start=PERIOD_START,
+        period_end=PERIOD_END,
+        executions=[_execution("buy-1", "2026-01-09", "buy")],
+        provider=provider,
+    )
+
+    assert chart["available"] is False
+    assert chart["bars"] == []
+    assert chart["executions"] == []
+    assert chart["quality"]["status"] == "unavailable"
+    assert provider.minute_calls[0]["freq"] == "30m"
+    assert provider.minute_calls[0]["as_of"] == PERIOD_END
+    assert provider.minute_calls[0]["end_date"] == PERIOD_END
+    assert provider.minute_calls[0]["start_date"] == PERIOD_END - timedelta(days=40)
+
+
+def test_build_bs_chart_minutes_normalizes_naive_trade_time_as_shanghai() -> None:
+    provider = _FakeProvider(
+        minute_rows=[
+            {
+                "trade_time": "2026-01-09 10:00:00",
+                "open": "10",
+                "high": "11",
+                "low": "9",
+                "close": "10.2",
+                "vol": "100",
+            }
+        ]
+    )
+    chart = build_bs_chart(
+        symbol="600000.SH",
+        timeframe="30m",
+        period_start=PERIOD_START,
+        period_end=PERIOD_END,
+        executions=[],
+        provider=provider,
+    )
+
+    assert chart["available"] is True
+    assert chart["adjustment"] == "none"
+    assert chart["executions"] == []
+    assert chart["bars"][0]["occurred_at"] == "2026-01-09T10:00:00+08:00"
+
+
+def test_assert_bar_exists_rejects_missing_daily_and_minute_bars() -> None:
+    daily = [_bar("2026-01-09T00:00:00+08:00")]
+    minute = [_bar("2026-01-09T10:00:00+08:00")]
+
+    assert assert_bar_exists(daily, "2026-01-09T00:00:00+08:00") is daily[0]
+    assert assert_bar_exists(minute, "2026-01-09T10:00:00+08:00") is minute[0]
+
+    with pytest.raises(BarNotFoundError) as missing_daily:
+        assert_bar_exists(daily, "2026-01-10T00:00:00+08:00")
+    assert missing_daily.value.code == "BAR_NOT_FOUND"
+
+    with pytest.raises(BarNotFoundError) as missing_minute:
+        assert_bar_exists(minute, "2026-01-09T10:30:00+08:00")
+    assert missing_minute.value.code == "BAR_NOT_FOUND"
