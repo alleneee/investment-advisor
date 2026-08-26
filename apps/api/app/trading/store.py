@@ -16,6 +16,14 @@ from app.db import Database
 from .contracts import decimal_value
 from .reducer import canonical_decimal_text, money_text
 
+_PRESET_CHART_MARK_TYPES: tuple[tuple[str, str, str, str], ...] = (
+    ("ideal_buy", "理想买", "买", "#f6465d"),
+    ("ideal_sell", "理想卖", "卖", "#4a90e2"),
+    ("high", "高点", "高", "#f5a623"),
+    ("low", "低点", "低", "#7ed321"),
+    ("review", "复盘点", "复", "#9b8cff"),
+)
+
 
 class TradingStoreError(ValueError):
     code = "TRADING_STORE_ERROR"
@@ -31,6 +39,18 @@ class AccountNotFound(TradingStoreError):
 
 class RevisionConflict(TradingStoreError):
     code = "REVISION_CONFLICT"
+
+
+class DuplicateMarkType(TradingStoreError):
+    code = "DUPLICATE_TYPE"
+
+
+class MarkTypePreset(TradingStoreError):
+    code = "MARK_TYPE_PRESET"
+
+
+class MarkTypeInUse(TradingStoreError):
+    code = "MARK_TYPE_IN_USE"
 
 
 class IdempotencyConflict(TradingStoreError):
@@ -318,6 +338,37 @@ class TradingStore:
                     ON trade_executions(account_id, is_deleted, occurred_at, created_at, execution_id);
                 CREATE INDEX IF NOT EXISTS trading_cash_flow_list_order
                     ON cash_flows(account_id, is_deleted, occurred_at, created_at, cash_flow_id);
+
+                CREATE TABLE IF NOT EXISTS chart_mark_types(
+                    type_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    letter TEXT NOT NULL,
+                    color TEXT NOT NULL,
+                    preset INTEGER NOT NULL CHECK(preset IN (0, 1)),
+                    enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+                    created_at TEXT NOT NULL,
+                    UNIQUE(account_id, code),
+                    UNIQUE(account_id, label),
+                    UNIQUE(account_id, letter),
+                    FOREIGN KEY(account_id) REFERENCES trading_account(account_id)
+                );
+                CREATE TABLE IF NOT EXISTS chart_marks(
+                    mark_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    type_id TEXT NOT NULL,
+                    comment TEXT NOT NULL DEFAULT '',
+                    revision INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(account_id) REFERENCES trading_account(account_id),
+                    FOREIGN KEY(type_id) REFERENCES chart_mark_types(type_id)
+                );
+                CREATE INDEX IF NOT EXISTS chart_marks_symbol_time
+                    ON chart_marks(account_id, symbol, occurred_at);
                 """
         )
         self._migrate_review_schema()
@@ -545,6 +596,201 @@ class TradingStore:
                     ),
                 )
         return revision
+
+    def ensure_preset_mark_types(self, account_id: str) -> list[dict[str, Any]]:
+        now = self._now()
+        with self.database.transaction(immediate=True) as connection:
+            self._meta_in(connection, account_id)
+            for code, label, letter, color in _PRESET_CHART_MARK_TYPES:
+                connection.execute(
+                    """
+                    INSERT INTO chart_mark_types(
+                        type_id, account_id, code, label, letter, color, preset, enabled, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, 1, 1, %s)
+                    ON CONFLICT (account_id, code) DO NOTHING
+                    """,
+                    (str(uuid.uuid4()), account_id, code, label, letter, color, now),
+                )
+        return self.list_chart_mark_types(account_id)
+
+    def list_chart_mark_types(self, account_id: str) -> list[dict[str, Any]]:
+        with self.database.read() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM chart_mark_types
+                WHERE account_id = %s
+                ORDER BY created_at, code, type_id
+                """,
+                (account_id,),
+            ).fetchall()
+        return [self._chart_mark_type_row(row) for row in rows]
+
+    def create_chart_mark_type(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        account_id = self._text(request, "account_id")
+        label = self._text(request, "label")
+        letter = self._mark_type_letter(request)
+        color = self._text(request, "color")
+        type_id, code, now = str(uuid.uuid4()), self._custom_mark_type_code(), self._now()
+        try:
+            with self.database.transaction(immediate=True) as connection:
+                self._meta_in(connection, account_id)
+                connection.execute(
+                    """
+                    INSERT INTO chart_mark_types(
+                        type_id, account_id, code, label, letter, color, preset, enabled, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, 0, 1, %s)
+                    """,
+                    (type_id, account_id, code, label, letter, color, now),
+                )
+                row = connection.execute(
+                    "SELECT * FROM chart_mark_types WHERE type_id = %s", (type_id,)
+                ).fetchone()
+        except psycopg.errors.UniqueViolation as exc:
+            raise DuplicateMarkType("点位类型名称或字母已存在") from exc
+        return self._chart_mark_type_row(row)
+
+    def update_chart_mark_type(self, type_id: str, request: Mapping[str, Any]) -> dict[str, Any]:
+        try:
+            with self.database.transaction(immediate=True) as connection:
+                existing = connection.execute(
+                    "SELECT * FROM chart_mark_types WHERE type_id = %s", (type_id,)
+                ).fetchone()
+                if existing is None:
+                    raise TradingStoreError("点位类型不存在")
+                label = self._text(request, "label") if "label" in request else existing["label"]
+                letter = (
+                    self._mark_type_letter(request) if "letter" in request else existing["letter"]
+                )
+                color = self._text(request, "color") if "color" in request else existing["color"]
+                enabled = existing["enabled"]
+                if "enabled" in request:
+                    value = request["enabled"]
+                    if not isinstance(value, bool) and value not in (0, 1):
+                        raise TradingStoreError("enabled 必须是布尔值")
+                    enabled = int(value)
+                connection.execute(
+                    """
+                    UPDATE chart_mark_types
+                    SET label = %s, letter = %s, color = %s, enabled = %s
+                    WHERE type_id = %s
+                    """,
+                    (label, letter, color, enabled, type_id),
+                )
+                row = connection.execute(
+                    "SELECT * FROM chart_mark_types WHERE type_id = %s", (type_id,)
+                ).fetchone()
+        except psycopg.errors.UniqueViolation as exc:
+            raise DuplicateMarkType("点位类型名称或字母已存在") from exc
+        return self._chart_mark_type_row(row)
+
+    def delete_chart_mark_type(self, type_id: str) -> None:
+        with self.database.transaction(immediate=True) as connection:
+            existing = connection.execute(
+                "SELECT * FROM chart_mark_types WHERE type_id = %s", (type_id,)
+            ).fetchone()
+            if existing is None:
+                raise TradingStoreError("点位类型不存在")
+            if existing["preset"]:
+                raise MarkTypePreset("预置点位类型不能删除")
+            referenced = connection.execute(
+                "SELECT 1 FROM chart_marks WHERE type_id = %s", (type_id,)
+            ).fetchone()
+            if referenced is not None:
+                raise MarkTypeInUse("点位类型仍被手标引用")
+            connection.execute("DELETE FROM chart_mark_types WHERE type_id = %s", (type_id,))
+
+    def list_chart_marks(self, account_id: str) -> list[dict[str, Any]]:
+        with self.database.read() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM chart_marks
+                WHERE account_id = %s
+                ORDER BY occurred_at, created_at, mark_id
+                """,
+                (account_id,),
+            ).fetchall()
+        return [self._chart_mark_row(row) for row in rows]
+
+    def create_chart_mark(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        account_id = self._text(request, "account_id")
+        symbol = self._text(request, "symbol")
+        type_id = self._text(request, "type_id")
+        occurred_at, _ = self._normalized_occurred_at(self._text(request, "occurred_at"))
+        comment = request.get("comment", "")
+        if not isinstance(comment, str):
+            raise TradingStoreError("comment 必须是字符串")
+        mark_id, now = str(uuid.uuid4()), self._now()
+        with self.database.transaction(immediate=True) as connection:
+            self._meta_in(connection, account_id)
+            mark_type = connection.execute(
+                "SELECT type_id FROM chart_mark_types WHERE type_id = %s AND account_id = %s",
+                (type_id, account_id),
+            ).fetchone()
+            if mark_type is None:
+                raise TradingStoreError("点位类型不存在")
+            connection.execute(
+                """
+                INSERT INTO chart_marks(
+                    mark_id, account_id, symbol, occurred_at, type_id, comment, revision,
+                    created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, 1, %s, %s)
+                """,
+                (mark_id, account_id, symbol, occurred_at, type_id, comment, now, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM chart_marks WHERE mark_id = %s", (mark_id,)
+            ).fetchone()
+        return self._chart_mark_row(row)
+
+    def update_chart_mark(
+        self,
+        mark_id: str,
+        request: Mapping[str, Any],
+        *,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        with self.database.transaction(immediate=True) as connection:
+            existing = self._chart_mark_for_update(connection, mark_id, expected_revision)
+            comment = existing["comment"]
+            if "comment" in request:
+                if not isinstance(request["comment"], str):
+                    raise TradingStoreError("comment 必须是字符串")
+                comment = request["comment"]
+            type_id = existing["type_id"]
+            if "type_id" in request:
+                type_id = self._text(request, "type_id")
+                mark_type = connection.execute(
+                    "SELECT type_id FROM chart_mark_types WHERE type_id = %s AND account_id = %s",
+                    (type_id, existing["account_id"]),
+                ).fetchone()
+                if mark_type is None:
+                    raise TradingStoreError("点位类型不存在")
+            revision, now = int(existing["revision"]) + 1, self._now()
+            updated = connection.execute(
+                """
+                UPDATE chart_marks
+                SET type_id = %s, comment = %s, revision = %s, updated_at = %s
+                WHERE mark_id = %s AND revision = %s
+                """,
+                (type_id, comment, revision, now, mark_id, expected_revision),
+            )
+            if updated.rowcount != 1:
+                raise RevisionConflict("手标 revision 已过期")
+            row = connection.execute(
+                "SELECT * FROM chart_marks WHERE mark_id = %s", (mark_id,)
+            ).fetchone()
+        return self._chart_mark_row(row)
+
+    def delete_chart_mark(self, mark_id: str, *, expected_revision: int) -> dict[str, Any]:
+        with self.database.transaction(immediate=True) as connection:
+            existing = self._chart_mark_for_update(connection, mark_id, expected_revision)
+            deleted = connection.execute(
+                "DELETE FROM chart_marks WHERE mark_id = %s AND revision = %s",
+                (mark_id, expected_revision),
+            )
+            if deleted.rowcount != 1:
+                raise RevisionConflict("手标 revision 已过期")
+        return self._chart_mark_row(existing)
 
     def create_execution(
         self,
@@ -1244,6 +1490,17 @@ class TradingStore:
             raise TradingStoreError(f"{field} 必须是非空字符串")
         return value
 
+    @classmethod
+    def _mark_type_letter(cls, request: Mapping[str, Any]) -> str:
+        letter = cls._text(request, "letter")
+        if len(letter) > 2:
+            raise TradingStoreError("letter 必须是 1–2 个字符")
+        return letter
+
+    @staticmethod
+    def _custom_mark_type_code() -> str:
+        return f"custom_{uuid.uuid4().hex[:12]}"
+
     @staticmethod
     def _detail_text(request: Mapping[str, Any], field: str) -> str:
         value = request.get(field)
@@ -1546,6 +1803,30 @@ class TradingStore:
         return row
 
     @staticmethod
+    def _chart_mark_for_update(
+        connection: psycopg.Connection, mark_id: str, expected_revision: int
+    ) -> dict[str, Any]:
+        row = connection.execute(
+            "SELECT * FROM chart_marks WHERE mark_id = %s", (mark_id,)
+        ).fetchone()
+        if row is None or int(row["revision"]) != expected_revision:
+            raise RevisionConflict("手标 revision 已过期")
+        return row
+
+    @staticmethod
+    def _chart_mark_type_row(row: Mapping[str, Any]) -> dict[str, Any]:
+        result = dict(row)
+        result["preset"] = bool(result["preset"])
+        result["enabled"] = bool(result["enabled"])
+        return result
+
+    @staticmethod
+    def _chart_mark_row(row: Mapping[str, Any]) -> dict[str, Any]:
+        result = dict(row)
+        result["revision"] = int(result["revision"])
+        return result
+
+    @staticmethod
     def _execution_row(row: dict[str, Any], ledger_revision: int) -> dict[str, Any]:
         result = dict(row)
         result["is_deleted"] = bool(result["is_deleted"])
@@ -1619,8 +1900,11 @@ class TradingStore:
 __all__ = [
     "AccountAlreadyExists",
     "AccountNotFound",
+    "DuplicateMarkType",
     "IdempotencyConflict",
     "InvalidReviewPayload",
+    "MarkTypeInUse",
+    "MarkTypePreset",
     "MarketRevisionConflict",
     "ReviewJobNotFound",
     "ReviewLeaseConflict",
