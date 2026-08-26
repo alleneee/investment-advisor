@@ -388,6 +388,19 @@ def test_build_bs_chart_daily_macd_ready_matches_bar_length() -> None:
     assert len(chart["macd"]["histogram"]) == 35
 
 
+_BS_CHART_EXECUTION_KEYS = {
+    "execution_id",
+    "symbol",
+    "occurred_at",
+    "bar_occurred_at",
+    "side",
+    "price",
+    "quantity",
+    "fee",
+    "primary_reason",
+}
+
+
 def test_build_bs_chart_projects_executions_onto_current_timeframe() -> None:
     provider = _FakeProvider(daily_rows=_n_daily_rows(35))
     executions = [
@@ -406,9 +419,18 @@ def test_build_bs_chart_projects_executions_onto_current_timeframe() -> None:
     by_id = _by_id(chart["executions"], "execution_id")
     assert set(by_id) == {"buy-1"}
     row = by_id["buy-1"]
+    assert set(row) == _BS_CHART_EXECUTION_KEYS
+    assert row["symbol"] == "600000.SH"
     assert row["side"] == "buy"
     assert row["price"] == "10.5"
-    assert "occurred_at" in row or "trade_date" in row
+    assert row["quantity"] == 1
+    assert row["fee"] == "0"
+    assert row["primary_reason"] == "pullback_confirmation"
+    assert row["occurred_at"] == "2026-01-09T10:00:00+08:00"
+    assert row["bar_occurred_at"] == "2026-01-09T00:00:00+08:00"
+    assert "tags" not in row
+    assert "note" not in row
+    assert "client_idempotency_key" not in row
 
 
 def test_build_bs_chart_minutes_provider_error_is_unavailable() -> None:

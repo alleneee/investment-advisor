@@ -66,6 +66,21 @@ def _with_bar(row: Mapping[str, Any], bar: Mapping[str, Any]) -> dict[str, Any]:
     return {**dict(row), "bar_occurred_at": _bar_at_text(bar)}
 
 
+def _chart_execution(row: Mapping[str, Any]) -> dict[str, Any]:
+    occurred = row.get("occurred_at", row.get("executed_at"))
+    return {
+        "execution_id": row["execution_id"],
+        "symbol": row["symbol"],
+        "occurred_at": occurred.isoformat() if isinstance(occurred, datetime) else str(occurred),
+        "bar_occurred_at": row["bar_occurred_at"],
+        "side": row["side"],
+        "price": row["price"],
+        "quantity": row["quantity"],
+        "fee": row["fee"],
+        "primary_reason": row["primary_reason"],
+    }
+
+
 def _sorted_bars(bars: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     return sorted(bars, key=_bar_at)
 
@@ -253,7 +268,7 @@ def build_bs_chart(
         "available": True,
         "adjustment": "none",
         "bars": list(bars),
-        "executions": projected,
+        "executions": [_chart_execution(row) for row in projected],
         "macd": macd,
         "quality": {
             "status": "degraded" if failure is not None else "ok",
