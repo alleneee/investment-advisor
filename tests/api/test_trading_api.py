@@ -4,6 +4,7 @@ from threading import Event
 import pytest
 from app.db import Database
 from app.main import create_app
+from app.trading.reducer import money_text
 from app.trading.service import TradingService
 from app.trading.store import TradingStore
 from httpx import ASGITransport, AsyncClient
@@ -738,3 +739,180 @@ async def test_daily_review_draft_completion_revision_and_targeted_snapshot_inva
     assert store.get_review_snapshot(before["snapshot_id"])["is_outdated"] is False
     assert store.get_review_snapshot(contained["snapshot_id"])["is_outdated"] is True
     assert store.get_review_snapshot(after["snapshot_id"])["is_outdated"] is False
+
+
+class _FakeDailyProvider:
+    def __init__(self, rows: list[dict] | None = None) -> None:
+        self.rows = rows or []
+
+    def daily(self, symbol: str, *, as_of=None, start_date=None, end_date=None) -> list[dict]:
+        return list(self.rows)
+
+
+def _daily_bar(trade_date: str, close: str = "10") -> dict:
+    return {
+        "trade_date": trade_date,
+        "open": close,
+        "high": close,
+        "low": close,
+        "close": close,
+        "vol": "1000",
+    }
+
+
+@pytest.mark.anyio
+async def test_bs_summary_lists_period_symbols_and_buy_only_realized_pnl_is_zero() -> None:
+    app = create_app(database=Database())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        missing = await client.get("/api/trading/bs-summary", params={"start": "2026-01-01", "end": "2026-01-31"})
+        assert (await client.post("/api/trading/account", json=_account())).status_code == 201
+        created = await client.post("/api/trading/executions", json=_execution())
+        summary = await client.get("/api/trading/bs-summary", params={"start": "2026-01-01", "end": "2026-01-31"})
+        empty = await client.get("/api/trading/bs-summary", params={"start": "2026-02-01", "end": "2026-02-28"})
+
+    assert missing.status_code == 404
+    assert created.status_code == 201
+    assert summary.status_code == 200
+    body = summary.json()
+    assert body["start"] == "2026-01-01"
+    assert body["end"] == "2026-01-31"
+    assert [row["symbol"] for row in body["symbols"]] == ["600000.SH"]
+    assert body["symbols"][0]["realized_pnl"] == money_text(0)
+    assert body["symbols"][0]["realized_pnl"] == "0.00"
+    assert empty.status_code == 200
+    assert empty.json()["symbols"] == []
+
+
+@pytest.mark.anyio
+async def test_chart_mark_types_seed_presets_and_reject_invalid_letter() -> None:
+    app = create_app(database=Database())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/api/trading/account", json=_account())).status_code == 201
+        listed = await client.get("/api/trading/chart-mark-types")
+        created = await client.post(
+            "/api/trading/chart-mark-types",
+            json={"label": "突破", "letter": "突", "color": "#123456"},
+        )
+        empty_letter = await client.post(
+            "/api/trading/chart-mark-types",
+            json={"label": "空字母", "letter": "", "color": "#123456"},
+        )
+        long_letter = await client.post(
+            "/api/trading/chart-mark-types",
+            json={"label": "过长", "letter": "abc", "color": "#123456"},
+        )
+
+    assert listed.status_code == 200
+    codes = {row["code"] for row in listed.json()}
+    assert codes == {"ideal_buy", "ideal_sell", "high", "low", "review"}
+    assert all(row["preset"] is True for row in listed.json())
+    assert created.status_code == 201
+    body = created.json()
+    assert body["type_id"]
+    assert body["code"]
+    assert body["preset"] is False
+    assert body["label"] == "突破"
+    assert body["letter"] == "突"
+    assert body["color"] == "#123456"
+    assert empty_letter.status_code == 400
+    assert long_letter.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_create_chart_mark_without_matching_bar_is_bar_not_found() -> None:
+    app = create_app(database=Database(), trading_market_provider=_FakeDailyProvider([]))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/api/trading/account", json=_account())).status_code == 201
+        types = await client.get("/api/trading/chart-mark-types")
+        type_id = next(row["type_id"] for row in types.json() if row["code"] == "high")
+        created = await client.post(
+            "/api/trading/chart-marks",
+            json={
+                "symbol": "600000.SH",
+                "occurred_at": "2026-01-10T00:00:00+08:00",
+                "type_id": type_id,
+                "comment": "无柱",
+                "timeframe": "1d",
+            },
+        )
+
+    assert types.status_code == 200
+    assert created.status_code == 400
+    assert created.json()["error"]["code"] == "BAR_NOT_FOUND"
+
+
+@pytest.mark.anyio
+async def test_create_chart_mark_on_daily_bar_and_list_covers_lookback() -> None:
+    provider = _FakeDailyProvider([_daily_bar("20250801")])
+    app = create_app(database=Database(), trading_market_provider=provider)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/api/trading/account", json=_account())).status_code == 201
+        types = await client.get("/api/trading/chart-mark-types")
+        type_id = next(row["type_id"] for row in types.json() if row["code"] == "review")
+        chart = await client.get(
+            "/api/trading/bs-chart",
+            params={"symbol": "600000.SH", "timeframe": "1d", "start": "2026-01-01", "end": "2026-01-31"},
+        )
+        occurred_at = chart.json()["bars"][0]["occurred_at"]
+        created = await client.post(
+            "/api/trading/chart-marks",
+            json={
+                "symbol": "600000.SH",
+                "occurred_at": occurred_at,
+                "type_id": type_id,
+                "comment": "前文点",
+                "timeframe": "1d",
+            },
+        )
+        listed = await client.get(
+            "/api/trading/chart-marks",
+            params={"symbol": "600000.SH", "start": "2025-07-05", "end": "2026-01-31"},
+        )
+
+    assert chart.status_code == 200
+    assert chart.json()["available"] is True
+    assert created.status_code == 201
+    assert created.json()["comment"] == "前文点"
+    assert created.json()["occurred_at"].startswith("2025-08-01")
+    assert listed.status_code == 200
+    assert [row["mark_id"] for row in listed.json()] == [created.json()["mark_id"]]
+    assert listed.json()[0]["comment"] == "前文点"
+
+
+@pytest.mark.anyio
+async def test_delete_preset_chart_mark_type_is_rejected() -> None:
+    app = create_app(database=Database())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/api/trading/account", json=_account())).status_code == 201
+        types = await client.get("/api/trading/chart-mark-types")
+        preset_id = next(row["type_id"] for row in types.json() if row["code"] == "review")
+        deleted = await client.delete(f"/api/trading/chart-mark-types/{preset_id}")
+        restored = await client.get("/api/trading/chart-mark-types")
+
+    assert deleted.status_code == 400
+    assert deleted.json()["error"]["code"] == "MARK_TYPE_PRESET"
+    assert any(row["type_id"] == preset_id for row in restored.json())
+
+
+@pytest.mark.anyio
+async def test_bs_chart_thirty_minute_without_minutes_is_unavailable() -> None:
+    app = create_app(database=Database(), trading_market_provider=_FakeDailyProvider([_daily_bar("20260110")]))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/api/trading/account", json=_account())).status_code == 201
+        chart = await client.get(
+            "/api/trading/bs-chart",
+            params={"symbol": "600000.SH", "timeframe": "30m", "start": "2026-01-01", "end": "2026-01-31"},
+        )
+
+    assert chart.status_code == 200
+    body = chart.json()
+    assert body["available"] is False
+    assert body["bars"] == []
+    assert body["executions"] == []
+    assert body["quality"]["status"] == "unavailable"
