@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 from threading import Event
 
 import pytest
@@ -749,6 +750,21 @@ class _FakeDailyProvider:
         return list(self.rows)
 
 
+def _inactive_account(store: TradingStore) -> dict:
+    account_id = str(uuid.uuid4())
+    with store.database.transaction(immediate=True) as connection:
+        connection.execute(
+            """
+            INSERT INTO trading_account(
+                account_id, name, activated_on, initial_capital, is_active, created_at
+            ) VALUES (%s, %s, %s, %s, 0, %s)
+            """,
+            (account_id, "其他账户", "2026-01-01", "100000", "2026-01-01T00:00:00+08:00"),
+        )
+        connection.execute("INSERT INTO trading_meta(account_id) VALUES (%s)", (account_id,))
+    return store.get_account(account_id)
+
+
 def _daily_bar(trade_date: str, close: str = "10") -> dict:
     return {
         "trade_date": trade_date,
@@ -916,3 +932,49 @@ async def test_bs_chart_thirty_minute_without_minutes_is_unavailable() -> None:
     assert body["bars"] == []
     assert body["executions"] == []
     assert body["quality"]["status"] == "unavailable"
+
+
+@pytest.mark.anyio
+async def test_chart_mark_mutations_are_scoped_to_the_active_account() -> None:
+    database = Database()
+    store = TradingStore(database)
+    app = create_app(database=database, trading_store=store)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/api/trading/account", json=_account())).status_code == 201
+        foreign_account = _inactive_account(store)
+        foreign_type = store.create_chart_mark_type(
+            {
+                "account_id": foreign_account["account_id"],
+                "label": "外来",
+                "letter": "外",
+                "color": "#000000",
+            }
+        )
+        foreign_mark = store.create_chart_mark(
+            {
+                "account_id": foreign_account["account_id"],
+                "symbol": "600000.SH",
+                "occurred_at": "2026-01-10T00:00:00+08:00",
+                "type_id": foreign_type["type_id"],
+                "comment": "别人的点",
+            }
+        )
+        patched_type = await client.patch(
+            f"/api/trading/chart-mark-types/{foreign_type['type_id']}",
+            json={"label": "劫持", "letter": "劫", "color": "#ffffff"},
+        )
+        deleted_type = await client.delete(f"/api/trading/chart-mark-types/{foreign_type['type_id']}")
+        patched_mark = await client.patch(
+            f"/api/trading/chart-marks/{foreign_mark['mark_id']}",
+            json={"comment": "劫持", "revision": foreign_mark["revision"]},
+        )
+        deleted_mark = await client.delete(
+            f"/api/trading/chart-marks/{foreign_mark['mark_id']}",
+            headers={"If-Match": str(foreign_mark["revision"])},
+        )
+
+    assert patched_type.status_code == deleted_type.status_code == 404
+    assert patched_mark.status_code == deleted_mark.status_code == 404
+    assert store.list_chart_mark_types(foreign_account["account_id"])[0]["label"] == "外来"
+    assert store.list_chart_marks(foreign_account["account_id"])[0]["comment"] == "别人的点"

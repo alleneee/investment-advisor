@@ -467,14 +467,20 @@ class TradingService:
             raise _from_store_error(exc) from exc
 
     def update_chart_mark_type(self, type_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        self._account()
+        account = self._account()
+        self._require_owned(
+            self.store.list_chart_mark_types(account["account_id"]), "type_id", type_id, "点位类型"
+        )
         try:
             return self.store.update_chart_mark_type(type_id, payload)
         except TradingStoreError as exc:
             raise _from_store_error(exc) from exc
 
     def delete_chart_mark_type(self, type_id: str) -> None:
-        self._account()
+        account = self._account()
+        self._require_owned(
+            self.store.list_chart_mark_types(account["account_id"]), "type_id", type_id, "点位类型"
+        )
         try:
             self.store.delete_chart_mark_type(type_id)
         except TradingStoreError as exc:
@@ -540,7 +546,8 @@ class TradingService:
     def update_chart_mark(
         self, mark_id: str, payload: Mapping[str, Any], revision: int
     ) -> dict[str, Any]:
-        self._account()
+        account = self._account()
+        self._require_owned(self.store.list_chart_marks(account["account_id"]), "mark_id", mark_id, "手标")
         comment = payload.get("comment")
         if comment is not None:
             if not isinstance(comment, str):
@@ -553,7 +560,8 @@ class TradingService:
             raise _from_store_error(exc) from exc
 
     def delete_chart_mark(self, mark_id: str, revision: int) -> None:
-        self._account()
+        account = self._account()
+        self._require_owned(self.store.list_chart_marks(account["account_id"]), "mark_id", mark_id, "手标")
         try:
             self.store.delete_chart_mark(mark_id, expected_revision=revision)
         except TradingStoreError as exc:
@@ -775,6 +783,15 @@ class TradingService:
     @staticmethod
     def _find_by_id(rows: list[dict[str, Any]], field: str, value: str) -> dict[str, Any] | None:
         return next((row for row in rows if row[field] == value), None)
+
+    @classmethod
+    def _require_owned(
+        cls, rows: list[dict[str, Any]], field: str, value: str, label: str
+    ) -> dict[str, Any]:
+        existing = cls._find_by_id(rows, field, value)
+        if existing is None:
+            raise TradingNotFoundError(f"{label}不存在")
+        return existing
 
     @staticmethod
     def _require_current(row: dict[str, Any] | None, revision: int, label: str) -> None:
