@@ -53,6 +53,10 @@ class MarkTypeInUse(TradingStoreError):
     code = "MARK_TYPE_IN_USE"
 
 
+class MarkTypeDisabled(TradingStoreError):
+    code = "MARK_TYPE_DISABLED"
+
+
 class IdempotencyConflict(TradingStoreError):
     code = "IDEMPOTENCY_CONFLICT"
 
@@ -722,12 +726,7 @@ class TradingStore:
         mark_id, now = str(uuid.uuid4()), self._now()
         with self.database.transaction(immediate=True) as connection:
             self._meta_in(connection, account_id)
-            mark_type = connection.execute(
-                "SELECT type_id FROM chart_mark_types WHERE type_id = %s AND account_id = %s",
-                (type_id, account_id),
-            ).fetchone()
-            if mark_type is None:
-                raise TradingStoreError("点位类型不存在")
+            self._selectable_chart_mark_type(connection, type_id, account_id)
             connection.execute(
                 """
                 INSERT INTO chart_marks(
@@ -759,12 +758,7 @@ class TradingStore:
             type_id = existing["type_id"]
             if "type_id" in request:
                 type_id = self._text(request, "type_id")
-                mark_type = connection.execute(
-                    "SELECT type_id FROM chart_mark_types WHERE type_id = %s AND account_id = %s",
-                    (type_id, existing["account_id"]),
-                ).fetchone()
-                if mark_type is None:
-                    raise TradingStoreError("点位类型不存在")
+                self._selectable_chart_mark_type(connection, type_id, existing["account_id"])
             revision, now = int(existing["revision"]) + 1, self._now()
             updated = connection.execute(
                 """
@@ -1803,6 +1797,20 @@ class TradingStore:
         return row
 
     @staticmethod
+    def _selectable_chart_mark_type(
+        connection: psycopg.Connection, type_id: str, account_id: str
+    ) -> Mapping[str, Any]:
+        row = connection.execute(
+            "SELECT * FROM chart_mark_types WHERE type_id = %s AND account_id = %s",
+            (type_id, account_id),
+        ).fetchone()
+        if row is None:
+            raise TradingStoreError("点位类型不存在")
+        if not row["enabled"]:
+            raise MarkTypeDisabled("停用的点位类型不能再选用")
+        return row
+
+    @staticmethod
     def _chart_mark_for_update(
         connection: psycopg.Connection, mark_id: str, expected_revision: int
     ) -> dict[str, Any]:
@@ -1903,6 +1911,7 @@ __all__ = [
     "DuplicateMarkType",
     "IdempotencyConflict",
     "InvalidReviewPayload",
+    "MarkTypeDisabled",
     "MarkTypeInUse",
     "MarkTypePreset",
     "MarketRevisionConflict",

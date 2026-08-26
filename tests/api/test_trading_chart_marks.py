@@ -6,6 +6,7 @@ import pytest
 from app.db import Database
 from app.trading.store import (
     DuplicateMarkType,
+    MarkTypeDisabled,
     MarkTypeInUse,
     MarkTypePreset,
     RevisionConflict,
@@ -197,3 +198,33 @@ def test_update_and_delete_mark_wrong_revision_conflicts() -> None:
     assert updated["comment"] == "新评论"
     assert updated["revision"] == mark["revision"] + 1
     assert store.list_chart_marks(account_id)[0]["comment"] == "新评论"
+
+
+def test_disabled_mark_type_cannot_be_selected_but_existing_marks_remain() -> None:
+    store = _store()
+    account_id = _account(store)["account_id"]
+    store.ensure_preset_mark_types(account_id)
+    custom = store.create_chart_mark_type(_custom_type(account_id))
+    enabled = store.create_chart_mark_type(_custom_type(account_id, label="其他", letter="他"))
+    existing = store.create_chart_mark(_mark(account_id, custom["type_id"], comment="已有"))
+
+    disabled = store.update_chart_mark_type(custom["type_id"], {"enabled": False})
+    assert disabled["enabled"] is False
+
+    with pytest.raises(MarkTypeDisabled) as create_error:
+        store.create_chart_mark(_mark(account_id, custom["type_id"], comment="新点"))
+    assert create_error.value.code == "MARK_TYPE_DISABLED"
+
+    switchable = store.create_chart_mark(_mark(account_id, enabled["type_id"], comment="可改"))
+    with pytest.raises(MarkTypeDisabled) as update_error:
+        store.update_chart_mark(
+            switchable["mark_id"],
+            {"type_id": custom["type_id"]},
+            expected_revision=switchable["revision"],
+        )
+    assert update_error.value.code == "MARK_TYPE_DISABLED"
+
+    listed = store.list_chart_marks(account_id)
+    assert {row["mark_id"] for row in listed} == {existing["mark_id"], switchable["mark_id"]}
+    assert next(row for row in listed if row["mark_id"] == existing["mark_id"])["type_id"] == custom["type_id"]
+    assert next(row for row in listed if row["mark_id"] == switchable["mark_id"])["type_id"] == enabled["type_id"]
