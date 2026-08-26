@@ -4,6 +4,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
+from app.providers.tushare import MarketProviderError
 from app.trading.bs_analysis import (
     BarNotFoundError,
     assert_bar_exists,
@@ -279,16 +280,26 @@ def test_project_executions_covering_uses_chronological_windows_when_bars_are_re
     assert "at-left-open" not in minute
 
 
+class _FakeStore:
+    def __init__(self, bars: list[dict] | None = None) -> None:
+        self.bars = bars or []
+
+    def list_market_bars(self, account_id, symbol, period_start, period_end) -> list[dict]:
+        return list(self.bars)
+
+
 class _FakeProvider:
     def __init__(
         self,
         *,
         daily_rows: list[dict] | None = None,
         minute_rows: list[dict] | None = None,
+        daily_error: Exception | None = None,
         minutes_error: Exception | None = None,
     ) -> None:
         self.daily_rows = daily_rows or []
         self.minute_rows = minute_rows or []
+        self.daily_error = daily_error
         self.minutes_error = minutes_error
         self.daily_calls: list[dict] = []
         self.minute_calls: list[dict] = []
@@ -297,6 +308,8 @@ class _FakeProvider:
         self.daily_calls.append(
             {"symbol": symbol, "as_of": as_of, "start_date": start_date, "end_date": end_date}
         )
+        if self.daily_error is not None:
+            raise self.daily_error
         return list(self.daily_rows)
 
     def minutes(self, symbol: str, *, freq: str, as_of, start_date, end_date) -> list[dict]:
@@ -413,6 +426,8 @@ def test_build_bs_chart_minutes_provider_error_is_unavailable() -> None:
     assert chart["bars"] == []
     assert chart["executions"] == []
     assert chart["quality"]["status"] == "unavailable"
+    assert chart["quality"]["warnings"]
+    assert "stk_mins failed" in chart["quality"]["warnings"][0]
     assert provider.minute_calls[0]["freq"] == "30m"
     assert provider.minute_calls[0]["as_of"] == PERIOD_END
     assert provider.minute_calls[0]["end_date"] == PERIOD_END
@@ -445,6 +460,67 @@ def test_build_bs_chart_minutes_normalizes_naive_trade_time_as_shanghai() -> Non
     assert chart["adjustment"] == "none"
     assert chart["executions"] == []
     assert chart["bars"][0]["occurred_at"] == "2026-01-09T10:00:00+08:00"
+
+
+def test_build_bs_chart_minutes_market_provider_error_is_unavailable_with_warning() -> None:
+    provider = _FakeProvider(minutes_error=MarketProviderError("tushare stk_mins down"))
+    chart = build_bs_chart(
+        symbol="600000.SH",
+        timeframe="30m",
+        period_start=PERIOD_START,
+        period_end=PERIOD_END,
+        executions=[],
+        provider=provider,
+    )
+
+    assert chart["available"] is False
+    assert chart["bars"] == []
+    assert chart["executions"] == []
+    assert chart["quality"]["status"] == "unavailable"
+    assert chart["quality"]["warnings"]
+    assert "tushare stk_mins down" in chart["quality"]["warnings"][0]
+
+
+def test_build_bs_chart_daily_provider_error_without_store_is_unavailable_with_warning() -> None:
+    provider = _FakeProvider(daily_error=MarketProviderError("daily feed failed"))
+    chart = build_bs_chart(
+        symbol="600000.SH",
+        timeframe="1d",
+        period_start=PERIOD_START,
+        period_end=PERIOD_END,
+        executions=[],
+        provider=provider,
+        store=_FakeStore([]),
+        account_id="acct-1",
+    )
+
+    assert chart["available"] is False
+    assert chart["bars"] == []
+    assert chart["executions"] == []
+    assert chart["quality"]["status"] == "unavailable"
+    assert chart["quality"]["warnings"]
+    assert "daily feed failed" in chart["quality"]["warnings"][0]
+
+
+def test_build_bs_chart_daily_keeps_store_bars_when_provider_fails() -> None:
+    cached = _n_daily_rows(8)
+    provider = _FakeProvider(daily_error=RuntimeError("provider timeout"))
+    chart = build_bs_chart(
+        symbol="600000.SH",
+        timeframe="1d",
+        period_start=PERIOD_START,
+        period_end=PERIOD_END,
+        executions=[],
+        provider=provider,
+        store=_FakeStore(cached),
+        account_id="acct-1",
+    )
+
+    assert chart["available"] is True
+    assert len(chart["bars"]) == 8
+    assert chart["quality"]["status"] == "degraded"
+    assert chart["quality"]["warnings"]
+    assert "provider timeout" in chart["quality"]["warnings"][0]
 
 
 def test_assert_bar_exists_rejects_missing_daily_and_minute_bars() -> None:

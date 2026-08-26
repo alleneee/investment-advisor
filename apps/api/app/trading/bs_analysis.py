@@ -9,6 +9,7 @@ from statistics import median
 from typing import Any
 
 from app.domain.chan_macd import compute_macd
+from app.providers.tushare import MarketProviderError
 
 from .metrics import (
     LedgerMetrics,
@@ -24,6 +25,15 @@ from .reducer import canonical_decimal_text, money_text
 MINUTE_BAR_WIDTH = timedelta(minutes=30)
 DAILY_LOOKBACK_DAYS = 180
 MINUTE_LOOKBACK_CALENDAR_DAYS = 40
+_PROVIDER_FAILURES = (
+    MarketProviderError,
+    RuntimeError,
+    TypeError,
+    ValueError,
+    OSError,
+    LookupError,
+)
+_WARNING_MAX_LENGTH = 300
 
 
 class BarNotFoundError(ValueError):
@@ -219,20 +229,15 @@ def build_bs_chart(
 ) -> dict[str, Any]:
     if timeframe == "1d":
         start = period_start - timedelta(days=DAILY_LOOKBACK_DAYS)
-        try:
-            bars = _load_daily_bars(symbol, start, period_end, provider, store, account_id)
-        except Exception:
-            return _unavailable_chart(symbol, timeframe)
+        bars, failure = _load_daily_bars(symbol, start, period_end, provider, store, account_id)
     elif timeframe == "30m":
         start = period_end - timedelta(days=MINUTE_LOOKBACK_CALENDAR_DAYS)
-        try:
-            bars = _load_minute_bars(symbol, start, period_end, provider)
-        except Exception:
-            return _unavailable_chart(symbol, timeframe)
+        bars, failure = _load_minute_bars(symbol, start, period_end, provider)
     else:
         raise ValueError("timeframe 仅支持 1d 或 30m")
+    warnings = [_safe_warning(failure)] if failure is not None else []
     if not bars:
-        return _unavailable_chart(symbol, timeframe)
+        return _unavailable_chart(symbol, timeframe, warnings)
     bars = _sorted_bars(bars)
     daily_bars = bars if timeframe == "1d" else []
     minute_bars = bars if timeframe == "30m" else []
@@ -250,11 +255,14 @@ def build_bs_chart(
         "bars": list(bars),
         "executions": projected,
         "macd": macd,
-        "quality": {"status": "ok", "warnings": []},
+        "quality": {
+            "status": "degraded" if failure is not None else "ok",
+            "warnings": warnings,
+        },
     }
 
 
-def _unavailable_chart(symbol: str, timeframe: str) -> dict[str, Any]:
+def _unavailable_chart(symbol: str, timeframe: str, warnings: Sequence[str] = ()) -> dict[str, Any]:
     return {
         "symbol": symbol,
         "timeframe": timeframe,
@@ -263,8 +271,15 @@ def _unavailable_chart(symbol: str, timeframe: str) -> dict[str, Any]:
         "bars": [],
         "executions": [],
         "macd": {"ready": False, "dif": [], "dea": [], "histogram": []},
-        "quality": {"status": "unavailable", "warnings": []},
+        "quality": {"status": "unavailable", "warnings": list(warnings)},
     }
+
+
+def _safe_warning(exc: BaseException) -> str:
+    text = str(exc).strip() or type(exc).__name__
+    if len(text) > _WARNING_MAX_LENGTH:
+        return text[:_WARNING_MAX_LENGTH]
+    return text
 
 
 def _period_symbol_executions(
@@ -293,7 +308,7 @@ def _load_daily_bars(
     provider: Any,
     store: Any | None,
     account_id: str | None,
-) -> list[Mapping[str, Any]]:
+) -> tuple[list[Mapping[str, Any]], BaseException | None]:
     cached: dict[str, dict[str, Any]] = {}
     if store is not None and account_id:
         for row in store.list_market_bars(account_id, symbol, start, end):
@@ -301,26 +316,33 @@ def _load_daily_bars(
                 continue
             bar = _raw_bar(row)
             cached[str(bar["trade_date"])] = bar
+    failure: BaseException | None = None
     try:
         raw = _provider_daily(provider, symbol, start, end)
-    except Exception:
+    except _PROVIDER_FAILURES as exc:
         raw = []
+        failure = exc
     for row in raw:
         if row.get("close") is None:
             continue
         bar = _raw_bar(row)
         cached.setdefault(str(bar["trade_date"]), bar)
-    return [cached[key] for key in sorted(cached)]
+    return [cached[key] for key in sorted(cached)], failure
 
 
-def _load_minute_bars(symbol: str, start: date, end: date, provider: Any) -> list[dict[str, Any]]:
-    rows = provider.minutes(symbol, freq="30m", as_of=end, start_date=start, end_date=end)
+def _load_minute_bars(
+    symbol: str, start: date, end: date, provider: Any
+) -> tuple[list[dict[str, Any]], BaseException | None]:
+    try:
+        rows = provider.minutes(symbol, freq="30m", as_of=end, start_date=start, end_date=end)
+    except _PROVIDER_FAILURES as exc:
+        return [], exc
     bars: list[dict[str, Any]] = []
     for row in rows or []:
         if not isinstance(row, Mapping) or row.get("close") is None:
             continue
         bars.append(_raw_minute_bar(row))
-    return bars
+    return bars, None
 
 
 def _raw_minute_bar(row: Mapping[str, Any]) -> dict[str, Any]:
