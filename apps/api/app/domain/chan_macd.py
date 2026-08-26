@@ -13,13 +13,19 @@ WARMUP = SLOW + SIGNAL
 def compute_macd(closes: Sequence[Decimal]) -> dict[str, Any]:
     values = [value if isinstance(value, Decimal) else Decimal(str(value)) for value in closes]
     if len(values) < WARMUP:
-        return {"ready": False, "warmup_bars": SLOW, "histogram": []}
+        return {"ready": False, "warmup_bars": SLOW, "histogram": [], "dif": [], "dea": []}
     ema12 = _ema(values, FAST)
     ema26 = _ema(values, SLOW)
     dif = [fast - slow for fast, slow in zip(ema12, ema26, strict=True)]
     dea = _ema(dif, SIGNAL)
     histogram = [str(2 * (left - right)) for left, right in zip(dif, dea, strict=True)]
-    return {"ready": True, "warmup_bars": SLOW, "histogram": histogram}
+    return {
+        "ready": True,
+        "warmup_bars": SLOW,
+        "histogram": histogram,
+        "dif": [str(value) for value in dif],
+        "dea": [str(value) for value in dea],
+    }
 
 
 def histogram_area(histogram: Sequence[str], *, sign: int, start: int = 0, end: int | None = None) -> str:
