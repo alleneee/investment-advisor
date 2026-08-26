@@ -82,6 +82,7 @@ function apiForReview(overrides: Partial<TradingApi> = {}): TradingApi {
     listReviewReports: vi.fn(async () => [report]),
     getReviewReport: vi.fn(async () => report),
     retryReviewReport: vi.fn(async () => report),
+    getBsSummary: vi.fn(), getBsChart: vi.fn(), listChartMarks: vi.fn(), createChartMark: vi.fn(), updateChartMark: vi.fn(), deleteChartMark: vi.fn(), listChartMarkTypes: vi.fn(), createChartMarkType: vi.fn(), updateChartMarkType: vi.fn(), deleteChartMarkType: vi.fn(),
     ...overrides,
   };
 }

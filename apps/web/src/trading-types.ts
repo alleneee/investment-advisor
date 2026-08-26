@@ -361,3 +361,101 @@ export interface SaveDailyReviewRequest {
   note: string;
   revision: number | null;
 }
+
+export type BsTimeframe = "1d" | "30m";
+
+export interface BsSymbolSummary {
+  symbol: string;
+  name: string;
+  realizedPnl: string;
+  closedCycleCount: number;
+  medianHoldingDays: NullableDecimalMetric;
+  winRate: NullableDecimalMetric;
+}
+
+export interface BsSummary {
+  start: string;
+  end: string;
+  symbols: BsSymbolSummary[];
+}
+
+export interface BsChartExecution {
+  executionId: string;
+  symbol: string;
+  occurredAt: string;
+  barOccurredAt: string;
+  side: TradingSide;
+  price: string;
+  quantity: number;
+  fee: string;
+  primaryReason: TradingReasonCode;
+}
+
+export interface BsMacd {
+  ready: boolean;
+  dif: string[];
+  dea: string[];
+  histogram: string[];
+  warmupBars?: number;
+}
+
+export interface BsChart {
+  symbol: string;
+  timeframe: BsTimeframe;
+  available: boolean;
+  adjustment: "none";
+  bars: TradingChartBar[];
+  executions: BsChartExecution[];
+  macd: BsMacd;
+  quality: { status: TradingDataQuality; warnings: string[] };
+}
+
+export interface ChartMark {
+  markId: string;
+  accountId: string;
+  symbol: string;
+  occurredAt: string;
+  typeId: string;
+  comment: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ChartMarkType {
+  typeId: string;
+  accountId: string;
+  code: string;
+  label: string;
+  letter: string;
+  color: string;
+  preset: boolean;
+  enabled: boolean;
+  createdAt: string;
+}
+
+export interface CreateChartMarkRequest {
+  symbol: string;
+  occurredAt: string;
+  typeId: string;
+  comment: string;
+  timeframe: BsTimeframe;
+}
+
+export interface UpdateChartMarkRequest {
+  typeId?: string;
+  comment?: string;
+}
+
+export interface CreateChartMarkTypeRequest {
+  label: string;
+  letter: string;
+  color: string;
+}
+
+export interface UpdateChartMarkTypeRequest {
+  label?: string;
+  letter?: string;
+  color?: string;
+  enabled?: boolean;
+}
