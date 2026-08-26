@@ -3,11 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ReviewCenterPage } from "./ReviewCenterPage";
 import type { TradingApi } from "./trading-api";
-import type { StructureAttribution, TradingReviewReport } from "./trading-types";
-
-vi.mock("./TradingReviewChart", () => ({
-  TradingReviewChart: ({ bundle }: { bundle: { symbol: string } }) => <div role="img" aria-label={`${bundle.symbol} 交易复盘图`} />,
-}));
+import type { BsChart, BsSymbolSummary, ChartMark, ChartMarkType, StructureAttribution, TradingReviewReport } from "./trading-types";
 
 const report: TradingReviewReport = {
   reportId: "report-1",
@@ -73,6 +69,93 @@ const attribution: StructureAttribution = {
   quality: { unclassifiedExecutions: [{ executionId: "execution-2", symbol: "600156.SH", tradeDate: "2026-08-12", reason: "missing_bar_on_execution_date" }], symbolsMissingMarketData: [] },
 };
 
+const profitSymbol: BsSymbolSummary = {
+  symbol: "002041.SZ",
+  name: "登海种业",
+  realizedPnl: "4377.88",
+  closedCycleCount: 2,
+  medianHoldingDays: { value: "13", unavailableReason: null },
+  winRate: { value: "1", unavailableReason: null },
+};
+
+const zeroSymbol: BsSymbolSummary = {
+  symbol: "000001.SZ",
+  name: "平安银行",
+  realizedPnl: "0.00",
+  closedCycleCount: 0,
+  medianHoldingDays: { value: null, unavailableReason: "no_closed_cycle" },
+  winRate: { value: null, unavailableReason: "no_closed_cycle" },
+};
+
+const markTypes: ChartMarkType[] = [
+  {
+    typeId: "type-ideal-buy",
+    accountId: "account-1",
+    code: "ideal_buy",
+    label: "理想买",
+    letter: "买",
+    color: "#f6465d",
+    preset: true,
+    enabled: true,
+    createdAt: "2026-08-01T00:00:00+08:00",
+  },
+  {
+    typeId: "type-disabled",
+    accountId: "account-1",
+    code: "old_high",
+    label: "停用高点",
+    letter: "旧",
+    color: "#888888",
+    preset: false,
+    enabled: false,
+    createdAt: "2026-08-01T00:00:00+08:00",
+  },
+];
+
+const existingMark: ChartMark = {
+  markId: "mark-disabled",
+  accountId: "account-1",
+  symbol: "002041.SZ",
+  occurredAt: "2026-08-11T00:00:00+08:00",
+  typeId: "type-disabled",
+  comment: "旧高点",
+  revision: 1,
+  createdAt: "2026-08-11T10:00:00+08:00",
+  updatedAt: "2026-08-11T10:00:00+08:00",
+};
+
+function dailyChart(symbol: string): BsChart {
+  return {
+    symbol,
+    timeframe: "1d",
+    available: true,
+    adjustment: "none",
+    bars: [
+      {
+        tradeDate: "2026-07-05",
+        occurredAt: "2026-07-05T00:00:00+08:00",
+        open: "10",
+        high: "11",
+        low: "9",
+        close: "10.5",
+        volume: "1000",
+      },
+      {
+        tradeDate: "2026-08-16",
+        occurredAt: "2026-08-16T00:00:00+08:00",
+        open: "11",
+        high: "13",
+        low: "10.5",
+        close: "12",
+        volume: "1100",
+      },
+    ],
+    executions: [],
+    macd: { ready: false, dif: [], dea: [], histogram: [] },
+    quality: { status: "ok", warnings: [] },
+  };
+}
+
 function apiForReview(overrides: Partial<TradingApi> = {}): TradingApi {
   return {
     getAccount: vi.fn(), createAccount: vi.fn(), listExecutions: vi.fn(), createExecution: vi.fn(), updateExecution: vi.fn(), deleteExecution: vi.fn(), listCashFlows: vi.fn(), createCashFlow: vi.fn(), deleteCashFlow: vi.fn(), getDailyReview: vi.fn(), saveDailyReview: vi.fn(), getCalendar: vi.fn(), getPeriodSummary: vi.fn(),
@@ -82,27 +165,88 @@ function apiForReview(overrides: Partial<TradingApi> = {}): TradingApi {
     listReviewReports: vi.fn(async () => [report]),
     getReviewReport: vi.fn(async () => report),
     retryReviewReport: vi.fn(async () => report),
-    getBsSummary: vi.fn(), getBsChart: vi.fn(), listChartMarks: vi.fn(), createChartMark: vi.fn(), updateChartMark: vi.fn(), deleteChartMark: vi.fn(), listChartMarkTypes: vi.fn(), createChartMarkType: vi.fn(), updateChartMarkType: vi.fn(), deleteChartMarkType: vi.fn(),
+    getBsSummary: vi.fn(async (start: string, end: string) => ({ start, end, symbols: [profitSymbol, zeroSymbol] })),
+    getBsChart: vi.fn(async (symbol: string, timeframe: "1d" | "30m") => (
+      timeframe === "30m"
+        ? {
+          symbol,
+          timeframe,
+          available: false,
+          adjustment: "none" as const,
+          bars: [],
+          executions: [],
+          macd: { ready: false, dif: [], dea: [], histogram: [] },
+          quality: { status: "unavailable" as const, warnings: ["stk_mins failed"] },
+        }
+        : dailyChart(symbol)
+    )),
+    listChartMarks: vi.fn(async () => [existingMark]),
+    createChartMark: vi.fn(),
+    updateChartMark: vi.fn(),
+    deleteChartMark: vi.fn(),
+    listChartMarkTypes: vi.fn(async () => markTypes),
+    createChartMarkType: vi.fn(),
+    updateChartMarkType: vi.fn(),
+    deleteChartMarkType: vi.fn(),
     ...overrides,
   };
 }
 
-describe("复盘中心", () => {
-  it("选择完整周期后展示固化的确定性指标、理由事实、交易周期和历史买卖点", async () => {
-    const user = userEvent.setup();
-    const api = apiForReview();
-    render(<ReviewCenterPage api={api} today="2026-08-18" />);
+async function generateReview(overrides: Partial<TradingApi> = {}) {
+  const user = userEvent.setup();
+  const api = apiForReview(overrides);
+  render(<ReviewCenterPage api={api} today="2026-08-18" />);
+  await user.click(screen.getByRole("button", { name: "生成确定性复盘" }));
+  expect(await screen.findByRole("heading", { name: "确定性复盘结果" })).toBeInTheDocument();
+  return { api, user };
+}
 
-    expect(screen.getByRole("button", { name: "周报" })).toHaveAttribute("aria-pressed", "true");
-    await user.click(screen.getByRole("button", { name: "生成确定性复盘" }));
+describe("复盘中心", () => {
+  it("选择完整周期后展示账户指标带、理由事实、交易周期和 BS 分析，不再画旧复盘图", async () => {
+    const { api } = await generateReview();
 
     await waitFor(() => expect(api.createReviewReport).toHaveBeenCalledWith("week", "2026-08-10", "2026-08-16"));
-    expect(await screen.findByRole("heading", { name: "确定性复盘结果" })).toBeInTheDocument();
-    expect(screen.getByText("报告期已实现盈亏")).toBeInTheDocument();
+    const metrics = screen.getByRole("group", { name: "周期指标" });
+    expect(metrics).toHaveTextContent("报告期已实现盈亏");
+    expect(metrics).toHaveTextContent("胜率");
     expect(screen.getByText("买卖理由表现")).toBeInTheDocument();
     expect(screen.getByText("交易周期")).toBeInTheDocument();
-    expect(screen.getByRole("img", { name: "002940.SZ 交易复盘图" })).toBeInTheDocument();
+    expect(screen.queryByText("权益、回撤与真实买卖点")).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: /交易复盘图/ })).not.toBeInTheDocument();
     expect(screen.getByText("Pi 总结尚未请求")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /登海种业/ })).toBeInTheDocument();
+  });
+
+  it("BS 摘要为空时盈亏块为空态，不渲染假股票也不请求个股图", async () => {
+    const { api } = await generateReview({
+      getBsSummary: vi.fn(async (start: string, end: string) => ({ start, end, symbols: [] })),
+    });
+
+    expect(await screen.findByText("本周期没有成交股票。")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /登海种业|平安银行|示例|演示/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: /BS点分析图|交易复盘图/ })).not.toBeInTheDocument();
+    expect(api.getBsChart).not.toHaveBeenCalled();
+  });
+
+  it("有盈亏块但尚未点选时不画个股图", async () => {
+    const { api } = await generateReview();
+
+    expect(await screen.findByRole("button", { name: /登海种业/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "BS点分析" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: /BS点分析图|交易复盘图/ })).not.toBeInTheDocument();
+    expect(api.getBsChart).not.toHaveBeenCalled();
+  });
+
+  it("零盈亏块可见且为中性色", async () => {
+    await generateReview();
+
+    const tile = await screen.findByRole("button", { name: /平安银行/ });
+    expect(tile).toHaveTextContent("0.00");
+    expect(
+      tile.className.includes("tone-neutral")
+      || (tile.getAttribute("style") ?? "").includes("#bbcbb2")
+      || getComputedStyle(tile).backgroundColor === "rgb(187, 203, 178)",
+    ).toBe(true);
   });
 
   it("展示结构位置归因：类别聚合、样本不足文案与逐笔明细", async () => {
