@@ -209,3 +209,63 @@ def test_project_executions_covers_half_open_thirty_minute_windows() -> None:
     assert minute["just-after-first"]["bar_occurred_at"] == "2026-01-09T10:30:00+08:00"
     assert minute["at-second-close"]["bar_occurred_at"] == "2026-01-09T10:30:00+08:00"
     assert minute["at-last-close"]["bar_occurred_at"] == "2026-01-09T11:00:00+08:00"
+
+
+def test_project_marks_last_of_day_uses_true_last_bar_when_minute_bars_are_reversed() -> None:
+    daily_bars = list(
+        reversed(
+            [
+                _bar("2026-01-10T00:00:00+08:00"),
+                _bar("2026-01-12T00:00:00+08:00"),
+            ]
+        )
+    )
+    minute_bars = list(
+        reversed(
+            [
+                _bar("2026-01-10T10:00:00+08:00"),
+                _bar("2026-01-10T10:30:00+08:00"),
+                _bar("2026-01-10T11:00:00+08:00"),
+            ]
+        )
+    )
+    marks = [
+        {"mark_id": "daily-midnight", "occurred_at": "2026-01-10T00:00:00+08:00", "type_id": "review"},
+        {"mark_id": "no-minute-day", "occurred_at": "2026-01-12T00:00:00+08:00", "type_id": "low"},
+    ]
+
+    projected = project_marks(marks, daily_bars, minute_bars)
+    daily = _by_id(projected["daily"], "mark_id")
+    minute = [row for row in projected["minute"] if row["mark_id"] == "daily-midnight"]
+
+    assert daily["daily-midnight"]["bar_occurred_at"] == "2026-01-10T00:00:00+08:00"
+    assert [row["bar_occurred_at"] for row in minute] == ["2026-01-10T11:00:00+08:00"]
+    assert "no-minute-day" not in {row["mark_id"] for row in projected["minute"]}
+
+
+def test_project_executions_covering_uses_chronological_windows_when_bars_are_reversed() -> None:
+    daily_bars = [_bar("2026-01-09T00:00:00+08:00")]
+    minute_bars = list(
+        reversed(
+            [
+                _bar("2026-01-09T10:00:00+08:00"),
+                _bar("2026-01-09T10:30:00+08:00"),
+                _bar("2026-01-09T11:00:00+08:00"),
+            ]
+        )
+    )
+    executions = [
+        _execution("inside-first", "2026-01-09", "buy", occurred_at="2026-01-09T09:31:00+08:00"),
+        _execution("at-first-close", "2026-01-09", "buy", occurred_at="2026-01-09T10:00:00+08:00"),
+        _execution("just-after-first", "2026-01-09", "buy", occurred_at="2026-01-09T10:00:01+08:00"),
+        _execution("at-last-close", "2026-01-09", "buy", occurred_at="2026-01-09T11:00:00+08:00"),
+        _execution("at-left-open", "2026-01-09", "buy", occurred_at="2026-01-09T09:30:00+08:00"),
+    ]
+
+    minute = _by_id(project_executions(executions, daily_bars, minute_bars)["minute"], "execution_id")
+
+    assert minute["inside-first"]["bar_occurred_at"] == "2026-01-09T10:00:00+08:00"
+    assert minute["at-first-close"]["bar_occurred_at"] == "2026-01-09T10:00:00+08:00"
+    assert minute["just-after-first"]["bar_occurred_at"] == "2026-01-09T10:30:00+08:00"
+    assert minute["at-last-close"]["bar_occurred_at"] == "2026-01-09T11:00:00+08:00"
+    assert "at-left-open" not in minute

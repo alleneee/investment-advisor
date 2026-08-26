@@ -40,12 +40,16 @@ def _with_bar(row: Mapping[str, Any], bar: Mapping[str, Any]) -> dict[str, Any]:
     return {**dict(row), "bar_occurred_at": _bar_at_text(bar)}
 
 
+def _sorted_bars(bars: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    return sorted(bars, key=_bar_at)
+
+
 def _daily_bar_for(
     occurred: datetime,
     daily_bars: Sequence[Mapping[str, Any]],
 ) -> Mapping[str, Any] | None:
     day = _business_date(occurred)
-    for bar in daily_bars:
+    for bar in _sorted_bars(daily_bars):
         if _business_date(_bar_at(bar)) == day:
             return bar
     return None
@@ -55,11 +59,12 @@ def _exact_or_last_minute_bar(
     occurred: datetime,
     minute_bars: Sequence[Mapping[str, Any]],
 ) -> Mapping[str, Any] | None:
-    for bar in minute_bars:
+    ordered = _sorted_bars(minute_bars)
+    for bar in ordered:
         if _bar_at(bar) == occurred:
             return bar
     day = _business_date(occurred)
-    same_day = [bar for bar in minute_bars if _business_date(_bar_at(bar)) == day]
+    same_day = [bar for bar in ordered if _business_date(_bar_at(bar)) == day]
     return same_day[-1] if same_day else None
 
 
@@ -67,13 +72,14 @@ def _covering_minute_bar(
     occurred: datetime,
     minute_bars: Sequence[Mapping[str, Any]],
 ) -> Mapping[str, Any] | None:
-    if not minute_bars:
+    ordered = _sorted_bars(minute_bars)
+    if not ordered:
         return None
-    ends = [_bar_at(bar) for bar in minute_bars]
+    ends = [_bar_at(bar) for bar in ordered]
     starts = [ends[0] - MINUTE_BAR_WIDTH, *ends[:-1]]
     for index, (start, end) in enumerate(zip(starts, ends)):
         if start < occurred <= end:
-            return minute_bars[index]
+            return ordered[index]
     return None
 
 
@@ -141,6 +147,8 @@ def project_marks(
     daily_bars: Sequence[Mapping[str, Any]],
     minute_bars: Sequence[Mapping[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
+    daily_bars = _sorted_bars(daily_bars)
+    minute_bars = _sorted_bars(minute_bars)
     daily: list[dict[str, Any]] = []
     minute: list[dict[str, Any]] = []
     for mark in marks:
@@ -159,6 +167,8 @@ def project_executions(
     daily_bars: Sequence[Mapping[str, Any]],
     minute_bars: Sequence[Mapping[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
+    daily_bars = _sorted_bars(daily_bars)
+    minute_bars = _sorted_bars(minute_bars)
     daily: list[dict[str, Any]] = []
     minute: list[dict[str, Any]] = []
     for row in executions:
