@@ -396,4 +396,52 @@ describe("BsAnalysisPanel", () => {
     expect(screen.queryByText("行情不可用")).not.toBeInTheDocument();
     expect(api.getBsChart).toHaveBeenCalledWith("002041.SZ", "1d", PERIOD_START, PERIOD_END);
   });
+
+  it("切换日线/30分钟时关闭图标注记，不把日线 occurredAt 提交为 30 分钟", async () => {
+    const api = apiForPanel({
+      getBsChart: vi.fn(async (symbol: string, timeframe: "1d" | "30m") => (
+        timeframe === "30m"
+          ? {
+            ...dailyChart(symbol),
+            timeframe: "30m" as const,
+            bars: [
+              bar({ tradeDate: "2026-08-10", occurredAt: "2026-08-10T10:00:00+08:00" }),
+              bar({ tradeDate: "2026-08-10", occurredAt: "2026-08-10T10:30:00+08:00" }),
+            ],
+            executions: [],
+          }
+          : dailyChart(symbol)
+      )),
+    });
+    const { user } = renderPanel(api);
+
+    await user.click(await screen.findByRole("button", { name: /登海种业/ }));
+    await user.click(await screen.findByRole("button", { name: "选择K线" }));
+    const picker = await screen.findByRole("form", { name: "图标注记" });
+    await user.click(within(picker).getByRole("button", { name: "理想买" }));
+    expect(captured.props?.highlightOccurredAt).toBe(BAR_AT);
+
+    await user.click(screen.getByRole("button", { name: "30分钟" }));
+    expect(await screen.findByTestId("bs-chart")).toBeInTheDocument();
+    expect(screen.queryByRole("form", { name: "图标注记" })).not.toBeInTheDocument();
+    expect(captured.props?.highlightOccurredAt).toBeNull();
+    expect(api.createChartMark).not.toHaveBeenCalled();
+    expect(vi.mocked(api.createChartMark).mock.calls.some((call) => (
+      call[0].timeframe === "30m" && call[0].occurredAt === BAR_AT
+    ))).toBe(false);
+  });
+
+  it("行情不可用时关闭图标注记并清掉 highlight", async () => {
+    const { api, user } = renderPanel();
+
+    await user.click(await screen.findByRole("button", { name: /登海种业/ }));
+    await user.click(await screen.findByRole("button", { name: "选择K线" }));
+    expect(await screen.findByRole("form", { name: "图标注记" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "30分钟" }));
+    expect(await screen.findByText("行情不可用")).toBeInTheDocument();
+    expect(screen.queryByRole("form", { name: "图标注记" })).not.toBeInTheDocument();
+    expect(captured.props?.highlightOccurredAt ?? null).toBeNull();
+    expect(api.createChartMark).not.toHaveBeenCalled();
+  });
 });

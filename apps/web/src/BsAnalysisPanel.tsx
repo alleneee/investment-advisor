@@ -76,6 +76,11 @@ export function BsAnalysisPanel({
         setChart(nextChart);
         setMarks(nextMarks);
         setTypes(nextTypes);
+        if (!nextChart.available) {
+          setSelectedBar(null);
+          setHighlightOccurredAt(null);
+          setShowNewType(false);
+        }
         setError(null);
       } catch (reason) {
         if (active) setError(messageOf(reason));
@@ -87,14 +92,24 @@ export function BsAnalysisPanel({
   const selected = summary?.symbols.find((item) => item.symbol === selectedSymbol) ?? null;
   const enabledTypes = types.filter((item) => item.enabled);
 
+  function resetMarkForm() {
+    setSelectedBar(null);
+    setHighlightOccurredAt(null);
+    setShowNewType(false);
+  }
+
   function selectSymbol(item: BsSymbolSummary) {
     setSelectedSymbol(item.symbol);
     setTab("analysis");
     setTimeframe("1d");
-    setHighlightOccurredAt(null);
-    setSelectedBar(null);
-    setShowNewType(false);
+    resetMarkForm();
     setComment("");
+  }
+
+  function changeTimeframe(next: BsTimeframe) {
+    if (next === timeframe) return;
+    setTimeframe(next);
+    resetMarkForm();
   }
 
   function onSelectBar(occurredAt: string) {
@@ -170,8 +185,8 @@ export function BsAnalysisPanel({
           <button type="button" aria-pressed={tab === "executions"} onClick={() => setTab("executions")}>交易记录</button>
         </SegmentedControl>
         <SegmentedControl aria-label="K线周期">
-          <button type="button" aria-pressed={timeframe === "1d"} onClick={() => setTimeframe("1d")}>日线</button>
-          <button type="button" aria-pressed={timeframe === "30m"} onClick={() => setTimeframe("30m")}>30分钟</button>
+          <button type="button" aria-pressed={timeframe === "1d"} onClick={() => changeTimeframe("1d")}>日线</button>
+          <button type="button" aria-pressed={timeframe === "30m"} onClick={() => changeTimeframe("30m")}>30分钟</button>
         </SegmentedControl>
       </div>
       {chart && <BsChart
