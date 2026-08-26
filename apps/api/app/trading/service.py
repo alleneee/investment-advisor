@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from calendar import monthrange
+from collections import Counter
 from collections.abc import Mapping
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -12,11 +14,12 @@ from zoneinfo import ZoneInfo
 import psycopg
 
 from .contracts import LedgerEvent, TradingReducerError
-from .metrics import AccountValuationService
+from .metrics import AccountValuationService, period_return_curve, window_max_drawdown
 from .reducer import (
     InsufficientCashError,
     InsufficientPositionError,
     canonical_decimal_text,
+    money_text,
     replay_ledger,
 )
 from .store import (
@@ -310,6 +313,68 @@ class TradingService:
         return {"daily_review_id": review_id, "trade_date": trade_date.isoformat(), **body, "revision": revision,
                 "daily_review_revision": daily_revision}
 
+    def calendar_month(self, month: date) -> dict[str, Any]:
+        account = self._account()
+        start = month.replace(day=1)
+        end = start.replace(day=monthrange(start.year, start.month)[1])
+        executions = self.store.list_executions(account["account_id"])
+        cash_flows = self.store.list_cash_flows(account["account_id"])
+        counts: Counter[date] = Counter()
+        for row in executions:
+            occurred = _shanghai_date(row["occurred_at"])
+            if start <= occurred <= end:
+                counts[occurred] += 1
+        reviews = self._reviews_in_range(account["account_id"], start, end)
+        try:
+            nav = self.valuation.nav_points(account, executions, cash_flows)
+        except (ArithmeticError, LookupError, OSError, RuntimeError, TypeError, ValueError):
+            nav = []
+        pnl_by_date = {
+            point.date: point.equity - point.previous_equity - point.external_flow
+            for point in nav
+            if point.previous_equity is not None
+        }
+        max_drawdown = window_max_drawdown(nav, start, end)
+        trading_days = set(self.valuation._calendar_dates(start, end))
+        days = []
+        cursor = start
+        month_pnl = Decimal(0)
+        has_pnl = False
+        while cursor <= end:
+            pnl = pnl_by_date.get(cursor)
+            if pnl is not None:
+                month_pnl += pnl
+                has_pnl = True
+            days.append({
+                "date": cursor.isoformat(),
+                "execution_count": int(counts[cursor]),
+                "daily_pnl": None if pnl is None else money_text(pnl),
+                "review_status": reviews.get(cursor),
+                "is_open": cursor in trading_days if trading_days else cursor.weekday() < 5,
+            })
+            cursor += timedelta(days=1)
+        return {
+            "month": start.isoformat()[:7],
+            "net_pnl": money_text(month_pnl) if has_pnl else None,
+            "max_drawdown": None if max_drawdown is None else canonical_decimal_text(max_drawdown),
+            "days": days,
+        }
+
+    def period_summary(self, start: date, end: date) -> dict[str, Any]:
+        if end < start:
+            raise InvalidTradingRequestError("start 必须早于或等于 end")
+        account = self._account()
+        executions = self.store.list_executions(account["account_id"])
+        cash_flows = self.store.list_cash_flows(account["account_id"])
+        nav = self.valuation.nav_points(account, executions, cash_flows)
+        max_drawdown = window_max_drawdown(nav, start, end)
+        return {
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "max_drawdown": None if max_drawdown is None else canonical_decimal_text(max_drawdown),
+            "return_curve": period_return_curve(nav, start, end),
+        }
+
     def get_daily_review(self, trade_date: date) -> dict[str, Any]:
         account = self._account()
         with self.database.read() as connection:
@@ -330,6 +395,23 @@ class TradingService:
             "revision": row["revision"],
             "daily_review_revision": row["daily_review_revision"],
         }
+
+    def _reviews_in_range(self, account_id: str, start: date, end: date) -> dict[date, str]:
+        with self.database.read() as connection:
+            rows = connection.execute(
+                """
+                SELECT trade_date, payload FROM daily_reviews
+                WHERE account_id = %s AND is_deleted = 0 AND trade_date BETWEEN %s AND %s
+                """,
+                (account_id, start.isoformat(), end.isoformat()),
+            ).fetchall()
+        result: dict[date, str] = {}
+        for row in rows:
+            payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
+            status = payload.get("status")
+            if status in {"draft", "completed"}:
+                result[_shanghai_date(row["trade_date"])] = status
+        return result
 
     def _account(self) -> dict[str, Any]:
         account = self.store.get_account()
@@ -579,6 +661,16 @@ class TradingService:
     def _in_range(value: str, on: date | None, start: date | None, end: date | None) -> bool:
         occurred_on = date.fromisoformat(value[:10])
         return occurred_on == on if on else start <= occurred_on <= end
+
+
+def _shanghai_date(value: Any) -> date:
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            return value.date()
+        return value.astimezone(ZoneInfo("Asia/Shanghai")).date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value)[:10])
 
 
 def error_status(error: TradingServiceError) -> int:

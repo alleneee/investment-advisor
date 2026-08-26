@@ -4,7 +4,7 @@
 - 时点结构：对每笔成交，只用该股票截至成交日（含当日）的日线 K 线增量重放
   ChanEngine，禁止使用成交日之后才形成的结构（无前视）。
 - 活跃中枢：成交日快照 ``centers`` 中 ``end_index`` 最大的中枢（并列时取
-  ``start_index`` 更大者）。顺序笔中枢下这就是当时仍在延伸的最新中枢。
+  ``start_index`` 更大者）。顺序笔中枢下这就是当时最新形成的中枢；离开后不再拉长时间跨度。
 - 复权换算：成交价是真实历史价（未复权），缓存行情的 ``qfq_close`` 以取数窗口
   最后一日为基准；换算 ``成交价_qfq = 成交价 × qfq_close(成交日) / close(成交日)``，
   再与中枢 ``[lower, upper]`` 比较。
@@ -413,9 +413,9 @@ class StructureAttributionService:
         if self.market_provider is not None:
             return self.market_provider
         try:
-            from ..providers.tushare import TushareMarketProvider
+            from ..providers.factory import create_market_provider
 
-            self.market_provider = TushareMarketProvider()
+            self.market_provider = create_market_provider()
         except (RuntimeError, TypeError, ValueError):
             return None
         return self.market_provider

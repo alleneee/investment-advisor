@@ -140,10 +140,12 @@ type AuxiliaryApi = Pick<
   | "getSharedReport"
   | "listInvestmentReportJobs"
   | "getReportQuality"
+  | "searchStocks"
 >;
 
 function auxiliaryApi(): AuxiliaryApi {
   return {
+    async searchStocks() { return []; },
     async getInformation(symbol) { return makeInformation(symbol); },
     async createInvestmentReport(symbol, timeframe) { return { reportId: `report-${symbol}-${timeframe}`, status: "queued", cached: false }; },
     async getInvestmentReport(reportId) {
@@ -253,39 +255,38 @@ describe("research workbench", () => {
     expect(panes).toHaveLength(2);
     expect(within(panes[0] as HTMLElement).getByRole("heading", { name: "自选池" })).toBeInTheDocument();
     expect(within(panes[0] as HTMLElement).getByRole("heading", { name: "本批进度" })).toBeInTheDocument();
-    expect(within(panes[1] as HTMLElement).getByRole("heading", { name: "结构报告" })).toBeInTheDocument();
-    expect(within(panes[1] as HTMLElement).queryByRole("heading", { name: "本批进度" })).not.toBeInTheDocument();
+    const analysisPane = panes[1] as HTMLElement;
+    const structure = within(analysisPane).getByRole("heading", { name: "结构报告" });
+    const outlook = within(analysisPane).getByRole("heading", { name: "Pi AI 三情景走势报告" });
+    const news = within(analysisPane).getByRole("heading", { name: "资讯与市场热度" });
+    expect(within(analysisPane).queryByRole("heading", { name: "本批进度" })).not.toBeInTheDocument();
+    expect(structure.compareDocumentPosition(outlook) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(outlook.compareDocumentPosition(news) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("navigates between batch, research records, and data snapshots", async () => {
+  it("navigates the remaining workbench pages without archive sidebars", async () => {
     const user = userEvent.setup();
     render(<App />);
 
     const batch = screen.getByRole("link", { name: /今日批次/ });
-    const records = screen.getByRole("link", { name: /研究记录/ });
-    const snapshots = screen.getByRole("link", { name: "数据快照" });
     expect(batch).toHaveAttribute("aria-current", "page");
-
-    await user.click(records);
-    expect(screen.getByRole("heading", { name: "研究记录" })).toBeInTheDocument();
-    expect(records).toHaveAttribute("aria-current", "page");
-    expect(window.location.hash).toBe("#/records");
-    expect(await screen.findByRole("heading", { name: "质量看板" })).toBeInTheDocument();
-    expect(screen.getByText("审阅通过率")).toBeInTheDocument();
-    expect(screen.getByText("600519.SH")).toBeInTheDocument();
-    expect(screen.getByText(/已通过 · 兑现 基准/)).toBeInTheDocument();
-
-    await user.click(snapshots);
-    expect(screen.getByRole("heading", { name: "数据快照" })).toBeInTheDocument();
-    expect(snapshots).toHaveAttribute("aria-current", "page");
-    expect(window.location.hash).toBe("#/snapshots");
-    expect(screen.getByText("FROZEN").nextElementSibling).toHaveTextContent("01");
-    expect(await screen.findByText(/600519.SH · 2026-08-11 · 日线/)).toBeInTheDocument();
-
-    await user.click(batch);
+    expect(screen.queryByRole("link", { name: "数据快照" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /研究记录/ })).not.toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "自选池" })).toBeInTheDocument();
-    expect(batch).toHaveAttribute("aria-current", "page");
-    expect(window.location.hash).toBe("#/batch");
+  });
+
+  it("opens the batch view when retired archive hashes are loaded", async () => {
+    window.location.hash = "#/records";
+    const { unmount } = render(<App />);
+    expect(await screen.findByRole("heading", { name: "自选池" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /今日批次/ })).toHaveAttribute("aria-current", "page");
+    expect(screen.queryByRole("heading", { name: "研究记录" })).not.toBeInTheDocument();
+    unmount();
+
+    window.location.hash = "#/snapshots";
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "自选池" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "数据快照" })).not.toBeInTheDocument();
   });
 
   it("exposes the independent trading journal instead of reusing research records", async () => {
@@ -298,12 +299,35 @@ describe("research workbench", () => {
     expect(await screen.findByRole("heading", { name: "创建交易账户" })).toBeInTheDocument();
     expect(journal).toHaveAttribute("aria-current", "page");
     expect(window.location.hash).toBe("#/journal");
+    expect(screen.queryByRole("link", { name: "复盘中心" })).not.toBeInTheDocument();
+  });
 
-    const reviews = screen.getByRole("link", { name: "复盘中心" });
-    await user.click(reviews);
-    expect(await screen.findByRole("heading", { name: "周期复盘" })).toBeInTheDocument();
-    expect(reviews).toHaveAttribute("aria-current", "page");
-    expect(window.location.hash).toBe("#/reviews");
+  it("opens the trading journal review view from the retired #/reviews hash", async () => {
+    window.location.hash = "#/reviews";
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "创建交易账户" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "交易日记" })).toHaveAttribute("aria-current", "page");
+    expect(screen.queryByRole("link", { name: "复盘中心" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "复盘中心" })).not.toBeInTheDocument();
+  });
+
+  it("keeps sidebar labels on the same left edge whether or not they have a count", async () => {
+    const moduleName = "node:fs";
+    const { readFileSync } = await import(moduleName);
+    const processModuleName = "node:process";
+    const { cwd } = await import(processModuleName);
+    const styles = readFileSync(`${cwd()}/src/styles.css`, "utf8") as string;
+    const navItem = styles.match(/\.nav-item \{([^}]*)\}/)?.[1] ?? "";
+    const navCount = styles.match(/\.nav-count \{([^}]*)\}/)?.[1] ?? "";
+    expect(navItem).toMatch(/justify-content:\s*flex-start/);
+    expect(navCount).toMatch(/margin-left:\s*auto/);
+
+    render(<App />);
+    const nav = screen.getByRole("navigation", { name: "主导航" });
+    expect(within(nav).getByRole("link", { name: /今日批次/ }).querySelector(".nav-count")).not.toBeNull();
+    expect(within(nav).getByRole("link", { name: "交易日记" }).querySelector(".nav-count")).toBeNull();
+    expect(within(nav).queryByRole("link", { name: "复盘中心" })).toBeNull();
   });
 
   it("renders the shared report page for #/share/{token} without workbench chrome", async () => {
@@ -337,12 +361,65 @@ describe("research workbench", () => {
 
     expect((await screen.findAllByText("600519.SH")).length).toBeGreaterThanOrEqual(2);
     await screen.findByText("运行中 · 3 / 6");
-    await user.type(screen.getByLabelText("股票代码"), "601318");
+    await user.type(screen.getByLabelText("添加股票"), "601318");
     await user.click(screen.getByRole("button", { name: "加入自选" }));
     expect(screen.getByRole("button", { name: "移除 601318.SH" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "移除 601318.SH" }));
     expect(screen.queryByRole("button", { name: "移除 601318.SH" })).not.toBeInTheDocument();
+  });
+
+  it("suggests listed stocks by name and adds the selected match", async () => {
+    const user = userEvent.setup();
+    const added: string[] = [];
+    const api: WorkbenchApi = {
+      ...auxiliaryApi(),
+      async searchStocks(query) {
+        return query.includes("茅台") ? [{ symbol: "600519.SH", name: "贵州茅台", cnspell: "gzmt" }] : [];
+      },
+      async getWatchlist() { return []; },
+      async addWatchlist(symbol) {
+        added.push(symbol);
+        return { symbol, name: symbol, market: "SH" };
+      },
+      async removeWatchlist() {},
+      async createBatch() { return { id: "batch" }; },
+      async getProgress() { return []; },
+      async getReport() { return makeReport("600519.SH"); },
+    };
+    render(<App api={api} />);
+
+    await user.type(screen.getByLabelText("添加股票"), "茅台");
+    await user.click(await screen.findByRole("option", { name: /贵州茅台/ }));
+
+    expect(added).toEqual(["600519.SH"]);
+    const row = screen.getByRole("button", { name: "选择 贵州茅台 600519.SH" });
+    expect(row.querySelector("strong")).toHaveTextContent("贵州茅台");
+    expect(row.querySelector("small")).toHaveTextContent("600519.SH");
+    expect(screen.queryByRole("listbox", { name: "股票候选" })).not.toBeInTheDocument();
+  });
+
+  it("adds a unique name match from the join button", async () => {
+    const user = userEvent.setup();
+    const api: WorkbenchApi = {
+      ...auxiliaryApi(),
+      async searchStocks(query) {
+        return query.includes("五粮") ? [{ symbol: "000858.SZ", name: "五粮液", cnspell: "wly" }] : [];
+      },
+      async getWatchlist() { return []; },
+      async addWatchlist(symbol) { return { symbol, name: symbol, market: "SZ" }; },
+      async removeWatchlist() {},
+      async createBatch() { return { id: "batch" }; },
+      async getProgress() { return []; },
+      async getReport(symbol) { return makeReport(symbol); },
+    };
+    render(<App api={api} />);
+
+    await user.type(screen.getByLabelText("添加股票"), "五粮");
+    await screen.findByRole("option", { name: /五粮液/ });
+    await user.click(screen.getByRole("button", { name: "加入自选" }));
+
+    expect(screen.getByRole("button", { name: "选择 五粮液 000858.SZ" })).toBeInTheDocument();
   });
 
   it("refreshes the report after adding a watchlist symbol", async () => {
@@ -379,7 +456,7 @@ describe("research workbench", () => {
     render(<App api={api} />);
     expect(await screen.findByRole("heading", { name: "报告 600519.SH" })).toBeInTheDocument();
 
-    await user.type(screen.getByLabelText("股票代码"), "002940");
+    await user.type(screen.getByLabelText("添加股票"), "002940");
     await user.click(screen.getByRole("button", { name: "加入自选" }));
 
     expect(await screen.findByRole("heading", { name: "报告 002940.SZ" })).toBeInTheDocument();
@@ -497,7 +574,7 @@ describe("research workbench", () => {
     render(<App api={api} />);
     await screen.findByRole("heading", { name: "报告 600519.SH 1d" });
 
-    await user.type(screen.getByLabelText("股票代码"), "002940");
+    await user.type(screen.getByLabelText("添加股票"), "002940");
     await user.click(screen.getByRole("button", { name: "加入自选" }));
 
     expect(screen.queryByRole("heading", { name: "报告 600519.SH 1d" })).not.toBeInTheDocument();
@@ -514,7 +591,7 @@ describe("research workbench", () => {
     const user = userEvent.setup();
     render(<App api={api} />);
 
-    await user.type(screen.getByLabelText("股票代码"), "002940");
+    await user.type(screen.getByLabelText("添加股票"), "002940");
     await user.click(screen.getByRole("button", { name: "加入自选" }));
     await screen.findByRole("heading", { name: "报告 002940.SZ 1d" });
     oldReport.resolve(makeReport("600519.SH", "1d", true));
@@ -643,8 +720,8 @@ describe("research workbench", () => {
     const user = userEvent.setup();
     render(<App api={api} />);
 
-    const first = await screen.findByRole("button", { name: "选择 600519.SH 贵州茅台" });
-    const second = screen.getByRole("button", { name: "选择 000858.SZ 五粮液" });
+    const first = await screen.findByRole("button", { name: "选择 贵州茅台 600519.SH" });
+    const second = screen.getByRole("button", { name: "选择 五粮液 000858.SZ" });
     expect(first).toHaveAttribute("aria-pressed", "true");
 
     await user.click(second);
@@ -681,7 +758,7 @@ describe("research workbench", () => {
 
     await user.click(screen.getByRole("button", { name: "移除 600519.SH" }));
 
-    const remaining = await screen.findByRole("button", { name: "选择 000858.SZ 五粮液" });
+    const remaining = await screen.findByRole("button", { name: "选择 五粮液 000858.SZ" });
     expect(remaining).toHaveAttribute("aria-pressed", "true");
     expect(await screen.findByRole("heading", { name: "报告 000858.SZ 1d" })).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "资讯 000858.SZ" })).toBeInTheDocument();
@@ -778,7 +855,7 @@ describe("research workbench", () => {
     };
     const user = userEvent.setup();
     render(<App api={api} />);
-    const second = await screen.findByRole("button", { name: "选择 000858.SZ 五粮液" });
+    const second = await screen.findByRole("button", { name: "选择 五粮液 000858.SZ" });
 
     await user.click(second);
     expect(await screen.findByRole("heading", { name: "五粮液新资讯" })).toBeInTheDocument();
@@ -894,9 +971,9 @@ describe("research workbench", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("报告生成超时");
     fireEvent.click(screen.getByRole("button", { name: "重试 Pi AI 报告" }));
     await act(async () => { await Promise.resolve(); });
-    fireEvent.click(screen.getByRole("button", { name: "选择 000858.SZ 五粮液" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择 五粮液 000858.SZ" }));
     await act(async () => { await Promise.resolve(); });
-    fireEvent.click(screen.getByRole("button", { name: "选择 600519.SH 贵州茅台" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择 贵州茅台 600519.SH" }));
     await act(async () => { await Promise.resolve(); });
 
     expect(screen.getByRole("status")).toHaveTextContent("报告已排队");
@@ -927,7 +1004,7 @@ describe("research workbench", () => {
     fireEvent.click(generate);
     await act(async () => { await Promise.resolve(); await vi.advanceTimersByTimeAsync(2000); });
     expect(getInvestmentReport).toHaveBeenCalledOnce();
-    fireEvent.click(screen.getByRole("button", { name: "选择 000858.SZ 五粮液" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择 五粮液 000858.SZ" }));
     oldPoll.resolve(makeInvestmentJob("completed", "600519.SH", "1d", "digest-old", "旧股票 AI 报告"));
     await act(async () => { await Promise.resolve(); });
 
@@ -1021,11 +1098,11 @@ describe("research workbench", () => {
     const user = userEvent.setup();
     render(<App api={api} />);
     await user.click(await screen.findByRole("button", { name: "生成 Pi AI 走势报告" }));
-    await user.click(screen.getByRole("button", { name: "选择 000858.SZ 五粮液" }));
+    await user.click(screen.getByRole("button", { name: "选择 五粮液 000858.SZ" }));
 
     await act(async () => creation.resolve({ reportId: "report-600519.SH-1d", status: "completed", cached: true }));
     expect(screen.getByText("尚未生成 Pi AI 走势报告")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "选择 600519.SH 贵州茅台" }));
+    await user.click(screen.getByRole("button", { name: "选择 贵州茅台 600519.SH" }));
 
     expect(await screen.findByRole("heading", { name: "切回后的完整报告" })).toBeInTheDocument();
     expect(getInvestmentReport).toHaveBeenCalledWith("report-600519.SH-1d");
@@ -1083,10 +1160,10 @@ describe("research workbench", () => {
       /grid-template-columns:\s*8px\s+minmax\(72px,\s*84px\)\s+minmax\(0,\s*1fr\)\s+auto/,
     ]);
     expectDeclarations(declarations(/\.batch-cockpit\s+\.report-section\s*\{([^}]*)\}/), [
-      /min-height:\s*100%/,
       /margin-top:\s*0/,
     ]);
-    expect(styles).toMatch(/\.batch-page\s+\.evidence-section,\s*\.batch-page\s+\.outlook-section\s*\{[^}]*margin-top:\s*44px/);
+    expectDeclarations(declarations(/\.batch-cockpit\s+\.evidence-section,\s*\.batch-cockpit\s+\.outlook-section\s*\{([^}]*)\}/), [/margin-top:\s*0/]);
+    expectDeclarations(declarations(/\.batch-cockpit\s+:is\(\.information-panel,\s*\.outlook-panel\)\s*\{([^}]*)\}/), [/margin-top:\s*0/]);
     expectDeclarations(declarations(/\.batch-page\s+\.outlook-header\s*\{([^}]*)\}/), [/padding:\s*20px\s+24px/]);
     expectDeclarations(declarations(/\.batch-page\s+:is\(\.outlook-idle,\s*\.outlook-failed,\s*\.outlook-progress\)\s*\{([^}]*)\}/), [
       /padding:\s*22px\s+24px/,
@@ -1177,7 +1254,7 @@ describe("research workbench", () => {
     expect(tablet).toMatch(/\.batch-page\s+\.message-column\s*\{[^}]*border-right:\s*0/);
     expectDeclarations(declarations(/\.batch-page\s+\.sentiment-column\s*\{([^}]*)\}/, tablet), [
       /grid-column:\s*1\s*\/\s*-1/,
-      /border-top:\s*1px\s+solid\s+rgba\(213,\s*228,\s*218,\s*\.09\)/,
+      /border-top:\s*1px\s+solid\s+var\(--border\)/,
     ]);
 
     const narrow = mediaBlock(900);

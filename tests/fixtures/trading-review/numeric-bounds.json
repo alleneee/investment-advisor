@@ -1,0 +1,18 @@
+[
+  { "path": "period.trading_day_count", "minimum": 0, "maximum": null, "integer": true, "nullable": false },
+  { "path": "sample.closed_cycle_count", "minimum": 0, "maximum": null, "integer": true, "nullable": false },
+  { "path": "metrics.account_adjusted_return_rate", "minimum": -1, "maximum": null, "integer": false, "nullable": true },
+  { "path": "metrics.period_max_drawdown_rate", "minimum": 0, "maximum": 1, "integer": false, "nullable": true },
+  { "path": "metrics.win_rate", "minimum": 0, "maximum": 1, "integer": false, "nullable": true },
+  { "path": "metrics.average_win_loss_ratio", "minimum": 0, "maximum": null, "integer": false, "nullable": true },
+  { "path": "metrics.profit_factor", "minimum": 0, "maximum": null, "integer": false, "nullable": true },
+  { "path": "metrics.median_holding_days", "minimum": 1, "maximum": null, "integer": false, "nullable": true },
+  { "path": "metrics.median_capital_efficiency", "minimum": null, "maximum": null, "integer": false, "nullable": true },
+  { "path": "metrics.discipline_adherence_rate", "minimum": 0, "maximum": 1, "integer": false, "nullable": true },
+  { "path": "reason_groups.0.sample_count", "minimum": 0, "maximum": null, "integer": true, "nullable": false },
+  { "path": "reason_groups.0.win_rate", "minimum": 0, "maximum": 1, "integer": false, "nullable": true },
+  { "path": "reason_groups.0.average_cycle_return_rate", "minimum": null, "maximum": null, "integer": false, "nullable": true },
+  { "path": "cases.0.cycle_return_rate", "minimum": null, "maximum": null, "integer": false, "nullable": false },
+  { "path": "cases.0.holding_days", "minimum": 1, "maximum": null, "integer": false, "nullable": false },
+  { "path": "comparison.0.delta", "minimum": null, "maximum": null, "integer": false, "nullable": true }
+]

@@ -31,12 +31,20 @@ export interface ChanChartData {
   bars: ChartBar[];
   strokes: ChartStroke[];
   centers: ChartCenter[];
+  segments?: ChartStroke[];
+  segmentCenters?: ChartCenter[];
 }
 
 export interface WatchItem {
   symbol: string;
   name: string;
   market: "SH" | "SZ";
+}
+
+export interface StockSuggestion {
+  symbol: string;
+  name: string;
+  cnspell: string;
 }
 
 export interface RunProgress {

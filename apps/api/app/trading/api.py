@@ -24,7 +24,13 @@ from pydantic import (
 
 from .attribution import StructureAttributionService
 from .reporting import TradingReportService
-from .service import TradingService, TradingServiceError, error_code, error_status
+from .service import (
+    InvalidTradingRequestError,
+    TradingService,
+    TradingServiceError,
+    error_code,
+    error_status,
+)
 from .store import TradingStore
 
 DECIMAL_TEXT = re.compile(r"^(?:0|[1-9]\d*)(?:\.\d+)?$")
@@ -260,6 +266,17 @@ def create_trading_router(
     ) -> None:
         service.delete_cash_flow(cash_flow_id, _if_match_revision(if_match))
 
+    @router.get("/calendar")
+    def get_calendar(month: str) -> dict:
+        parsed = _parse_month(month)
+        if parsed is None:
+            raise InvalidTradingRequestError("month 必须是 YYYY-MM")
+        return service.calendar_month(parsed)
+
+    @router.get("/period-summary")
+    def get_period_summary(start: date, end: date) -> dict:
+        return service.period_summary(start, end)
+
     @router.get("/daily-reviews/{trade_date}")
     def get_daily_review(trade_date: date) -> dict:
         return service.get_daily_review(trade_date)
@@ -321,6 +338,15 @@ def _execution_details(payload: ExecutionFields) -> dict:
 
 def _cash_flow_payload(payload: CashFlowFields) -> dict:
     return payload.model_dump(mode="json", exclude={"note", "revision"})
+
+
+def _parse_month(value: str) -> date | None:
+    if re.fullmatch(r"\d{4}-\d{2}", value) is None:
+        return None
+    try:
+        return date.fromisoformat(f"{value}-01")
+    except ValueError:
+        return None
 
 
 def _if_match_revision(value: str | None) -> int:

@@ -14,7 +14,7 @@ from .domain.report_outcome import (
     rebase_window_bars,
     summarize_quality,
 )
-from .providers.tushare import MarketProviderError, TushareMarketProvider
+from .providers.tushare import MarketProviderError
 
 # 兑现窗口按交易语义取数：北京时间清晨若用 UTC 日期会落到前一天，少取一根最新 K 线。
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -102,7 +102,9 @@ class ReportOutcomeService:
     def _provider(self) -> Any:
         if self.market_provider is None:
             try:
-                self.market_provider = TushareMarketProvider()
+                from .providers.factory import create_market_provider
+
+                self.market_provider = create_market_provider()
             except MarketProviderError as exc:
                 raise ReportOutcomeError("MARKET_DATA_UNAVAILABLE", "行情服务未配置") from exc
         return self.market_provider

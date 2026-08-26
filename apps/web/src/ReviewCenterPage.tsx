@@ -5,8 +5,6 @@ import { TradingReviewChart } from "./TradingReviewChart";
 import { DataTable } from "./ui/DataTable";
 import { EmptyState } from "./ui/EmptyState";
 import { formatMoney, formatRate, formatSignedMoney, signedTone } from "./ui/formatDisplay";
-import { KpiStrip } from "./ui/KpiStrip";
-import { MetricTile } from "./ui/MetricTile";
 import { Panel } from "./ui/Panel";
 import { SegmentedControl } from "./ui/SegmentedControl";
 import { SplitPane } from "./ui/SplitPane";
@@ -21,6 +19,11 @@ import type {
 interface ReviewCenterPageProps {
   api: TradingApi;
   today?: string;
+  periodKind?: ReviewPeriodKind;
+  periodStart?: string;
+  periodEnd?: string;
+  hidePeriodControls?: boolean;
+  autoCreate?: boolean;
 }
 
 const periods: Array<{ kind: ReviewPeriodKind; label: string }> = [
@@ -30,11 +33,22 @@ const periods: Array<{ kind: ReviewPeriodKind; label: string }> = [
   { kind: "year", label: "年报" },
 ];
 
-export function ReviewCenterPage({ api, today = currentShanghaiDate() }: ReviewCenterPageProps) {
-  const [periodKind, setPeriodKind] = useState<ReviewPeriodKind>("week");
-  const initialBounds = useMemo(() => periodBounds("week", today), [today]);
-  const [periodStart, setPeriodStart] = useState(initialBounds.start);
-  const [periodEnd, setPeriodEnd] = useState(initialBounds.end);
+export function ReviewCenterPage({
+  api,
+  today = currentShanghaiDate(),
+  periodKind: lockedKind,
+  periodStart: lockedStart,
+  periodEnd: lockedEnd,
+  hidePeriodControls = false,
+  autoCreate = false,
+}: ReviewCenterPageProps) {
+  const unlockedInitial = useMemo(() => periodBounds("week", today), [today]);
+  const [freeKind, setFreeKind] = useState<ReviewPeriodKind>("week");
+  const [freeStart, setFreeStart] = useState(unlockedInitial.start);
+  const [freeEnd, setFreeEnd] = useState(unlockedInitial.end);
+  const periodKind = lockedKind ?? freeKind;
+  const periodStart = lockedStart ?? freeStart;
+  const periodEnd = lockedEnd ?? freeEnd;
   const [report, setReport] = useState<TradingReviewReport | null>(null);
   const [history, setHistory] = useState<TradingReviewReport[]>([]);
   const [busy, setBusy] = useState<"preview" | "create" | "retry" | null>(null);
@@ -68,10 +82,10 @@ export function ReviewCenterPage({ api, today = currentShanghaiDate() }: ReviewC
   }, [api, report?.reportId, report?.snapshotStatus]);
 
   function selectPeriod(kind: ReviewPeriodKind) {
-    setPeriodKind(kind);
+    setFreeKind(kind);
     const bounds = periodBounds(kind, today);
-    setPeriodStart(bounds.start);
-    setPeriodEnd(bounds.end);
+    setFreeStart(bounds.start);
+    setFreeEnd(bounds.end);
     setReport(null);
     setChartIndex(0);
     setError(null);
@@ -124,24 +138,34 @@ export function ReviewCenterPage({ api, today = currentShanghaiDate() }: ReviewC
     }
   }
 
+  useEffect(() => {
+    if (!autoCreate) return;
+    void create();
+  }, [autoCreate]);
+
   const deterministic = report?.deterministicReport ?? null;
   const selectedBundle = deterministic?.chartBundles[chartIndex] ?? deterministic?.chartBundles[0] ?? null;
+  const showGenerated = !hidePeriodControls || report != null;
 
   return <section className="review-center-page" aria-label="复盘中心">
     <Panel title="周期复盘">
-      <SegmentedControl className="review-period-switch" role="group" aria-label="复盘周期">
+      {!hidePeriodControls && <SegmentedControl className="review-period-switch" role="group" aria-label="复盘周期">
         {periods.map((period) => <button key={period.kind} type="button" aria-pressed={periodKind === period.kind} onClick={() => selectPeriod(period.kind)}>{period.label}</button>)}
-      </SegmentedControl>
-      <div className="review-date-form">
-        <label>周期开始<input type="date" value={periodStart} onChange={(event) => setPeriodStart(event.target.value)} /></label>
-        <label>周期结束<input type="date" value={periodEnd} onChange={(event) => setPeriodEnd(event.target.value)} /></label>
+      </SegmentedControl>}
+      <div className={`review-date-form${hidePeriodControls ? " is-locked" : ""}`}>
+        {hidePeriodControls
+          ? <p className="journal-muted">{periodStart} 至 {periodEnd}</p>
+          : <>
+            <label>周期开始<input type="date" value={periodStart} onChange={(event) => setFreeStart(event.target.value)} /></label>
+            <label>周期结束<input type="date" value={periodEnd} onChange={(event) => setFreeEnd(event.target.value)} /></label>
+          </>}
         <button className="secondary-button" type="button" onClick={() => void preview()} disabled={busy !== null}>{busy === "preview" ? "正在预览…" : "查看期间预览"}</button>
         <button className="primary-button" type="button" onClick={() => void create()} disabled={busy !== null}>{busy === "create" ? "正在生成…" : "生成确定性复盘"}</button>
       </div>
       {error && <p className="journal-error" role="alert">{error}</p>}
     </Panel>
     {deterministic && <MetricBand report={deterministic} />}
-    <SplitPane
+    {showGenerated && <SplitPane
       left={<Panel title="报告版本" heading="h2" aria-label="报告版本历史">
         {history.length ? <div className="review-history-list">{history.map((item) => <button type="button" key={item.reportId} className={`review-history-item${report?.reportId === item.reportId ? " selected" : ""}`} onClick={() => { setReport(item); setChartIndex(0); }}><span>V{item.reportVersion}</span><strong>{statusLabel(item.snapshotStatus)}</strong><small>{item.periodStart} 至 {item.periodEnd}{item.isOutdated ? " · 已过期" : ""}</small></button>)}</div> : <EmptyState title="该周期还没有固化报告。" />}
       </Panel>}
@@ -157,12 +181,12 @@ export function ReviewCenterPage({ api, today = currentShanghaiDate() }: ReviewC
         </Panel>
         <Comparison report={deterministic} />
       </section> : <EmptyState title="该周期还没有固化报告。" />}
-    />
+    />}
     {report && <ReviewState report={report} onRetry={() => void retry()} retrying={busy === "retry"} />}
     {deterministic && <Panel title="Pi 复盘总结" heading="h3">
       {report?.aiStatus === "not_requested" ? <p><strong>Pi 总结尚未请求</strong><span>本版先展示可审计的确定性统计，不用模型替代交易事实。</span></p> : <p><strong>{aiStatusLabel(report!.aiStatus)}</strong><span>交易复盘文字状态独立于确定性快照；当前页面只展示服务端返回的真实状态。</span></p>}
     </Panel>}
-    <StructureAttributionSection api={api} />
+    {showGenerated && <StructureAttributionSection api={api} />}
   </section>;
 }
 
@@ -234,14 +258,36 @@ function ReportFlags({ report }: { report: TradingReviewReport }) {
 
 function MetricBand({ report }: { report: TradingReviewDeterministicReport }) {
   const metrics = report.metrics;
-  return <KpiStrip>
-    <MetricTile label="报告期已实现盈亏" value={formatSignedMoney(metrics.periodRealizedPnl)} tone={signedTone(metrics.periodRealizedPnl)} />
-    <MetricTile label="闭合周期盈亏" value={formatSignedMoney(metrics.closedCyclePnl)} tone={signedTone(metrics.closedCyclePnl)} />
-    <MetricTile label="资金流调整收益率" value={metrics.accountAdjustedReturnRate.value == null ? "—" : formatRate(metrics.accountAdjustedReturnRate.value)} tone={metrics.accountAdjustedReturnRate.value == null ? "neutral" : signedTone(metrics.accountAdjustedReturnRate.value)} detail={metrics.accountAdjustedReturnRate.unavailableReason ?? undefined} />
-    <MetricTile label="周期最大回撤" value={metrics.periodMaxDrawdownRate.value == null ? "—" : formatRate(metrics.periodMaxDrawdownRate.value)} tone="risk" detail={metrics.periodMaxDrawdownRate.unavailableReason ?? undefined} />
-    <MetricTile label="胜率" value={metrics.winRate.value == null ? "—" : formatRate(metrics.winRate.value)} detail={metrics.winRate.unavailableReason ?? undefined} />
-    <MetricTile label="纪律执行率" value={metrics.disciplineAdherenceRate.value == null ? "—" : formatRate(metrics.disciplineAdherenceRate.value)} detail={metrics.disciplineAdherenceRate.unavailableReason ?? undefined} />
-  </KpiStrip>;
+  return <div className="review-metric-band" role="group" aria-label="周期指标">
+    <article>
+      <span>报告期已实现盈亏</span>
+      <strong className={`ui-metric-value tone-${signedTone(metrics.periodRealizedPnl)}`}>{formatSignedMoney(metrics.periodRealizedPnl)}</strong>
+    </article>
+    <article>
+      <span>闭合周期盈亏</span>
+      <strong className={`ui-metric-value tone-${signedTone(metrics.closedCyclePnl)}`}>{formatSignedMoney(metrics.closedCyclePnl)}</strong>
+    </article>
+    <article>
+      <span>资金流调整收益率</span>
+      <strong className={`ui-metric-value tone-${metrics.accountAdjustedReturnRate.value == null ? "neutral" : signedTone(metrics.accountAdjustedReturnRate.value)}`}>{metrics.accountAdjustedReturnRate.value == null ? "—" : formatRate(metrics.accountAdjustedReturnRate.value)}</strong>
+      {metrics.accountAdjustedReturnRate.unavailableReason ? <small>{metrics.accountAdjustedReturnRate.unavailableReason}</small> : null}
+    </article>
+    <article>
+      <span>周期最大回撤</span>
+      <strong className="ui-metric-value tone-risk">{metrics.periodMaxDrawdownRate.value == null ? "—" : formatRate(metrics.periodMaxDrawdownRate.value)}</strong>
+      {metrics.periodMaxDrawdownRate.unavailableReason ? <small>{metrics.periodMaxDrawdownRate.unavailableReason}</small> : null}
+    </article>
+    <article>
+      <span>胜率</span>
+      <strong className="ui-metric-value">{metrics.winRate.value == null ? "—" : formatRate(metrics.winRate.value)}</strong>
+      {metrics.winRate.unavailableReason ? <small>{metrics.winRate.unavailableReason}</small> : null}
+    </article>
+    <article>
+      <span>纪律执行率</span>
+      <strong className="ui-metric-value">{metrics.disciplineAdherenceRate.value == null ? "—" : formatRate(metrics.disciplineAdherenceRate.value)}</strong>
+      {metrics.disciplineAdherenceRate.unavailableReason ? <small>{metrics.disciplineAdherenceRate.unavailableReason}</small> : null}
+    </article>
+  </div>;
 }
 
 function ReasonMatrix({ report }: { report: TradingReviewDeterministicReport }) {

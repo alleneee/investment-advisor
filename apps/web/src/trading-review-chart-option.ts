@@ -4,9 +4,9 @@ import type { TradingChartBundle, TradingChartExecution, TradingReviewDeterminis
 
 const UP = "#f6465d";
 const DOWN = "#0ecb81";
-const ACCENT = "#7ee0c8";
-const MUTED = "#8a9b96";
-const RISK = "#f0b429";
+const ACCENT = "#3de530";
+const MUTED = "#bbcbb2";
+const RISK = "#ffb4aa";
 
 interface TooltipParam {
   axisValue?: string;
@@ -45,10 +45,10 @@ export function buildTradingReviewChartOption(report: TradingReviewDeterministic
     axisPointer: { link: [{ xAxisIndex: [1, 2] }] },
     tooltip: {
       trigger: "axis",
-      axisPointer: { type: "cross", lineStyle: { color: "#46635f" } },
-      backgroundColor: "rgba(5, 18, 26, 0.96)",
-      borderColor: "#294a4c",
-      textStyle: { color: "#dce8df", fontSize: 10 },
+      axisPointer: { type: "cross", lineStyle: { color: "#3de530" } },
+      backgroundColor: "rgba(32, 31, 31, 0.96)",
+      borderColor: "#3d4b37",
+      textStyle: { color: "#e5e2e1", fontSize: 10 },
       formatter: (params: unknown) => formatTooltip(params, report, bundle),
     },
     xAxis: [
@@ -63,7 +63,7 @@ export function buildTradingReviewChartOption(report: TradingReviewDeterministic
     ],
     dataZoom: [
       { type: "inside", xAxisIndex: [1, 2], start: zoomStart(priceDates.length), end: 100 },
-      { type: "slider", xAxisIndex: [1, 2], start: zoomStart(priceDates.length), end: 100, height: 16, bottom: 14, borderColor: "#294248", backgroundColor: "#101920", fillerColor: "rgba(126, 224, 200, 0.16)", handleStyle: { color: ACCENT, borderColor: ACCENT }, textStyle: { color: "#66827c", fontSize: 8 } },
+      { type: "slider", xAxisIndex: [1, 2], start: zoomStart(priceDates.length), end: 100, height: 16, bottom: 14, borderColor: "#2a2a2a", backgroundColor: "#131313", fillerColor: "rgba(61, 229, 48, 0.16)", handleStyle: { color: ACCENT, borderColor: ACCENT }, textStyle: { color: "#bbcbb2", fontSize: 8 } },
     ],
     series: [
       {
@@ -74,7 +74,7 @@ export function buildTradingReviewChartOption(report: TradingReviewDeterministic
         data: report.equityCurve.map((point) => numberOrNull(point.equity)),
         symbol: "none",
         lineStyle: { color: ACCENT, width: 1.8 },
-        areaStyle: { color: "rgba(103, 186, 161, 0.08)" },
+        areaStyle: { color: "rgba(61, 229, 48, 0.12)" },
       },
       {
         name: "回撤",
@@ -120,11 +120,11 @@ export function buildTradingReviewChartOption(report: TradingReviewDeterministic
 }
 
 function axis(data: string[], gridIndex: number, labels: boolean) {
-  return { type: "category" as const, gridIndex, data, boundaryGap: true, axisLine: { lineStyle: { color: "#294248" } }, axisTick: { show: false }, axisLabel: { show: labels, color: "#66827c", fontSize: 8, formatter: (value: string) => value.slice(5, 10) }, splitLine: { show: false } };
+  return { type: "category" as const, gridIndex, data, boundaryGap: true, axisLine: { lineStyle: { color: "#2a2a2a" } }, axisTick: { show: false }, axisLabel: { show: labels, color: "#bbcbb2", fontSize: 8, formatter: (value: string) => value.slice(5, 10) }, splitLine: { show: false } };
 }
 
 function valueAxis(gridIndex: number, position: "right" | "left") {
-  return { type: "value" as const, gridIndex, scale: true, position, axisLabel: { color: "#66827c", fontSize: 8 }, splitLine: { lineStyle: { color: "rgba(97, 144, 135, 0.11)" } } };
+  return { type: "value" as const, gridIndex, scale: true, position, axisLabel: { color: "#bbcbb2", fontSize: 8 }, splitLine: { lineStyle: { color: "rgba(53, 53, 52, 0.8)" } } };
 }
 
 function markerSeries(name: string, executions: TradingChartExecution[], color: string) {

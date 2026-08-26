@@ -12,8 +12,9 @@ import type { ChanChartData, StructureState } from "./types";
 
 const UP = "#f6465d";
 const DOWN = "#0ecb81";
-const ACCENT = "#7ee0c8";
-const MUTED = "#8a9b96";
+const ACCENT = "#3de530";
+const SEGMENT = "#e5e2e1";
+const CENTER = "#82acff";
 
 export interface OverlayStroke {
   startAt: string;
@@ -34,7 +35,9 @@ export interface ChanChartModel {
   candlesticks: CandlestickData<string>[];
   volume: Array<HistogramData<string> | WhitespaceData<string>>;
   strokes: OverlayStroke[];
+  segments: OverlayStroke[];
   centers: OverlayCenter[];
+  segmentCenters: OverlayCenter[];
   visibleRange: { from: number; to: number };
 }
 
@@ -62,12 +65,15 @@ export function buildChanChartModel(data: ChanChartData): ChanChartModel {
       endPrice: stroke.endPrice,
       state: stroke.state,
     })),
-    centers: data.centers.map((center) => ({
-      startAt: center.startAt.slice(0, 10),
-      endAt: center.endAt.slice(0, 10),
-      lower: center.lower,
-      upper: center.upper,
+    segments: (data.segments ?? []).map((stroke) => ({
+      startAt: stroke.startAt.slice(0, 10),
+      endAt: stroke.endAt.slice(0, 10),
+      startPrice: stroke.startPrice,
+      endPrice: stroke.endPrice,
+      state: stroke.state,
     })),
+    centers: data.centers.map((center) => toOverlayCenter(center)),
+    segmentCenters: (data.segmentCenters ?? []).map((center) => toOverlayCenter(center)),
     visibleRange: {
       from: Math.max(0, data.bars.length - visibleCount),
       to: Math.max(0, data.bars.length - 1),
@@ -94,20 +100,43 @@ export function formatChanTooltip(data: ChanChartData, date: string): string {
     const endAt = center.endAt.slice(0, 10);
     if (startAt <= date && date <= endAt) labels.add(`笔中枢 ${center.lower}–${center.upper}`);
   }
+  for (const center of data.segmentCenters ?? []) {
+    const startAt = center.startAt.slice(0, 10);
+    const endAt = center.endAt.slice(0, 10);
+    if (startAt <= date && date <= endAt) labels.add(`线段中枢 ${center.lower}–${center.upper}`);
+  }
   return [...lines, ...labels].join("\n");
+}
+
+function toOverlayCenter(center: ChanChartData["centers"][number]): OverlayCenter {
+  return {
+    startAt: center.startAt.slice(0, 10),
+    endAt: center.endAt.slice(0, 10),
+    lower: center.lower,
+    upper: center.upper,
+  };
 }
 
 export class ChanOverlayPrimitive implements ISeriesPrimitive<Time> {
   private strokes: OverlayStroke[];
+  private segments: OverlayStroke[];
   private centers: OverlayCenter[];
+  private segmentCenters: OverlayCenter[];
   private chart: SeriesAttachedParameter<Time>["chart"] | null = null;
   private series: SeriesAttachedParameter<Time>["series"] | null = null;
   private requestUpdate: (() => void) | null = null;
   private readonly views: readonly IPrimitivePaneView[];
 
-  constructor(strokes: OverlayStroke[], centers: OverlayCenter[]) {
+  constructor(
+    strokes: OverlayStroke[],
+    centers: OverlayCenter[],
+    segments: OverlayStroke[] = [],
+    segmentCenters: OverlayCenter[] = [],
+  ) {
     this.strokes = strokes;
+    this.segments = segments;
     this.centers = centers;
+    this.segmentCenters = segmentCenters;
     this.views = [{
       zOrder: () => "top",
       renderer: () => ({ draw: (target) => this.draw(target) }),
@@ -132,9 +161,16 @@ export class ChanOverlayPrimitive implements ISeriesPrimitive<Time> {
     return this.views;
   }
 
-  setData(strokes: OverlayStroke[], centers: OverlayCenter[]): void {
+  setData(
+    strokes: OverlayStroke[],
+    centers: OverlayCenter[],
+    segments: OverlayStroke[] = [],
+    segmentCenters: OverlayCenter[] = [],
+  ): void {
     this.strokes = strokes;
+    this.segments = segments;
     this.centers = centers;
+    this.segmentCenters = segmentCenters;
     this.requestUpdate?.();
   }
 
@@ -146,24 +182,58 @@ export class ChanOverlayPrimitive implements ISeriesPrimitive<Time> {
     target.useBitmapCoordinateSpace((scope) => {
       const { context, horizontalPixelRatio, verticalPixelRatio } = scope;
       context.save();
-      for (const center of this.centers) {
-        const startX = timeScale.timeToCoordinate(center.startAt);
-        const endX = timeScale.timeToCoordinate(center.endAt);
-        const upperY = series.priceToCoordinate(center.upper);
-        const lowerY = series.priceToCoordinate(center.lower);
-        if (startX === null || endX === null || upperY === null || lowerY === null) continue;
-        const x = Math.min(startX, endX) * horizontalPixelRatio;
-        const y = Math.min(upperY, lowerY) * verticalPixelRatio;
-        const width = Math.max(1, Math.abs(endX - startX) * horizontalPixelRatio);
-        const height = Math.max(1, Math.abs(lowerY - upperY) * verticalPixelRatio);
-        context.fillStyle = "rgba(138, 155, 150, 0.14)";
-        context.fillRect(x, y, width, height);
-        context.strokeStyle = MUTED;
-        context.lineWidth = Math.max(1, horizontalPixelRatio);
-        context.strokeRect(x, y, width, height);
-      }
-      context.strokeStyle = ACCENT;
-      for (const stroke of this.strokes) {
+      const pad = barPad(timeScale);
+      this.drawCenters(context, timeScale, series, this.segmentCenters, "rgba(130, 172, 255, 0.12)", CENTER, pad, horizontalPixelRatio, verticalPixelRatio);
+      this.drawCenters(context, timeScale, series, this.centers, "rgba(232, 149, 72, 0.22)", "#e89548", pad, horizontalPixelRatio, verticalPixelRatio);
+      this.drawLines(context, timeScale, series, this.strokes, ACCENT, horizontalPixelRatio, verticalPixelRatio, 1.6);
+      this.drawLines(context, timeScale, series, this.segments, SEGMENT, horizontalPixelRatio, verticalPixelRatio, 3.1);
+      context.restore();
+    });
+  }
+
+  private drawCenters(
+    context: CanvasRenderingContext2D,
+    timeScale: { timeToCoordinate: (time: Time) => number | null },
+    series: { priceToCoordinate: (price: number) => number | null },
+    centers: OverlayCenter[],
+    fill: string,
+    stroke: string,
+    pad: number,
+    horizontalPixelRatio: number,
+    verticalPixelRatio: number,
+  ): void {
+    for (const center of centers) {
+      const startX = timeScale.timeToCoordinate(center.startAt);
+      const endX = timeScale.timeToCoordinate(center.endAt);
+      const upperY = series.priceToCoordinate(center.upper);
+      const lowerY = series.priceToCoordinate(center.lower);
+      if (startX === null || endX === null || upperY === null || lowerY === null) continue;
+      const left = Math.min(startX, endX) - pad;
+      const right = Math.max(startX, endX) + pad;
+      const x = left * horizontalPixelRatio;
+      const y = Math.min(upperY, lowerY) * verticalPixelRatio;
+      const width = Math.max(1, (right - left) * horizontalPixelRatio);
+      const height = Math.max(1, Math.abs(lowerY - upperY) * verticalPixelRatio);
+      context.fillStyle = fill;
+      context.fillRect(x, y, width, height);
+      context.strokeStyle = stroke;
+      context.lineWidth = Math.max(1, horizontalPixelRatio);
+      context.strokeRect(x, y, width, height);
+    }
+  }
+
+  private drawLines(
+    context: CanvasRenderingContext2D,
+    timeScale: { timeToCoordinate: (time: Time) => number | null },
+    series: { priceToCoordinate: (price: number) => number | null },
+    lines: OverlayStroke[],
+    color: string,
+    horizontalPixelRatio: number,
+    verticalPixelRatio: number,
+    width: number,
+  ): void {
+    context.strokeStyle = color;
+    for (const stroke of lines) {
         const startX = timeScale.timeToCoordinate(stroke.startAt);
         const endX = timeScale.timeToCoordinate(stroke.endAt);
         const startY = series.priceToCoordinate(stroke.startPrice);
@@ -171,12 +241,15 @@ export class ChanOverlayPrimitive implements ISeriesPrimitive<Time> {
         if (startX === null || endX === null || startY === null || endY === null) continue;
         context.beginPath();
         context.setLineDash(stroke.state === "confirmed" ? [] : [8, 6]);
-        context.lineWidth = (stroke.state === "confirmed" ? 1.8 : 2.2) * horizontalPixelRatio;
+        context.lineWidth = (stroke.state === "confirmed" ? width : width + 0.4) * horizontalPixelRatio;
         context.moveTo(startX * horizontalPixelRatio, startY * verticalPixelRatio);
         context.lineTo(endX * horizontalPixelRatio, endY * verticalPixelRatio);
         context.stroke();
       }
-      context.restore();
-    });
   }
+}
+
+function barPad(timeScale: { options?: () => { barSpacing?: number } }): number {
+  const spacing = timeScale.options?.().barSpacing;
+  return typeof spacing === "number" && Number.isFinite(spacing) ? spacing / 2 : 0;
 }

@@ -161,9 +161,9 @@ describe("ChanChart", () => {
   it("keeps the chart legend and accessible name", () => {
     render(<ChanChart symbol="600000.SH" data={data()} />);
 
-    expect(screen.getByText("已确认笔")).toBeInTheDocument();
-    expect(screen.getByText("形成中笔")).toBeInTheDocument();
-    expect(screen.getByText("笔中枢")).toBeInTheDocument();
+    expect(screen.getByText("笔")).toBeInTheDocument();
+    expect(screen.getByText("线段")).toBeInTheDocument();
+    expect(screen.getByText("中枢")).toBeInTheDocument();
     expect(screen.getByText("成交量")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "600000.SH 日线缠论及成交量图" })).toBeInTheDocument();
   });

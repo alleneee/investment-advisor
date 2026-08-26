@@ -38,28 +38,28 @@ export function ChanChart({ symbol, data }: { symbol: string; data: ChanChartDat
       width: container.clientWidth || 800,
       height: container.clientHeight || 411,
       layout: {
-        background: { type: ColorType.Solid, color: "#101920" },
-        textColor: "#66827c",
+        background: { type: ColorType.Solid, color: "#131313" },
+        textColor: "#bbcbb2",
         fontSize: 10,
-        fontFamily: '"IBM Plex Mono", ui-monospace, monospace',
+        fontFamily: '"JetBrains Mono", ui-monospace, monospace',
         panes: {
           enableResize: false,
-          separatorColor: "#294248",
-          separatorHoverColor: "#294248",
+          separatorColor: "#2a2a2a",
+          separatorHoverColor: "#2a2a2a",
         },
       },
       grid: {
-        vertLines: { color: "rgba(97, 144, 135, 0.07)" },
-        horzLines: { color: "rgba(97, 144, 135, 0.11)" },
+        vertLines: { color: "rgba(53, 53, 52, 0.7)" },
+        horzLines: { color: "rgba(53, 53, 52, 0.9)" },
       },
       crosshair: {
         mode: CrosshairMode.Normal,
-        vertLine: { color: "#46635f", labelBackgroundColor: "#294a4c" },
-        horzLine: { color: "#46635f", labelBackgroundColor: "#294a4c" },
+        vertLine: { color: "#3de530", labelBackgroundColor: "#201f1f" },
+        horzLine: { color: "#3de530", labelBackgroundColor: "#201f1f" },
       },
-      rightPriceScale: { borderColor: "#294248" },
+      rightPriceScale: { borderColor: "#2a2a2a" },
       timeScale: {
-        borderColor: "#294248",
+        borderColor: "#2a2a2a",
         timeVisible: false,
         secondsVisible: false,
         rightOffset: 2,
@@ -127,7 +127,7 @@ export function ChanChart({ symbol, data }: { symbol: string; data: ChanChartDat
     const model = buildChanChartModel(data);
     candlestickRef.current?.setData(model.candlesticks);
     volumeRef.current?.setData(model.volume);
-    overlayRef.current?.setData(model.strokes, model.centers);
+    overlayRef.current?.setData(model.strokes, model.centers, model.segments, model.segmentCenters);
     chartRef.current?.timeScale().setVisibleLogicalRange(model.visibleRange);
   }, [data, hasData]);
 
@@ -160,9 +160,9 @@ export function ChanChart({ symbol, data }: { symbol: string; data: ChanChartDat
 
   return <div className="chan-chart-shell" ref={shellRef}>
     <div className="chan-chart-legend" aria-label="缠论图例">
-      <span><i className="legend-confirmed" />已确认笔</span>
-      <span><i className="legend-provisional" />形成中笔</span>
-      <span><i className="legend-center" />笔中枢</span>
+      <span><i className="legend-confirmed" />笔</span>
+      <span><i className="legend-segment" />线段</span>
+      <span><i className="legend-center" />中枢</span>
       <span><i className="legend-volume" />成交量</span>
     </div>
     <div ref={tooltipRef} className="chan-chart-tooltip" hidden />

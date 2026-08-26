@@ -12,6 +12,8 @@ import type {
   StructureAttributionReason,
   TradingAccount,
   TradingAiStatus,
+  TradingCalendarMonth,
+  TradingPeriodSummary,
   TradingChartBundle,
   TradingDataQuality,
   TradingExecution,
@@ -35,6 +37,8 @@ export interface TradingApi {
   deleteCashFlow(cashFlowId: string, revision: number): Promise<void>;
   getDailyReview(tradeDate: string): Promise<DailyReview | null>;
   saveDailyReview(tradeDate: string, request: SaveDailyReviewRequest): Promise<DailyReview>;
+  getCalendar(month: string): Promise<TradingCalendarMonth>;
+  getPeriodSummary(start: string, end: string): Promise<TradingPeriodSummary>;
   getStructureAttribution(): Promise<StructureAttribution>;
   getReviewPreview(periodKind: ReviewPeriodKind, start: string, end: string): Promise<TradingReviewReport>;
   createReviewReport(periodKind: ReviewPeriodKind, start: string, end: string): Promise<TradingReviewReport>;
@@ -45,6 +49,7 @@ export interface TradingApi {
 
 const DECIMAL = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
+const MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
 const DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const PERIODS = ["week", "month", "quarter", "year"] as const;
 const SIDES = ["buy", "sell"] as const;
@@ -198,6 +203,16 @@ export function createTradingApi(baseUrl: string): TradingApi {
         }),
       }));
     },
+    async getCalendar(month) {
+      return toCalendar(await request<unknown>(`/api/trading/calendar?month=${encodeURIComponent(month)}`));
+    },
+    async getPeriodSummary(start, end) {
+      const summary = toPeriodSummary(await request<unknown>(`/api/trading/period-summary?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`));
+      if (summary.start !== start || summary.end !== end) {
+        throw adapterError("周期摘要边界与请求不一致");
+      }
+      return summary;
+    },
     async getStructureAttribution() {
       return toStructureAttribution(await request<unknown>("/api/trading/structure-attribution"));
     },
@@ -301,6 +316,23 @@ export function createMockTradingApi(): TradingApi {
       dailyReviews.set(tradeDate, next);
       return next;
     },
+    async getCalendar(month) {
+      const last = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5)), 0)).getUTCDate();
+      const days = Array.from({ length: last }, (_, index) => {
+        const date = `${month}-${String(index + 1).padStart(2, "0")}`;
+        return {
+          date,
+          executionCount: executions.filter((item) => item.executedAt.startsWith(date)).length,
+          dailyPnl: null as string | null,
+          reviewStatus: dailyReviews.get(date)?.status ?? null,
+          isOpen: weekdayIsOpen(date),
+        };
+      });
+      return { month, netPnl: null, maxDrawdown: null, days };
+    },
+    async getPeriodSummary(start, end) {
+      return { start, end, maxDrawdown: null, returnCurve: [] };
+    },
     async getStructureAttribution() {
       return {
         summary: ATTRIBUTION_CATEGORIES.map((category) => ({
@@ -316,6 +348,11 @@ export function createMockTradingApi(): TradingApi {
     getReviewReport: unavailable,
     retryReviewReport: unavailable,
   };
+}
+
+function weekdayIsOpen(date: string): boolean {
+  const weekday = new Date(`${date}T12:00:00Z`).getUTCDay();
+  return weekday !== 0 && weekday !== 6;
 }
 
 function executionPayload(payload: CreateTradingExecutionRequest) {
@@ -388,6 +425,61 @@ function toCashFlow(payload: unknown, name: string): CashFlow {
     clientIdempotencyKey: text(value.client_idempotency_key, `${name}幂等键`),
     revision: positiveInteger(value.revision, `${name}版本`),
     ledgerRevision: positiveInteger(value.ledger_revision, `${name}账本版本`, true),
+  };
+}
+
+function toCalendar(payload: unknown): TradingCalendarMonth {
+  const value = exactRecord(payload, ["month", "net_pnl", "max_drawdown", "days"], "交易日历");
+  const month = monthText(value.month, "日历月份");
+  const days = array(value.days, "日历日期").map((item, index) => toCalendarDay(item, index, month));
+  const last = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5)), 0)).getUTCDate();
+  if (days.length !== last || days.some((item, index) => item.date !== `${month}-${String(index + 1).padStart(2, "0")}`)) {
+    throw adapterError("日历天数无效");
+  }
+  return {
+    month,
+    netPnl: nullableDecimal(value.net_pnl, "月度净盈亏"),
+    maxDrawdown: nullableDecimal(value.max_drawdown, "本月最大回撤"),
+    days,
+  };
+}
+
+function toPeriodSummary(payload: unknown): TradingPeriodSummary {
+  const value = exactRecord(payload, ["start", "end", "max_drawdown", "return_curve"], "周期摘要");
+  const start = dateText(value.start, "周期开始");
+  const end = dateText(value.end, "周期结束");
+  if (end < start) throw adapterError("周期结束早于开始");
+  const returnCurve = array(value.return_curve, "周期收益曲线").map((item, index) => {
+    const point = exactRecord(item, ["date", "cumulative_return_rate"], `周期收益曲线点 ${index + 1}`);
+    return {
+      date: dateText(point.date, `周期收益曲线日期 ${index + 1}`),
+      cumulativeReturnRate: toNullableMetric(point.cumulative_return_rate, `周期累计收益率 ${index + 1}`),
+    };
+  });
+  if (returnCurve.some((point) => point.date < start || point.date > end)) {
+    throw adapterError("周期收益曲线日期超出周期范围");
+  }
+  if (returnCurve.some((point, index) => index > 0 && point.date <= returnCurve[index - 1].date)) {
+    throw adapterError("周期收益曲线日期必须严格升序");
+  }
+  return {
+    start,
+    end,
+    maxDrawdown: nullableDecimal(value.max_drawdown, "周期最大回撤"),
+    returnCurve,
+  };
+}
+
+function toCalendarDay(payload: unknown, index: number, month: string) {
+  const value = exactRecord(payload, ["date", "execution_count", "daily_pnl", "review_status", "is_open"], `日历 ${index + 1}`);
+  const date = dateText(value.date, "日历日期");
+  if (!date.startsWith(`${month}-`)) throw adapterError("日历日期不在当月");
+  return {
+    date,
+    executionCount: nonNegativeInteger(value.execution_count, "成交笔数"),
+    dailyPnl: nullableDecimal(value.daily_pnl, "当日盈亏"),
+    reviewStatus: nullableEnum(value.review_status, ["draft", "completed"] as const, "复盘状态"),
+    isOpen: booleanValue(value.is_open, "交易日"),
   };
 }
 
@@ -730,6 +822,12 @@ function dateText(payload: unknown, name: string): string {
   if (!DATE.test(value)) throw adapterError(`${name}无效`);
   const parsed = new Date(`${value}T00:00:00Z`);
   if (Number.isNaN(parsed.valueOf()) || parsed.toISOString().slice(0, 10) !== value) throw adapterError(`${name}无效`);
+  return value;
+}
+
+function monthText(payload: unknown, name: string): string {
+  const value = text(payload, name);
+  if (!MONTH.test(value)) throw adapterError(`${name}无效`);
   return value;
 }
 

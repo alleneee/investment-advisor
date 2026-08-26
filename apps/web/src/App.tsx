@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, createMockApi, normalizeSymbol, type WorkbenchApi } from "./api";
 import { ChanChart } from "./ChanChart";
 import { OutlookPanel } from "./OutlookPanel";
-import { ReviewCenterPage } from "./ReviewCenterPage";
 import { SharedReportPage } from "./SharedReportPage";
 import { StockInformationPanel } from "./StockInformationPanel";
 import { TradeJournalPage } from "./TradeJournalPage";
@@ -19,7 +18,7 @@ import {
 import { createMockTradingApi, type TradingApi } from "./trading-api";
 import { Atmosphere } from "./ui/Atmosphere";
 import { EmptyState } from "./ui/EmptyState";
-import { formatRate, type MetricTone } from "./ui/formatDisplay";
+import { type MetricTone } from "./ui/formatDisplay";
 import { Icon } from "./ui/Icon";
 import { KpiStrip } from "./ui/KpiStrip";
 import { MetricTile } from "./ui/MetricTile";
@@ -28,14 +27,14 @@ import { Panel } from "./ui/Panel";
 import { QuoteBand } from "./ui/QuoteBand";
 import { SplitPane } from "./ui/SplitPane";
 import { StatusChip } from "./ui/StatusChip";
-import { ArrowUpRight, CandlestickChart, Database, LayoutDashboard, NotebookPen, Plus, ScrollText, X } from "lucide-react";
+import { ArrowUpRight, LayoutDashboard, NotebookPen, Plus, Terminal, X } from "lucide-react";
 import type {
   InvestmentReportJob,
   InvestmentReportStatus,
   Report,
-  ReportQualityDashboard,
   RunProgress,
   StockInformation,
+  StockSuggestion,
   Timeframe,
   WatchItem,
 } from "./types";
@@ -47,13 +46,10 @@ interface AppProps {
   initialError?: string;
 }
 
-type WorkbenchView = "batch" | "records" | "snapshots" | "journal" | "reviews";
+type WorkbenchView = "batch" | "journal";
 
 function viewFromHash(): WorkbenchView {
-  if (window.location.hash === "#/records") return "records";
-  if (window.location.hash === "#/snapshots") return "snapshots";
-  if (window.location.hash === "#/journal") return "journal";
-  if (window.location.hash === "#/reviews") return "reviews";
+  if (window.location.hash === "#/journal" || window.location.hash === "#/reviews") return "journal";
   return "batch";
 }
 
@@ -91,6 +87,7 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
   const [progress, setProgress] = useState<RunProgress[]>([]);
   const [report, setReport] = useState<Report | null>(null);
   const [code, setCode] = useState("");
+  const [suggestions, setSuggestions] = useState<StockSuggestion[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [chartNotice, setChartNotice] = useState<string | null>(null);
   const [currentSymbol, setCurrentSymbol] = useState<string | null>(null);
@@ -106,6 +103,7 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
   const [deliveryError, setDeliveryError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [view, setView] = useState<WorkbenchView>(viewFromHash);
+  const [routeHash, setRouteHash] = useState(window.location.hash);
   const reportCache = useRef(new Map<string, Report>());
   const reportRequests = useRef(new Map<string, Promise<Report>>());
   const currentRequest = useRef<string | null>(null);
@@ -154,7 +152,10 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
   }, [service]);
 
   useEffect(() => {
-    const syncView = () => setView(viewFromHash());
+    const syncView = () => {
+      setView(viewFromHash());
+      setRouteHash(window.location.hash);
+    };
     window.addEventListener("hashchange", syncView);
     return () => window.removeEventListener("hashchange", syncView);
   }, []);
@@ -493,15 +494,64 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
     }
   }
 
+  useEffect(() => {
+    const query = code.trim();
+    if (!query) {
+      setSuggestions([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void service.searchStocks(query).then((rows) => {
+        if (!cancelled) setSuggestions(rows);
+      }).catch(() => {
+        if (!cancelled) setSuggestions([]);
+      });
+    }, 200);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [code, service]);
+
+  async function commitWatchItem(candidate: { symbol: string; name: string }) {
+    if (watchlist.some((item) => item.symbol === candidate.symbol)) throw new ApiError("股票已在自选池", 409);
+    const saved = await service.addWatchlist(candidate.symbol);
+    const item = { ...saved, name: candidate.name || saved.name };
+    setWatchlist((items) => [...items, item]);
+    setCode("");
+    setSuggestions([]);
+    setNotice(null);
+    selectSymbol(item.symbol);
+  }
+
+  async function resolveWatchQuery(raw: string): Promise<{ symbol: string; name: string }> {
+    const symbol = parseWatchCode(raw);
+    if (symbol) {
+      const known = suggestions.find((item) => item.symbol === symbol);
+      if (known) return { symbol, name: known.name };
+      const match = (await service.searchStocks(symbol)).find((item) => item.symbol === symbol);
+      return { symbol, name: match?.name ?? symbol };
+    }
+    const hits = suggestions.length ? suggestions : await service.searchStocks(raw);
+    if (hits.length === 1) return hits[0];
+    if (!hits.length) throw new ApiError("未找到匹配股票", 404);
+    throw new ApiError("请从候选列表中选择一只股票", 422);
+  }
+
   async function addSymbol() {
+    const raw = code.trim();
+    if (!raw) return;
     try {
-      const normalized = normalizeSymbol(code);
-      if (watchlist.some((item) => item.symbol === normalized)) throw new ApiError("股票已在自选池", 409);
-      const item = await service.addWatchlist(normalized);
-      setWatchlist((items) => [...items, item]);
-      setCode("");
-      setNotice(null);
-      selectSymbol(item.symbol);
+      await commitWatchItem(await resolveWatchQuery(raw));
+    } catch (error) {
+      setNotice(errorMessage(error));
+    }
+  }
+
+  async function addSuggestion(item: StockSuggestion) {
+    try {
+      await commitWatchItem(item);
     } catch (error) {
       setNotice(errorMessage(error));
     }
@@ -531,26 +581,26 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${view === "journal" ? " ledger-shell" : ""}`}>
       <Atmosphere />
       <aside className="rail">
-        <div className="brand-mark" aria-label="结构投研台">CH<span>AN</span></div>
+        <div className="brand-mark" aria-label="结构投研台">
+          <Icon icon={Terminal} size={28} />
+          CHAN
+        </div>
         <div className="rail-caption">结构投研台</div>
         <nav aria-label="主导航">
-          <a href="#/batch" className={`nav-item${view === "batch" ? " active" : ""}`} aria-current={view === "batch" ? "page" : undefined} onClick={() => setView("batch")}><Icon icon={LayoutDashboard} />今日批次 <span>{progress.length.toString().padStart(2, "0")}</span></a>
-          <a href="#/records" className={`nav-item${view === "records" ? " active" : ""}`} aria-current={view === "records" ? "page" : undefined} onClick={() => setView("records")}><Icon icon={ScrollText} />研究记录 <span>{completed.toString().padStart(2, "0")}</span></a>
-          <a href="#/snapshots" className={`nav-item${view === "snapshots" ? " active" : ""}`} aria-current={view === "snapshots" ? "page" : undefined} onClick={() => setView("snapshots")}><Icon icon={Database} />数据快照</a>
+          <a href="#/batch" className={`nav-item${view === "batch" ? " active" : ""}`} aria-current={view === "batch" ? "page" : undefined} onClick={() => setView("batch")}><Icon icon={LayoutDashboard} />今日批次 <span className="nav-count">{progress.length.toString().padStart(2, "0")}</span></a>
           <a href="#/journal" className={`nav-item${view === "journal" ? " active" : ""}`} aria-current={view === "journal" ? "page" : undefined} onClick={() => setView("journal")}><Icon icon={NotebookPen} />交易日记</a>
-          <a href="#/reviews" className={`nav-item${view === "reviews" ? " active" : ""}`} aria-current={view === "reviews" ? "page" : undefined} onClick={() => setView("reviews")}><Icon icon={CandlestickChart} />复盘中心</a>
         </nav>
-        <div className="rail-footer">LOCAL / INTERNAL<br /><span>v0.1 · TUSHARE CORE</span></div>
+        <div className="rail-footer"><span className="rail-status"><i aria-hidden="true" />系统：运行中</span></div>
       </aside>
 
       <main className="main-column">
         <header className="topbar">
           <div>
             <div className="eyebrow">{viewEyebrow(view)}</div>
-            {view === "batch" ? <h1>收盘后的结构，<em>现在</em>可见。</h1> : <h1>{view === "records" ? "研究记录" : view === "snapshots" ? "数据快照" : view === "journal" ? "交易日记" : "复盘中心"}</h1>}
+            {view === "batch" ? <h1>收盘后的结构，<em>现在</em>可见。</h1> : <h1>交易日记</h1>}
           </div>
           {view === "batch" && <button className="primary-button" onClick={createBatch} disabled={busy}>
             {busy ? "正在创建…" : "生成本批报告"}<Icon icon={ArrowUpRight} />
@@ -597,8 +647,11 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
         <SplitPane
           left={<>
           <Panel title="自选池" className="watchlist-panel">
-            <div className="watch-input"><label htmlFor="watch-code">股票代码</label><input id="watch-code" value={code} onChange={(event) => setCode(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void addSymbol(); }} placeholder="例如 600519" /><button onClick={() => void addSymbol()}><Icon icon={Plus} />加入自选</button></div>
-            <div className="watch-items">{watchlist.length ? watchlist.map((item, index) => <div className={`watch-row${currentSymbol === item.symbol ? " selected" : ""}`} key={item.symbol}><button type="button" className="watch-select" aria-label={`选择 ${item.symbol} ${item.name}`} aria-pressed={currentSymbol === item.symbol} onClick={() => selectSymbol(item.symbol)}><span className="row-number">{String(index + 1).padStart(2, "0")}</span><span className="market-dot" data-market={item.market} /><span className="watch-name"><strong>{item.symbol}</strong><small>{item.name}</small></span></button><button type="button" className="icon-button" aria-label={`移除 ${item.symbol}`} onClick={() => void removeSymbol(item.symbol)}><Icon icon={X} /></button></div>) : <EmptyState title="自选池还是空的。" />}</div>
+            <div className="watch-suggest">
+            <div className="watch-input"><label htmlFor="watch-code">添加股票</label><input id="watch-code" role="combobox" aria-autocomplete="list" aria-expanded={suggestions.length > 0} aria-controls="watch-suggestions" value={code} onChange={(event) => setCode(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void addSymbol(); }} placeholder="名称、代码或拼音" /><button onClick={() => void addSymbol()}><Icon icon={Plus} />加入自选</button></div>
+            {suggestions.length > 0 && <ul id="watch-suggestions" className="watch-suggest-list" role="listbox" aria-label="股票候选">{suggestions.map((item) => <li key={item.symbol}><button type="button" role="option" aria-selected="false" onClick={() => void addSuggestion(item)}><strong>{item.name}</strong><span>{item.symbol}</span></button></li>)}</ul>}
+            </div>
+            <div className="watch-items">{watchlist.length ? watchlist.map((item, index) => <div className={`watch-row${currentSymbol === item.symbol ? " selected" : ""}`} key={item.symbol}><button type="button" className="watch-select" aria-label={`选择 ${item.name} ${item.symbol}`} aria-pressed={currentSymbol === item.symbol} onClick={() => selectSymbol(item.symbol)}><span className="row-number">{String(index + 1).padStart(2, "0")}</span><span className="market-dot" data-market={item.market} /><span className="watch-name"><strong>{item.name}</strong><small>{item.symbol}</small></span></button><button type="button" className="icon-button" aria-label={`移除 ${item.symbol}`} onClick={() => void removeSymbol(item.symbol)}><Icon icon={X} /></button></div>) : <EmptyState title="自选池还是空的。" />}</div>
           </Panel>
           <Panel title="本批进度" className="pulse-panel">
             <span className="live-pill"><i />LIVE</span>
@@ -607,7 +660,8 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
             <div className="run-list">{progress.slice(0, 6).map((item) => <div className="run-row" key={item.symbol}><span className={`status-dot ${item.state}`} /><strong>{item.symbol}</strong><span>{item.stage}</span><small>{stateLabel(item.state)}</small></div>)}</div>
           </Panel>
           </>}
-          right={<Panel title="结构报告" className="report-section">
+          right={<>
+          <Panel title="结构报告" className="report-section">
             {report && <ReportView
               report={report}
               loadingTimeframe={loadingTimeframe}
@@ -621,121 +675,36 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
             />}
             {!report && loadingTimeframe && <div className="report-loading">正在加载结构报告…</div>}
             {!report && !loadingTimeframe && <EmptyState title="还没有结构报告。" />}
-          </Panel>}
+          </Panel>
+          <section className="outlook-section" aria-label="三情景走势报告">
+            <OutlookPanel
+              job={outlookJob}
+              pendingStatus={outlookPendingStatus}
+              busy={outlookBusy}
+              requestError={outlookError}
+              onGenerate={() => void createOutlook()}
+              onRetry={() => void retryOutlook()}
+              deliveryBusy={deliveryBusy}
+              deliveryError={deliveryError}
+              onReview={(decision) => void runDeliveryAction((reportId) => service.reviewInvestmentReport(reportId, decision))}
+              onPublish={() => void runDeliveryAction((reportId) => service.publishInvestmentReport(reportId))}
+              onEvaluateOutcome={() => void runDeliveryAction((reportId) => service.evaluateInvestmentReportOutcome(reportId))}
+              onCreateShare={() => void runDeliveryAction((reportId) => service.createInvestmentReportShare(reportId))}
+              onRevokeShare={() => void runDeliveryAction((reportId) => service.revokeInvestmentReportShare(reportId))}
+            />
+          </section>
+          <section className="evidence-section">
+            <div className="section-heading"><h2>资讯与市场热度</h2><div className="data-line"><span className={`status-dot ${informationError ? "degraded" : "completed"}`} />EASTMONEY · CNINFO · THS</div></div>
+            <StockInformationPanel information={information} loading={informationLoading} error={informationError} />
+          </section>
+          </>}
         />
-        </div>
+        </div></div>}
 
-        <section className="evidence-section">
-          <div className="section-heading"><h2>资讯与市场热度</h2><div className="data-line"><span className={`status-dot ${informationError ? "degraded" : "completed"}`} />EASTMONEY · CNINFO · THS</div></div>
-          <StockInformationPanel information={information} loading={informationLoading} error={informationError} />
-        </section>
-
-        <section className="outlook-section">
-          <div className="section-heading"><h2>AI 条件展望</h2><div className="data-line"><span className={`status-dot ${outlookJob?.status === "failed" ? "degraded" : outlookJob?.status === "running" || outlookPendingStatus === "running" ? "running" : "completed"}`} />PI AGENT · INVESTMENT REPORT V2</div></div>
-          <OutlookPanel
-            job={outlookJob}
-            pendingStatus={outlookPendingStatus}
-            busy={outlookBusy}
-            requestError={outlookError}
-            onGenerate={() => void createOutlook()}
-            onRetry={() => void retryOutlook()}
-            deliveryBusy={deliveryBusy}
-            deliveryError={deliveryError}
-            onReview={(decision) => void runDeliveryAction((reportId) => service.reviewInvestmentReport(reportId, decision))}
-            onPublish={() => void runDeliveryAction((reportId) => service.publishInvestmentReport(reportId))}
-            onEvaluateOutcome={() => void runDeliveryAction((reportId) => service.evaluateInvestmentReportOutcome(reportId))}
-            onCreateShare={() => void runDeliveryAction((reportId) => service.createInvestmentReportShare(reportId))}
-            onRevokeShare={() => void runDeliveryAction((reportId) => service.revokeInvestmentReportShare(reportId))}
-          />
-        </section></div>}
-
-        {view === "records" && <ResearchRecords api={service} />}
-        {view === "snapshots" && <DataSnapshots api={service} watchlist={watchlist} />}
-        {view === "journal" && <TradeJournalPage api={tradingService} />}
-        {view === "reviews" && <ReviewCenterPage api={tradingService} />}
+        {view === "journal" && <TradeJournalPage key={routeHash === "#/reviews" ? "week" : "month"} api={tradingService} initialView={routeHash === "#/reviews" ? "week" : "month"} />}
       </main>
     </div>
   );
-}
-
-function ResearchRecords({ api }: { api: WorkbenchApi }) {
-  const [jobs, setJobs] = useState<InvestmentReportJob[] | null>(null);
-  const [quality, setQuality] = useState<ReportQualityDashboard | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    Promise.all([
-      api.listInvestmentReportJobs({ latestPerSymbol: false }),
-      api.getReportQuality("all"),
-    ]).then(([nextJobs, nextQuality]) => {
-      if (cancelled) return;
-      setJobs(nextJobs);
-      setQuality(nextQuality);
-    }).catch((reason: unknown) => {
-      if (!cancelled) setError(errorMessage(reason));
-    });
-    return () => { cancelled = true; };
-  }, [api]);
-
-  return <section className="view-section" aria-label="研究记录列表">
-    {error && <Notice title="研究记录暂不可用" detail={error} />}
-    <div className="section-heading"><h2>质量看板</h2><span className="count-badge">{quality ? quality.scope.toUpperCase() : "…"}</span></div>
-    {quality ? <QualityDashboard quality={quality} /> : <div className="ui-skeleton">正在加载质量看板…</div>}
-    <div className="section-heading record-archive-heading"><h2>运行归档</h2><span className="count-badge">{(jobs?.length ?? 0).toString().padStart(2, "0")} RECORDS</span></div>
-    <div className="record-list">
-      {jobs?.length ? jobs.map((job) => <article className="record-row" key={job.reportId}>
-        <span className={`status-dot ${job.status === "failed" ? "failed" : job.status === "completed" ? "completed" : "running"}`} />
-        <div><strong>{job.symbol}</strong><small>{job.asOf} · {job.timeframe === "1w" ? "周线" : "日线"}</small></div>
-        <span>{job.report?.title ?? jobStatusLabel(job.status)}</span>
-        <small>{reviewStatusLabel(job.reviewStatus)} · {job.outcome ? outcomeSummary(job.outcome.status, job.outcome.realizedCase) : "未评估"}</small>
-      </article>) : <div className="empty-state">{jobs ? "尚无研究运行记录" : "正在加载研究记录…"}</div>}
-    </div>
-  </section>;
-}
-
-function QualityDashboard({ quality }: { quality: ReportQualityDashboard }) {
-  return <KpiStrip>
-    <MetricTile label="审阅通过率" value={quality.review.acceptRate == null ? "样本不足" : formatRate(quality.review.acceptRate)} detail={`${quality.review.accepted}/${quality.review.decided} 已决定`} />
-    <MetricTile label="有结论兑现率" value={quality.outcome.realizedRateOverConclusive == null ? "样本不足" : formatRate(quality.outcome.realizedRateOverConclusive)} detail={`${quality.outcome.realized}/${quality.outcome.conclusive} 明确结论`} />
-    <MetricTile label="已评估兑现率" value={quality.outcome.realizedRateOverEvaluated == null ? "样本不足" : formatRate(quality.outcome.realizedRateOverEvaluated)} detail={`含冲突与无法判定，共 ${quality.outcome.evaluated} 份`} />
-    <MetricTile label="情景分布" value={caseDistribution(quality.outcome.byCase)} detail={`看多 ${quality.outcome.byCase.bullish ?? 0} · 基准 ${quality.outcome.byCase.base ?? 0} · 看空 ${quality.outcome.byCase.bearish ?? 0}`} />
-  </KpiStrip>;
-}
-
-function DataSnapshots({ api, watchlist }: { api: WorkbenchApi; watchlist: WatchItem[] }) {
-  const [jobs, setJobs] = useState<InvestmentReportJob[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    api.listInvestmentReportJobs({ latestPerSymbol: false }).then((nextJobs) => {
-      if (!cancelled) setJobs(nextJobs);
-    }).catch((reason: unknown) => {
-      if (!cancelled) setError(errorMessage(reason));
-    });
-    return () => { cancelled = true; };
-  }, [api]);
-
-  const completed = jobs?.filter((job) => job.status === "completed") ?? [];
-  const asOfDates = new Set(completed.map((job) => job.asOf));
-  const latestAsOf = completed[0]?.asOf ?? "—";
-  return <section className="view-section" aria-label="数据快照详情">
-    {error && <Notice title="数据快照暂不可用" detail={error} />}
-    <KpiStrip>
-      <MetricTile label="WATCHLIST" value={watchlist.length.toString().padStart(2, "0")} detail="当前监控标的" />
-      <MetricTile label="FROZEN" value={completed.length.toString().padStart(2, "0")} detail="已固化研究报告" />
-      <MetricTile label="AS-OF DAYS" value={asOfDates.size.toString().padStart(2, "0")} detail="独立固化日期" />
-      <MetricTile label="LATEST AS OF" value={latestAsOf} detail="最近一份完成报告" />
-    </KpiStrip>
-    <div className="snapshot-details">
-      <div className="section-heading"><h2>固化输入</h2><span className="data-line"><span className="status-dot completed" />MARKET · CHAN · INFORMATION</span></div>
-      <div className="source-list">
-        {completed.length ? completed.map((job, index) => <div className="source-row" key={job.reportId}>
-          <span>{String(index + 1).padStart(2, "0")}</span>
-          <strong>{job.symbol} · {job.asOf} · {job.timeframe === "1w" ? "周线" : "日线"} · {job.report?.title ?? "已固化"}</strong>
-        </div>) : <div className="empty-state">{jobs ? "尚无已固化数据快照" : "正在加载数据快照…"}</div>}
-      </div>
-    </div>
-  </section>;
 }
 
 function ReportView({
@@ -758,6 +727,22 @@ function ReportView({
   </article>;
 }
 
+function parseWatchCode(value: string): string | null {
+  const trimmed = value.trim().toUpperCase();
+  if (/^\d{6}\.(SH|SZ)$/.test(trimmed)) {
+    try {
+      return normalizeSymbol(trimmed.slice(0, 6));
+    } catch {
+      return null;
+    }
+  }
+  try {
+    return normalizeSymbol(value);
+  } catch {
+    return null;
+  }
+}
+
 function errorMessage(error: unknown): string {
   if (error instanceof ApiError) return error.message;
   return "请求失败，请检查本机服务是否已启动。";
@@ -765,19 +750,6 @@ function errorMessage(error: unknown): string {
 
 function stateLabel(state: RunProgress["state"]): string {
   return { queued: "排队", running: "进行中", completed: "完成", degraded: "降级", failed: "失败" }[state];
-}
-
-function jobStatusLabel(status: InvestmentReportStatus): string {
-  return { queued: "排队", running: "生成中", completed: "已完成", failed: "失败" }[status];
-}
-
-function reviewStatusLabel(status: InvestmentReportJob["reviewStatus"]): string {
-  return { pending: "待审阅", accepted: "已通过", rejected: "已驳回" }[status];
-}
-
-function outcomeSummary(status: NonNullable<InvestmentReportJob["outcome"]>["status"], realizedCase: NonNullable<InvestmentReportJob["outcome"]>["realizedCase"]): string {
-  if (status === "realized") return `兑现 ${realizedCase === "bullish" ? "看多" : realizedCase === "bearish" ? "看空" : "基准"}`;
-  return { pending: "窗口未满", none_realized: "未兑现", ambiguous: "多情景冲突", inconclusive: "无法判定" }[status];
 }
 
 function batchStatus(progress: RunProgress[]): { label: string; tone: MetricTone } {
@@ -788,17 +760,9 @@ function batchStatus(progress: RunProgress[]): { label: string; tone: MetricTone
   return { label: "完成", tone: "up" };
 }
 
-function caseDistribution(byCase: ReportQualityDashboard["outcome"]["byCase"]): string {
-  const total = (byCase.bullish ?? 0) + (byCase.base ?? 0) + (byCase.bearish ?? 0);
-  return total ? total.toString().padStart(2, "0") : "00";
-}
-
 function viewEyebrow(view: WorkbenchView): string {
   return {
     batch: "A-SHARE STRUCTURAL RESEARCH · 2026.08.11",
-    records: "RESEARCH ARCHIVE · DETERMINISTIC RUNS",
-    snapshots: "EVIDENCE SNAPSHOTS · TRACEABLE INPUTS",
     journal: "TRADING JOURNAL · DAILY CLOSE",
-    reviews: "TRADING REVIEW · DETERMINISTIC SNAPSHOTS",
   }[view];
 }

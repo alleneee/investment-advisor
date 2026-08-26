@@ -272,6 +272,17 @@ describe("market analysis adapter", () => {
 });
 
 describe("information and investment report API", () => {
+  it("searches listed stocks by query", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe("/api/stocks?q=%E8%8C%85%E5%8F%B0");
+      return jsonResponse([{ symbol: "600519.SH", name: "贵州茅台", cnspell: "gzmt" }]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(createHttpApi("").searchStocks("茅台")).resolves.toEqual([
+      { symbol: "600519.SH", name: "贵州茅台", cnspell: "gzmt" },
+    ]);
+  });
+
   it("creates and polls a full report job for every stock in the batch", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);

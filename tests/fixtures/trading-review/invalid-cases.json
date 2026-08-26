@@ -1,0 +1,46 @@
+{
+  "model_input": [
+    {
+      "name": "拒绝额外字段",
+      "path": "account_id",
+      "value": "account-secret"
+    },
+    {
+      "name": "拒绝买卖方向与理由错配",
+      "path": "reason_groups.0.reason_code",
+      "value": "stop_loss"
+    },
+    {
+      "name": "拒绝任意指标引用",
+      "path": "metric_registry.0.ref",
+      "value": "account.secret_metric"
+    },
+    {
+      "name": "拒绝任意质量告警",
+      "path": "quality_warnings.0",
+      "value": "raw-note"
+    }
+  ],
+  "draft": [
+    {
+      "name": "拒绝未知引用",
+      "path": "profit_sources.0.metric_refs.0",
+      "value": "account.secret_metric"
+    },
+    {
+      "name": "拒绝不可下结论的引用",
+      "path": "profit_sources.0.metric_refs.0",
+      "value": "quality.partial_period"
+    },
+    {
+      "name": "拒绝具体交易指令",
+      "path": "next_period_experiment.action",
+      "value": "立即买入该股票并设置目标价"
+    },
+    {
+      "name": "拒绝叙述中的数字",
+      "path": "loss_patterns.0.narrative",
+      "value": "该模式回撤达到百分之１２"
+    }
+  ]
+}

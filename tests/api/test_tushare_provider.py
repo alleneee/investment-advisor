@@ -152,3 +152,123 @@ def test_weekly_uses_qfq_prices_and_one_calendar_query(monkeypatch):
     assert len(rows) == 2
     assert rows[0]["open"] == pytest.approx(10)
     assert client.calendar_calls == 1
+
+
+def test_stock_basic_keeps_supported_a_shares_and_drops_other_listings():
+    class Client:
+        def __init__(self) -> None:
+            self.kwargs: dict | None = None
+
+        def stock_basic(self, **kwargs):
+            self.kwargs = kwargs
+            return [
+                {
+                    "ts_code": "600519.SH",
+                    "symbol": "600519",
+                    "name": "贵州茅台",
+                    "cnspell": "GZMT",
+                    "exchange": "SSE",
+                    "list_status": "L",
+                },
+                {
+                    "ts_code": "430047.BJ",
+                    "symbol": "430047",
+                    "name": "诺思兰德",
+                    "cnspell": "nsld",
+                    "exchange": "BSE",
+                    "list_status": "L",
+                },
+                {
+                    "ts_code": "00700.HK",
+                    "symbol": "00700",
+                    "name": "腾讯控股",
+                    "cnspell": "txkg",
+                    "exchange": "HKEX",
+                    "list_status": "L",
+                },
+            ]
+
+    client = Client()
+    rows = TushareMarketProvider(client=client).stock_basic()
+
+    assert client.kwargs == {
+        "list_status": "L",
+        "fields": "ts_code,symbol,name,cnspell,exchange,list_status",
+    }
+    assert rows == [
+        {
+            "ts_code": "600519.SH",
+            "symbol": "600519",
+            "name": "贵州茅台",
+            "cnspell": "gzmt",
+            "exchange": "SSE",
+            "list_status": "L",
+        }
+    ]
+
+
+def test_monthly_aggregates_completed_months_from_qfq_daily():
+    class Client(FakeClient):
+        def daily(self, **kwargs):
+            return [
+                {"ts_code": "600000.SH", "trade_date": "20240731", "open": 9, "high": 10, "low": 8, "close": 9, "vol": 10, "qfq_open": 9, "qfq_high": 10, "qfq_low": 8, "qfq_close": 9},
+                {"ts_code": "600000.SH", "trade_date": "20240801", "open": 10, "high": 12, "low": 9, "close": 11, "vol": 20, "qfq_open": 10, "qfq_high": 12, "qfq_low": 9, "qfq_close": 11},
+                {"ts_code": "600000.SH", "trade_date": "20240802", "open": 11, "high": 13, "low": 10, "close": 12, "vol": 30, "qfq_open": 11, "qfq_high": 13, "qfq_low": 10, "qfq_close": 12},
+            ]
+
+        def adj_factor(self, **kwargs):
+            return [
+                {"trade_date": "20240731", "adj_factor": 1},
+                {"trade_date": "20240801", "adj_factor": 1},
+                {"trade_date": "20240802", "adj_factor": 1},
+            ]
+
+    rows = TushareMarketProvider(client=Client()).monthly("600000.SH", as_of=date(2024, 8, 2))
+    assert len(rows) == 1
+    assert rows[0]["trade_date"] == "20240731"
+    assert rows[0]["qfq_open"] == 9
+    assert rows[0]["qfq_close"] == 9
+    assert rows[0]["vol"] == 10
+
+
+def test_minutes_rebases_with_same_day_factor_and_skips_missing_day():
+    class Client(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.mins = []
+
+        def stk_mins(self, **kwargs):
+            self.mins.append(kwargs)
+            return [
+                {"ts_code": "600000.SH", "trade_time": "2024-08-01 10:30:00", "open": 20, "high": 22, "low": 19, "close": 21, "vol": 5},
+                {"ts_code": "600000.SH", "trade_time": "2024-08-02 10:30:00", "open": 30, "high": 33, "low": 29, "close": 31, "vol": 8},
+            ]
+
+        def adj_factor(self, **kwargs):
+            return [{"trade_date": "20240802", "adj_factor": 3}]
+
+    client = Client()
+    rows = TushareMarketProvider(client=client).minutes(
+        "600000.SH",
+        freq="30m",
+        as_of=date(2024, 8, 2),
+        start_date=date(2024, 8, 1),
+        end_date=date(2024, 8, 2),
+    )
+    assert client.mins[0]["freq"] == "30min"
+    by_day = {row["trade_date"]: row for row in rows}
+    assert by_day["20240802"]["qfq_close"] == pytest.approx(31)
+    assert "qfq_close" not in by_day["20240801"]
+    assert by_day["20240801"]["close"] == 21
+
+
+def test_stock_basic_hides_upstream_error_details():
+    class Client:
+        def stock_basic(self, **kwargs):
+            raise RuntimeError("api_key=diagnostic-secret")
+
+    with pytest.raises(MarketProviderError) as error:
+        TushareMarketProvider(client=Client()).stock_basic()
+
+    assert str(error.value) == "Tushare 数据服务调用失败"
+    assert "diagnostic-secret" not in str(error.value)

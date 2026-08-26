@@ -155,7 +155,7 @@ describe("SharedReportPage", () => {
     expect(exportButton).toBeDisabled();
     expect(exportButton).toHaveTextContent("正在导出…");
     expect(toBlob).toHaveBeenCalledWith(report, expect.objectContaining({
-      backgroundColor: "#101920",
+      backgroundColor: "#131313",
       cacheBust: true,
       pixelRatio: 2,
       style: { margin: "0" },

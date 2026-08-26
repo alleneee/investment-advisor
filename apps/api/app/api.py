@@ -12,7 +12,8 @@ from .domain.report_outcome import with_adjudication
 from .information import StockInformationService
 from .outcome import ReportOutcomeError, ReportOutcomeService
 from .providers.a_stock_data import normalize_symbol_code
-from .providers.tushare import MarketProviderError, TushareMarketProvider
+from .providers.factory import create_market_provider
+from .providers.tushare import MarketProviderError
 from .reporting import InvestmentReportService, information_reference, validate_report_draft_v2
 
 
@@ -54,17 +55,34 @@ def create_router(
     information_service: StockInformationService | None = None,
     report_service: InvestmentReportService | None = None,
     outcome_service: ReportOutcomeService | None = None,
+    stock_universe_service: Any | None = None,
+    chan_review_service: Any | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api")
 
+    def _named_watch_items(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        names: dict[str, str] = {}
+        if stock_universe_service is not None:
+            names = stock_universe_service.names_for(
+                [row["symbol"] for row in rows if isinstance(row.get("symbol"), str)]
+            )
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            name = names.get(item["symbol"])
+            if name:
+                item["name"] = name
+            result.append(item)
+        return result
+
     @router.get("/watchlist")
     def list_watchlist() -> list[dict]:
-        return db.list_watch()
+        return _named_watch_items(db.list_watch())
 
     @router.post("/watchlist", status_code=status.HTTP_201_CREATED)
     def add_watchlist(item: WatchItem) -> dict:
         try:
-            return db.add_watch(item.symbol)
+            return _named_watch_items([db.add_watch(item.symbol)])[0]
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -76,6 +94,30 @@ def create_router(
     def delete_watchlist_body(item: WatchItem) -> None:
         db.remove_watch(item.symbol)
 
+    @router.get("/stocks")
+    def search_stocks(
+        q: str = "",
+        limit: int = Query(default=8, ge=1, le=20),
+    ) -> list[dict[str, Any]]:
+        if stock_universe_service is None:
+            raise HTTPException(503, "stock universe 未配置")
+        try:
+            return stock_universe_service.search(q, limit=limit)
+        except MarketProviderError as exc:
+            raise HTTPException(503, str(exc)) from exc
+
+    @router.get("/market/{symbol}/chan-review")
+    def market_chan_review(symbol: str, as_of: date | None = None) -> dict[str, Any]:
+        if chan_review_service is None:
+            raise HTTPException(503, "chan review 未配置")
+        try:
+            normalize_symbol_code(symbol)
+            return chan_review_service.review(symbol, as_of=as_of or datetime.now(UTC).date())
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except MarketProviderError as exc:
+            raise HTTPException(503, str(exc)) from exc
+
     @router.get("/market/{symbol}/analysis")
     def market_analysis(
         symbol: str,
@@ -85,7 +127,7 @@ def create_router(
         service = market_service
         try:
             if service is None:
-                service = MarketAnalysisService(TushareMarketProvider(), history_store=db)
+                service = MarketAnalysisService(create_market_provider(), history_store=db)
             return service.analyze(
                 symbol,
                 as_of=as_of or datetime.now(UTC).date(),
@@ -423,7 +465,7 @@ def create_internal_router(
         if market_service is not None:
             return market_service
         try:
-            return MarketAnalysisService(TushareMarketProvider(), history_store=db)
+            return MarketAnalysisService(create_market_provider(), history_store=db)
         except MarketProviderError as exc:
             raise HTTPException(503, str(exc)) from exc
 

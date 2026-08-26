@@ -58,24 +58,24 @@ class ChanEngine:
 
     def __init__(self) -> None:
         self._input: list[CanonicalBar] = []
+        self._keys: set[tuple[str, datetime]] = set()
         self._last_snapshot: dict[str, Any] | None = None
-        self._frozen_confirmed: list[dict[str, Any]] = []
 
     def ingest(self, value: CanonicalBar | dict[str, Any]) -> dict[str, Any]:
         bar = CanonicalBar.from_value(value)
         key = (bar.symbol, bar.occurred_at)
-        for existing in self._input:
-            if (existing.symbol, existing.occurred_at) == key:
-                if existing == bar:
-                    return {"changed": False}
-                raise ValueError("重复时间的 K 线内容不一致")
+        if key in self._keys:
+            existing = next(item for item in self._input if (item.symbol, item.occurred_at) == key)
+            if existing == bar:
+                return {"changed": False}
+            raise ValueError("重复时间的 K 线内容不一致")
         if self._input and bar.occurred_at < self._input[-1].occurred_at:
             raise ValueError("乱序输入：occurred_at 必须单调递增")
         self._input.append(bar)
+        self._keys.add(key)
         snapshot = self._reduce()
         previous = self._last_snapshot
         self._last_snapshot = snapshot
-        self._frozen_confirmed = list(snapshot["confirmed"])
         return {
             "changed": previous != snapshot,
             "added_occurred_at": bar.occurred_at,
@@ -84,8 +84,8 @@ class ChanEngine:
 
     def replay(self, values: Iterable[CanonicalBar | dict[str, Any]]) -> dict[str, Any]:
         self._input = []
+        self._keys = set()
         self._last_snapshot = None
-        self._frozen_confirmed = []
         for value in values:
             self.ingest(value)
         return self.snapshot()
@@ -109,25 +109,33 @@ class ChanEngine:
         fractals = self._fractals(bars)
         strokes = self._strokes(bars, fractals)
         centers = self._centers(strokes)
-        if self._frozen_confirmed:
-            confirmed = list(self._frozen_confirmed)
-            if len(strokes) > len(confirmed):
-                confirmed.extend(strokes[len(confirmed) : -1])
-                provisional = strokes[-1:]
-            else:
-                provisional = []
-            strokes = confirmed + provisional
-        else:
-            confirmed = strokes[:-1] if strokes else []
-            provisional = strokes[-1:] if strokes else []
+        confirmed = strokes[:-1] if strokes else []
+        provisional = strokes[-1:] if strokes else []
+        bar_rows = [bar.as_dict() for bar in bars]
+        from .chan_macd import compute_macd
+        from .chan_segments import build_segment_centers, build_segments
+        from .chan_signals import build_parent_signals, classify_trend, find_divergences
+
+        segments = build_segments(strokes)
+        segment_centers = build_segment_centers(segments)
+        macd = compute_macd([Decimal(row["close"]) for row in bar_rows])
+        trend = classify_trend(segment_centers)
+        divergences = find_divergences(trend, segments, macd, bar_rows)
+        signals = build_parent_signals(trend, divergences, segments, segment_centers)
         times = [bar.occurred_at for bar in bars]
         return {
-            "bars": [bar.as_dict() for bar in bars],
+            "bars": bar_rows,
             "fractals": fractals,
             "strokes": strokes,
             "confirmed": confirmed,
             "provisional": provisional,
             "centers": centers,
+            "segments": segments,
+            "segment_centers": segment_centers,
+            "macd": macd,
+            "trend": trend,
+            "divergences": divergences,
+            "signals": signals,
             "occurred_at": max(times) if times else None,
             "known_at": max((bar.known_at for bar in bars), default=None),
             "stable_through": max((bar.stable_through for bar in bars), default=None),
@@ -265,9 +273,11 @@ class ChanEngine:
 
 
 def build_centers(strokes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """按笔顺序构造中枢：找到下一组重叠的三笔，再向前延伸直到离开区间。
+    """按笔顺序构造中枢：三段重叠形成区间，仅在后续笔两端仍落在区间内时延伸。
 
-    不按每三笔滑窗重复产出重叠中枢。离开后从第一笔不再重叠的笔继续寻找下一个。
+    ZD 为三段低点最大值，ZG 为三段高点最小值；ZD >= ZG 则不是有效重叠。
+    任一端离开 [ZD, ZG] 视为离开，停止延伸，并从该笔重新寻找下一个三段重叠。
+    不按每三笔滑窗重复产出重叠中枢。
     """
     centers: list[dict[str, Any]] = []
     index = 0
@@ -292,7 +302,7 @@ def build_centers(strokes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for extension in strokes[index + 3 :]:
             ext_low = min(Decimal(extension["start_price"]), Decimal(extension["end_price"]))
             ext_high = max(Decimal(extension["start_price"]), Decimal(extension["end_price"]))
-            if ext_low < upper and ext_high > lower:
+            if lower <= ext_low and ext_high <= upper:
                 center["end_index"] = extension["end_index"]
                 center["occurred_at"] = extension["occurred_at"]
                 center["known_at"] = max(center["known_at"], extension["known_at"])

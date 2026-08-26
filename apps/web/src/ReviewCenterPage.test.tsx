@@ -75,7 +75,7 @@ const attribution: StructureAttribution = {
 
 function apiForReview(overrides: Partial<TradingApi> = {}): TradingApi {
   return {
-    getAccount: vi.fn(), createAccount: vi.fn(), listExecutions: vi.fn(), createExecution: vi.fn(), updateExecution: vi.fn(), deleteExecution: vi.fn(), listCashFlows: vi.fn(), createCashFlow: vi.fn(), deleteCashFlow: vi.fn(), getDailyReview: vi.fn(), saveDailyReview: vi.fn(),
+    getAccount: vi.fn(), createAccount: vi.fn(), listExecutions: vi.fn(), createExecution: vi.fn(), updateExecution: vi.fn(), deleteExecution: vi.fn(), listCashFlows: vi.fn(), createCashFlow: vi.fn(), deleteCashFlow: vi.fn(), getDailyReview: vi.fn(), saveDailyReview: vi.fn(), getCalendar: vi.fn(), getPeriodSummary: vi.fn(),
     getStructureAttribution: vi.fn(async () => attribution),
     getReviewPreview: vi.fn(async () => report),
     createReviewReport: vi.fn(async () => report),
@@ -119,5 +119,32 @@ describe("复盘中心", () => {
     expect(detailTable).toHaveTextContent("7.5 ~ 10.8");
     expect(detailTable).toHaveTextContent("10.8");
     expect(detailTable).toHaveTextContent("无法归因（成交日无 K 线）");
+  });
+
+  it("锁定周期后隐藏周期切换，并按传入区间生成复盘", async () => {
+    const user = userEvent.setup();
+    const api = apiForReview();
+    render(
+      <ReviewCenterPage
+        api={api}
+        today="2026-08-18"
+        periodKind="month"
+        periodStart="2026-08-01"
+        periodEnd="2026-08-31"
+        hidePeriodControls
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "周报" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "月报" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("周期开始")).not.toBeInTheDocument();
+    expect(screen.getByText("2026-08-01 至 2026-08-31")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "报告版本" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "结构位置归因" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "生成确定性复盘" }));
+    await waitFor(() => expect(api.createReviewReport).toHaveBeenCalledWith("month", "2026-08-01", "2026-08-31"));
+    expect(await screen.findByRole("heading", { name: "确定性复盘结果" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "报告版本" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "结构位置归因" })).toBeInTheDocument();
   });
 });

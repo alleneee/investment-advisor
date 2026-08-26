@@ -89,7 +89,27 @@ describe("Lightweight Chan chart model", () => {
     expect(model.centers).toEqual([
       { startAt: "2021-01-01", endAt: "2021-01-03", lower: 10, upper: 12 },
     ]);
+    expect(model.segmentCenters).toEqual([]);
     expect(model.visibleRange).toEqual({ from: 774, to: 899 });
+  });
+
+  it("draws stroke centers even when a historical segment center exists", () => {
+    const input = chartData(3);
+    input.segmentCenters = [{
+      startAt: input.bars[0].occurredAt,
+      endAt: input.bars[2].occurredAt,
+      lower: 8,
+      upper: 14,
+    }];
+
+    const model = buildChanChartModel(input);
+
+    expect(model.centers).toEqual([
+      { startAt: "2021-01-01", endAt: "2021-01-03", lower: 10, upper: 12 },
+    ]);
+    expect(model.segmentCenters).toEqual([
+      { startAt: "2021-01-01", endAt: "2021-01-03", lower: 8, upper: 14 },
+    ]);
   });
 
   it("defaults to roughly six months for weekly data", () => {
@@ -108,13 +128,17 @@ describe("Lightweight Chan chart model", () => {
     expect(text).toContain("成交量 —");
     expect(text).toContain("形成中笔");
     expect(text).toContain("笔中枢 10–12");
+    input.segmentCenters = [{ startAt: input.bars[0].occurredAt, endAt: input.bars[2].occurredAt, lower: 8, upper: 14 }];
+    expect(formatChanTooltip(input, "2021-01-02")).toContain("线段中枢 8–14");
   });
 });
 
 describe("ChanOverlayPrimitive", () => {
-  it("draws center areas and confirmed and provisional strokes", () => {
-    const model = buildChanChartModel(chartData(3));
-    const primitive = new ChanOverlayPrimitive(model.strokes, model.centers);
+  it("draws stroke centers in front of segment centers, plus confirmed and provisional strokes", () => {
+    const input = chartData(3);
+    input.segmentCenters = [{ startAt: input.bars[0].occurredAt, endAt: input.bars[2].occurredAt, lower: 8, upper: 14 }];
+    const model = buildChanChartModel(input);
+    const primitive = new ChanOverlayPrimitive(model.strokes, model.centers, model.segments, model.segmentCenters);
     const requestUpdate = vi.fn();
     const fillRect = vi.fn();
     const strokeRect = vi.fn();
@@ -155,7 +179,7 @@ describe("ChanOverlayPrimitive", () => {
       }),
     } as never);
 
-    expect(fillRect).toHaveBeenCalledOnce();
+    expect(fillRect).toHaveBeenCalledTimes(2);
     expect(stroke).toHaveBeenCalledTimes(2);
     expect(setLineDash).toHaveBeenCalledWith([]);
     expect(setLineDash).toHaveBeenCalledWith([8, 6]);

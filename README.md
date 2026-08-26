@@ -25,13 +25,16 @@ flowchart LR
     K --> I
 ```
 
-Tushare 是运行时数据源，不是由模型或 skill 代替调用。
-`TushareMarketProvider` 在运行时调用 `tushare.pro_api(TUSHARE_TOKEN)`，
-并在配置 `TUSHARE_API_URL` 时将 SDK 指向对应服务地址。Provider 使用
-`daily`、`adj_factor` 和周线聚合所需的 `trade_cal`。
-前复权在本地按快照计算并写入哈希，便于重放。
-开发时使用的 `tushare-data` skill 只提供调用约束和数据研究流程，
-不承载生产数据请求。
+行情运行时数据源由 `MARKET_PROVIDER` 选择：`auto`（默认）、`hithink` 或 `tushare`。
+`auto` 在检测到同花顺金融数据 API Key 时优先走扶摇 REST
+（<https://fuyao.aicubes.cn>），日/周/月 K 使用前复权历史行情；分钟 K 仍回退 Tushare。
+Key 读取顺序：`HITHINK_FINANCE_API_KEY`、`FUYAO_API_KEY`、`FUYAO_TOKEN`，
+然后是用户级 `credentials.env`。不要把 Key 写入仓库。
+
+未配置同花顺 Key 时继续使用 `TushareMarketProvider`：
+运行时调用 `tushare.pro_api(TUSHARE_TOKEN)`，并在配置 `TUSHARE_API_URL`
+时将 SDK 指向对应服务地址。Tushare 路径使用 `daily`、`adj_factor` 和
+周线聚合所需的 `trade_cal`，前复权在本地按快照计算并写入哈希。
 
 `a-stock-data` 同样只用于开发期确认公开数据契约，不是生产 SDK。运行时
 `AStockDataProvider` 使用项目内的 `httpx` 直接请求三个来源：东财个股新闻、
@@ -40,6 +43,7 @@ Tushare 是运行时数据源，不是由模型或 skill 代替调用。
 
 相关接口文档：
 
+- [同花顺金融数据 API](https://fuyao.aicubes.cn/docs/)
 - [Tushare daily](https://tushare.pro/document/1?doc_id=27)
 - [Tushare adj_factor](https://tushare.pro/document/2?doc_id=28)
 - [Tushare trade_cal](https://tushare.pro/document/2?doc_id=26)
@@ -73,6 +77,9 @@ npm --prefix apps/web install --install-strategy=shallow
 ### 2. 配置环境变量
 
 ```bash
+MARKET_PROVIDER="auto"
+HITHINK_FINANCE_API_KEY="你的同花顺金融数据 API Key"
+HITHINK_FINANCE_API_URL="https://fuyao.aicubes.cn"
 TUSHARE_TOKEN="你的 Tushare token"
 TUSHARE_API_URL="https://你的-tushare-服务.example/api"
 DATABASE_URL="postgresql://niko@127.0.0.1:5432/chan_market"
@@ -87,8 +94,10 @@ PI_API_KEY="模型服务 API key"
 VITE_API_BASE_URL="http://127.0.0.1:8000"
 ```
 
-`TUSHARE_TOKEN` 是 Python 数据服务的凭据。第三方套餐 Token 必须同时配置其
-对应的 `TUSHARE_API_URL`；未配置地址时使用 Tushare SDK 默认服务。
+`HITHINK_FINANCE_API_KEY` 是扶摇同花顺 REST 凭据，不要提交到 Git；也可只放在用户级
+`credentials.env`。`TUSHARE_TOKEN` 仍用于分钟线回退和未配置同花顺 Key 时的日线。
+第三方 Tushare 套餐 Token 必须同时配置对应的 `TUSHARE_API_URL`；未配置地址时使用
+Tushare SDK 默认服务。
 `DATABASE_URL` 指定 PostgreSQL 连接串，必须配置；缺失时服务启动直接失败，
 不再支持内存或 SQLite 数据库。
 `INTERNAL_AGENT_TOKEN` 是 FastAPI 与 Node sidecar 之间的必需共享凭据，两边
@@ -347,6 +356,9 @@ curl "http://127.0.0.1:8000/api/reports/quality?scope=all"
 交易账户、成交记录、资金流水和每日收盘复盘都写入 PostgreSQL，并按上海时区保存。
 成交记录要求填写买入或卖出理由；每日复盘可记录失效条件、次日计划、情绪和纪律
 执行情况。
+
+月、周、季、年视图直接展示当前周期累计收益曲线；计算口径剔除入金、出金，并以
+周期首个正净值点归零；列表视图不展示该曲线。
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/trading/account \

@@ -4,9 +4,14 @@ import hashlib
 import json
 import os
 import re
+from calendar import monthrange
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
+
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+_MINUTE_FREQ = {"15m": "15min", "30m": "30min", "60m": "60min"}
 
 
 class MarketProviderError(RuntimeError):
@@ -17,6 +22,9 @@ _CODE = re.compile(r"^(?P<num>(?:600|601|603|605|688)\d{3}\.SH|(?:000|001|002|00
 
 
 class TushareMarketProvider:
+    source = "tushare"
+    supports_minutes = True
+
     def __init__(
         self,
         client: Any | None = None,
@@ -104,6 +112,29 @@ class TushareMarketProvider:
         rows = self._call("trade_cal", exchange=exchange, start_date=start_date.strftime("%Y%m%d"), end_date=end_date.strftime("%Y%m%d"))
         return sorted(rows, key=lambda row: row.get("cal_date", ""))
 
+    def stock_basic(self) -> list[dict[str, Any]]:
+        rows = self._call(
+            "stock_basic",
+            list_status="L",
+            fields="ts_code,symbol,name,cnspell,exchange,list_status",
+        )
+        result = []
+        for row in rows:
+            ts_code = str(row.get("ts_code") or "").upper()
+            if not _CODE.fullmatch(ts_code):
+                continue
+            result.append(
+                {
+                    "ts_code": ts_code,
+                    "symbol": str(row.get("symbol") or ts_code.split(".", 1)[0]),
+                    "name": str(row.get("name") or ts_code),
+                    "cnspell": str(row.get("cnspell") or "").lower(),
+                    "exchange": str(row.get("exchange") or ""),
+                    "list_status": str(row.get("list_status") or "L"),
+                }
+            )
+        return result
+
     def weekly(self, code: str, *, as_of: date | None = None) -> list[dict[str, Any]]:
         as_of = as_of or datetime.now(UTC).date()
         rows = self.daily(code, as_of=as_of)
@@ -167,6 +198,106 @@ class TushareMarketProvider:
             weekly_row["payload_hash"] = self._hash(weekly_row)
             result.append(weekly_row)
         return result
+
+    def monthly(self, code: str, *, as_of: date | None = None) -> list[dict[str, Any]]:
+        as_of = as_of or datetime.now(UTC).date()
+        return self.monthly_from_daily(code, self.daily(code, as_of=as_of), as_of=as_of)
+
+    def monthly_from_daily(
+        self,
+        code: str,
+        rows: list[dict[str, Any]],
+        *,
+        as_of: date,
+    ) -> list[dict[str, Any]]:
+        code = self._validate_code(code)
+        grouped: dict[tuple[int, int], list[dict[str, Any]]] = {}
+        for row in rows:
+            day = self._parse_date(row["trade_date"])
+            grouped.setdefault((day.year, day.month), []).append(row)
+        result = []
+        for year, month in sorted(grouped):
+            last_day = date(year, month, monthrange(year, month)[1])
+            if as_of < last_day:
+                continue
+            items = sorted(grouped[(year, month)], key=lambda item: item["trade_date"])
+            monthly_row = {
+                "ts_code": items[-1].get("ts_code", code),
+                "trade_date": max(self._parse_date(item["trade_date"]) for item in items).strftime("%Y%m%d"),
+                "open": items[0].get("qfq_open", items[0].get("open")),
+                "high": max(item.get("qfq_high", item.get("high")) for item in items),
+                "low": min(item.get("qfq_low", item.get("low")) for item in items),
+                "close": items[-1].get("qfq_close", items[-1].get("close")),
+                "vol": sum(item.get("vol", 0) or 0 for item in items),
+            }
+            monthly_row.update({f"qfq_{field}": monthly_row[field] for field in ("open", "high", "low", "close")})
+            monthly_row["payload_hash"] = self._hash(monthly_row)
+            result.append(monthly_row)
+        return result
+
+    def minutes(
+        self,
+        code: str,
+        *,
+        freq: str,
+        as_of: date,
+        start_date: date,
+        end_date: date,
+    ) -> list[dict[str, Any]]:
+        code = self._validate_code(code)
+        tushare_freq = _MINUTE_FREQ.get(freq)
+        if tushare_freq is None:
+            raise ValueError("仅支持 15m/30m/60m 分钟周期")
+        end_date = min(end_date, as_of)
+        if start_date > end_date:
+            raise ValueError("start_date 不能晚于 end_date")
+        rows = self._call(
+            "stk_mins",
+            ts_code=code,
+            freq=tushare_freq,
+            start_date=start_date.strftime("%Y%m%d"),
+            end_date=end_date.strftime("%Y%m%d"),
+        )
+        factors = {
+            str(item["trade_date"]): Decimal(str(item["adj_factor"]))
+            for item in self._call("adj_factor", ts_code=code, start_date=start_date.strftime("%Y%m%d"), end_date=end_date.strftime("%Y%m%d"))
+            if item.get("adj_factor") is not None
+        }
+        as_of_factor = factors.get(as_of.strftime("%Y%m%d"))
+        result = []
+        for row in rows:
+            occurred = self._parse_minute(row.get("trade_time"))
+            if occurred.date() > as_of:
+                continue
+            trade_date = occurred.date().strftime("%Y%m%d")
+            normalized = {
+                "ts_code": row.get("ts_code", code),
+                "trade_time": occurred.isoformat(),
+                "trade_date": trade_date,
+                "open": row.get("open"),
+                "high": row.get("high"),
+                "low": row.get("low"),
+                "close": row.get("close"),
+                "vol": row.get("vol"),
+            }
+            factor = factors.get(trade_date)
+            if factor is not None and as_of_factor is not None:
+                for field in ("open", "high", "low", "close"):
+                    if row.get(field) is not None:
+                        normalized[f"qfq_{field}"] = float(Decimal(str(row[field])) * factor / as_of_factor)
+            normalized["payload_hash"] = self._hash(normalized)
+            result.append(normalized)
+        return sorted(result, key=lambda item: item["trade_time"])
+
+    @staticmethod
+    def _parse_minute(value: Any) -> datetime:
+        if isinstance(value, datetime):
+            stamp = value
+        else:
+            stamp = datetime.fromisoformat(str(value).replace(" ", "T"))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=SHANGHAI)
+        return stamp.astimezone(UTC)
 
     @staticmethod
     def _parse_date(value: Any) -> date:

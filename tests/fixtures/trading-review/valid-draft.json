@@ -1,0 +1,42 @@
+{
+  "schema_version": "trading_review_draft.v1",
+  "title": "周期交易复盘",
+  "profit_sources": [
+    {
+      "narrative": "回踩确认类案例表现相对稳定，但仍需扩大样本验证",
+      "metric_refs": [
+        "reason.buy.pullback_confirmation.sample_count",
+        "reason.buy.pullback_confirmation.win_rate",
+        "account.adjusted_return_rate"
+      ]
+    }
+  ],
+  "loss_patterns": [
+    {
+      "narrative": "亏损案例的持有与退出纪律需要继续观察",
+      "metric_refs": [
+        "account.period_max_drawdown_rate",
+        "account.win_rate"
+      ]
+    }
+  ],
+  "discipline_review": {
+    "narrative": "执行纪律总体稳定，偏离时应优先复核原始计划",
+    "metric_refs": [
+      "discipline.adherence_rate"
+    ]
+  },
+  "limitations": [
+    "样本数量有限，结论仅用于复盘假设"
+  ],
+  "next_period_experiment": {
+    "hypothesis": "减少非计划内操作可能改善执行一致性",
+    "action": "下一周期仅记录并执行预先定义的交易模式",
+    "measurement": "比较执行纪律与周期结果的同步变化",
+    "success_criterion": "执行纪律改善且回撤没有恶化",
+    "metric_refs": [
+      "discipline.adherence_rate",
+      "comparison.account.adjusted_return_rate"
+    ]
+  }
+}

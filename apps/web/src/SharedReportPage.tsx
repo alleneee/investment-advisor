@@ -66,7 +66,7 @@ export function SharedReportPage({ token, api }: SharedReportPageProps) {
     setExportError(null);
     try {
       const blob = await toBlob(reportRef.current, {
-        backgroundColor: "#101920",
+        backgroundColor: "#131313",
         cacheBust: true,
         pixelRatio: 2,
         style: { margin: "0" },

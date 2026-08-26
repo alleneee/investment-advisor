@@ -73,6 +73,49 @@ async def test_rejects_a_second_trading_account() -> None:
 
 
 @pytest.mark.anyio
+async def test_calendar_month_counts_executions_and_reviews_by_trade_date() -> None:
+    app = create_app(database=Database())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/api/trading/account", json=_account())).status_code == 201
+        first = await client.post("/api/trading/executions", json=_execution())
+        second = await client.post(
+            "/api/trading/executions",
+            json=_execution("33333333-3333-4333-8333-333333333333", executed_at="2026-01-12T10:00:00+08:00"),
+        )
+        review = await client.put(
+            "/api/trading/daily-reviews/2026-01-10",
+            json={
+                "status": "draft",
+                "invalidation_condition": "跌破日内低点",
+                "next_day_plan": "观察",
+                "emotion": "calm",
+                "discipline_followed": None,
+                "note": "首仓",
+            },
+        )
+        calendar = await client.get("/api/trading/calendar", params={"month": "2026-01"})
+        invalid = await client.get("/api/trading/calendar", params={"month": "2026-13"})
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert review.status_code == 200
+    assert calendar.status_code == 200
+    body = calendar.json()
+    assert body["month"] == "2026-01"
+    by_date = {item["date"]: item for item in body["days"]}
+    assert by_date["2026-01-10"]["execution_count"] == 1
+    assert by_date["2026-01-12"]["execution_count"] == 1
+    assert by_date["2026-01-11"]["execution_count"] == 0
+    assert by_date["2026-01-10"]["review_status"] == "draft"
+    assert by_date["2026-01-12"]["review_status"] is None
+    assert by_date["2026-01-10"]["is_open"] is False
+    assert by_date["2026-01-12"]["is_open"] is True
+    assert len(body["days"]) == 31
+    assert invalid.status_code == 400
+
+
+@pytest.mark.anyio
 async def test_execution_is_normalized_idempotent_and_rejects_an_inconsistent_key() -> None:
     app = create_app(database=Database())
     payload = _execution()

@@ -1,0 +1,155 @@
+{
+  "schema_version": "trading_review_model_input.v1",
+  "period": {
+    "kind": "week",
+    "trading_day_count": 5,
+    "partial_period": false
+  },
+  "sample": {
+    "closed_cycle_count": 6,
+    "overall_conclusion_allowed": true
+  },
+  "metrics": {
+    "account_adjusted_return_rate": 0.0198,
+    "period_max_drawdown_rate": 0.031,
+    "win_rate": 0.5,
+    "average_win_loss_ratio": 1.8,
+    "profit_factor": 1.35,
+    "median_holding_days": 3,
+    "median_capital_efficiency": 0.42,
+    "discipline_adherence_rate": 0.8
+  },
+  "reason_groups": [
+    {
+      "side": "buy",
+      "reason_code": "pullback_confirmation",
+      "sample_count": 5,
+      "conclusion_allowed": true,
+      "win_rate": 0.6,
+      "average_cycle_return_rate": 0.018
+    },
+    {
+      "side": "sell",
+      "reason_code": "take_profit",
+      "sample_count": 5,
+      "conclusion_allowed": true,
+      "win_rate": 0.6,
+      "average_cycle_return_rate": 0.018
+    }
+  ],
+  "metric_registry": [
+    {
+      "ref": "account.adjusted_return_rate",
+      "value": 0.0198,
+      "conclusion_allowed": true
+    },
+    {
+      "ref": "account.period_max_drawdown_rate",
+      "value": 0.031,
+      "conclusion_allowed": true
+    },
+    {
+      "ref": "account.win_rate",
+      "value": 0.5,
+      "conclusion_allowed": true
+    },
+    {
+      "ref": "discipline.adherence_rate",
+      "value": 0.8,
+      "conclusion_allowed": true
+    },
+    {
+      "ref": "reason.buy.pullback_confirmation.sample_count",
+      "value": 5,
+      "conclusion_allowed": true
+    },
+    {
+      "ref": "reason.buy.pullback_confirmation.win_rate",
+      "value": 0.6,
+      "conclusion_allowed": true
+    },
+    {
+      "ref": "reason.buy.pullback_confirmation.average_cycle_return_rate",
+      "value": 0.018,
+      "conclusion_allowed": true
+    },
+    {
+      "ref": "reason.sell.take_profit.sample_count",
+      "value": 5,
+      "conclusion_allowed": true
+    },
+    {
+      "ref": "reason.sell.take_profit.win_rate",
+      "value": 0.6,
+      "conclusion_allowed": true
+    },
+    {
+      "ref": "reason.sell.take_profit.average_cycle_return_rate",
+      "value": 0.018,
+      "conclusion_allowed": true
+    },
+    {
+      "ref": "comparison.account.adjusted_return_rate",
+      "value": 0.006,
+      "conclusion_allowed": true
+    },
+    {
+      "ref": "quality.partial_period",
+      "value": false,
+      "conclusion_allowed": false
+    }
+  ],
+  "cases": [
+    {
+      "case_label": "case_a",
+      "cycle_return_rate": 0.038,
+      "holding_days": 4,
+      "buy_reason_code": "pullback_confirmation",
+      "sell_reason_code": "take_profit",
+      "discipline_followed": true
+    },
+    {
+      "case_label": "case_b",
+      "cycle_return_rate": -1.5,
+      "holding_days": 1,
+      "buy_reason_code": "event_driven",
+      "sell_reason_code": "stop_loss",
+      "discipline_followed": false
+    }
+  ],
+  "comparison": [
+    {
+      "metric_ref": "account.adjusted_return_rate",
+      "delta": 0.006
+    },
+    {
+      "metric_ref": "account.period_max_drawdown_rate",
+      "delta": -0.01
+    },
+    {
+      "metric_ref": "account.win_rate",
+      "delta": 0.1
+    },
+    {
+      "metric_ref": "account.average_win_loss_ratio",
+      "delta": null
+    },
+    {
+      "metric_ref": "account.profit_factor",
+      "delta": null
+    },
+    {
+      "metric_ref": "account.median_holding_days",
+      "delta": -1
+    },
+    {
+      "metric_ref": "account.median_capital_efficiency",
+      "delta": 0.05
+    },
+    {
+      "metric_ref": "discipline.adherence_rate",
+      "delta": 0.2
+    }
+  ],
+  "quality_warnings": []
+}

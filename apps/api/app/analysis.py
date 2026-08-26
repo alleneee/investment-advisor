@@ -6,13 +6,13 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 
 from .domain.chan_engine import CanonicalBar, ChanEngine
-from .providers.tushare import MarketProviderError, TushareMarketProvider
+from .providers.tushare import MarketProviderError
 
 Timeframe = Literal["1d", "1w"]
 
 
 class MarketAnalysisService:
-    def __init__(self, provider: TushareMarketProvider, history_store: Any | None = None) -> None:
+    def __init__(self, provider: Any, history_store: Any | None = None) -> None:
         self.provider = provider
         self.history_store = history_store
 
@@ -51,7 +51,7 @@ class MarketAnalysisService:
             if rows and self.history_store:
                 self.history_store.save_market_history(*cache_key, rows)
         if not rows:
-            raise MarketProviderError("Tushare 未返回指定日期前的行情")
+            raise MarketProviderError("行情数据源未返回指定日期前的行情")
         bars = [self._bar(symbol, row) for row in rows]
         bars.sort(key=lambda item: item.occurred_at)
         snapshot = ChanEngine().replay(bars)
@@ -69,7 +69,7 @@ class MarketAnalysisService:
         return {
             "market_snapshot": {
                 "snapshot_id": snapshot_id,
-                "source": "tushare",
+                "source": getattr(self.provider, "source", "tushare"),
                 "adjustment": adjustment,
                 "bars": [bar.as_dict() for bar in bars],
                 "window": {
@@ -82,7 +82,7 @@ class MarketAnalysisService:
             },
             "chan_analysis": {
                 "analysis_id": f"chan-{snapshot_id[:24]}",
-                "engine_version": "chan-engine.v1.1",
+                "engine_version": "chan-engine.v1.2",
                 "timeframe": timeframe,
                 "snapshot": snapshot,
             },

@@ -173,6 +173,51 @@ def period_max_drawdown(points: Iterable[NavPoint | Mapping[str, Any]]) -> Decim
     return maximum if found else None
 
 
+def window_max_drawdown(points: Sequence[NavPoint], start: date, end: date) -> Decimal | None:
+    window = [point.nav for point in points if start <= point.date <= end and point.nav is not None]
+    if not window:
+        return None
+    peak = window[0]
+    if peak <= 0:
+        return None
+    maximum = Decimal(0)
+    for nav in window:
+        peak = max(peak, nav)
+        maximum = max(maximum, Decimal(1) - nav / peak)
+    return maximum
+
+
+def period_return_curve(
+    points: Sequence[NavPoint], start: date, end: date
+) -> list[dict[str, Any]]:
+    window = [point for point in points if start <= point.date <= end]
+    base_index = next(
+        (
+            index
+            for index, point in enumerate(window)
+            if point.nav is not None and point.nav > 0
+        ),
+        None,
+    )
+    base_nav = window[base_index].nav if base_index is not None else None
+    result: list[dict[str, Any]] = []
+    for index, point in enumerate(window):
+        if base_index is None or index < base_index or point.nav is None:
+            metric = nullable_metric(
+                None,
+                point.unavailable_reason or "zero_equity_baseline",
+            )
+        else:
+            metric = nullable_metric(point.nav / base_nav - Decimal(1), None)
+        result.append(
+            {
+                "date": point.date.isoformat(),
+                "cumulative_return_rate": metric,
+            }
+        )
+    return result
+
+
 def nullable_metric(
     value: Decimal | int | str | None,
     reason: UnavailableReason | None,
@@ -219,6 +264,66 @@ def _event_from_execution(row: Mapping[str, Any]) -> LedgerEvent:
         fee=_decimal(row.get("fee", "0"), field="fee"),
         primary_reason=str(row.get("primary_reason")) if row.get("primary_reason") is not None else None,
     )
+
+
+def _symbols_for_valuation(
+    executions: Sequence[Mapping[str, Any]],
+    positions: Iterable[str],
+) -> list[str]:
+    symbols = {str(row["symbol"]) for row in executions if row.get("symbol")}
+    symbols.update(positions)
+    return sorted(symbols)
+
+
+def _cash_flow_by_day(
+    cash_flows: Sequence[Mapping[str, Any]],
+    valuation_dates: Sequence[date],
+) -> dict[date, Decimal]:
+    flow_by_day: dict[date, Decimal] = defaultdict(Decimal)
+    for row in cash_flows:
+        occurred = _business_date(row["occurred_at"])
+        amount = _decimal(row["amount"])
+        flow_by_day[occurred] += amount if row["kind"] == "deposit" else -amount
+    for flow_date, flow in list(flow_by_day.items()):
+        target = next((day for day in valuation_dates if day >= flow_date), None)
+        if target is not None and target != flow_date:
+            flow_by_day[target] += flow
+            del flow_by_day[flow_date]
+    return flow_by_day
+
+
+def _mark_to_market_valuations(
+    *,
+    initial_capital: Decimal,
+    events: Sequence[LedgerEvent],
+    prices: Mapping[tuple[str, date], Mapping[str, Any]],
+    valuation_dates: Sequence[date],
+    flow_by_day: Mapping[date, Decimal],
+) -> list[dict[str, Any]]:
+    valuations: list[dict[str, Any]] = []
+    carried_flow = Decimal(0)
+    for valuation_date in valuation_dates:
+        included = [event for event in events if event.occurred_at.date() <= valuation_date]
+        result = replay_ledger(initial_capital, included)
+        market_value = Decimal(0)
+        missing = False
+        for symbol, position in result.positions.items():
+            price_row = prices.get((symbol, valuation_date))
+            if price_row is None:
+                missing = True
+                break
+            market_value += Decimal(position.quantity) * _decimal(price_row["close"])
+        day_flow = flow_by_day.get(valuation_date, Decimal(0)) + carried_flow
+        if missing:
+            carried_flow = day_flow
+            continue
+        carried_flow = Decimal(0)
+        valuations.append({
+            "date": valuation_date,
+            "equity": result.cash + market_value,
+            "external_flow": day_flow,
+        })
+    return valuations
 
 
 def _event_from_cash_flow(row: Mapping[str, Any]) -> LedgerEvent:
@@ -652,7 +757,7 @@ def build_chart_bundle(
         "adjustment": "none",
         "market_snapshot_id": market_snapshot_id,
         "chan_analysis_id": f"chan-{market_snapshot_id[:24]}",
-        "chan_engine_version": "chan-engine.v1.1",
+        "chan_engine_version": "chan-engine.v1.2",
         "bars": normalized,
         "strokes": stroke_items,
         "centers": center_items,
@@ -702,9 +807,9 @@ def _provider_daily(
     end_date: date,
 ) -> list[dict[str, Any]]:
     if provider is None:
-        from ..providers.tushare import TushareMarketProvider
+        from ..providers.factory import create_market_provider
 
-        provider = TushareMarketProvider()
+        provider = create_market_provider()
     method = getattr(provider, "daily", None) or getattr(provider, "get_daily", None)
     if method is None:
         raise ValueError("行情 provider 必须提供 daily")
@@ -829,9 +934,9 @@ class AccountValuationService:
             return list(self._calendar_cache[cache_key])
         if self.calendar_provider is None:
             try:
-                from ..providers.tushare import TushareMarketProvider
+                from ..providers.factory import create_market_provider
 
-                self.calendar_provider = TushareMarketProvider()
+                self.calendar_provider = create_market_provider()
             except (RuntimeError, TypeError, ValueError):
                 return []
         try:
@@ -938,44 +1043,24 @@ class AccountValuationService:
         activation = _business_date(account["activated_on"])
         events = [_event_from_cash_flow(row) for row in cash_flows]
         events.extend(_event_from_execution(row) for row in executions)
-        current_result = replay_ledger(_decimal(account["initial_capital"]), [event for event in events if event.occurred_at.date() <= as_of])
-        symbols = sorted(current_result.positions)
+        initial_capital = _decimal(account["initial_capital"])
+        current_result = replay_ledger(initial_capital, [event for event in events if event.occurred_at.date() <= as_of])
+        symbols = _symbols_for_valuation(executions, current_result.positions)
         valuation_dates = self._calendar_dates(activation, as_of)
         calendar_available = bool(valuation_dates)
         prices, quality, warnings = self._market_prices(account["account_id"], symbols, valuation_dates)
-        valuations: list[dict[str, Any]] = []
-        flow_by_day: dict[date, Decimal] = defaultdict(Decimal)
-        for row in cash_flows:
-            occurred = _business_date(row["occurred_at"])
-            amount = _decimal(row["amount"])
-            flow_by_day[occurred] += amount if row["kind"] == "deposit" else -amount
-        for flow_date, flow in list(flow_by_day.items()):
-            target = next((day for day in valuation_dates if day >= flow_date), None)
-            if target is not None and target != flow_date:
-                flow_by_day[target] += flow
-                del flow_by_day[flow_date]
-        for valuation_date in valuation_dates:
-            included = [event for event in events if event.occurred_at.date() <= valuation_date]
-            result = replay_ledger(_decimal(account["initial_capital"]), included)
-            market_value = Decimal(0)
-            missing = False
-            for symbol, position in result.positions.items():
-                price_row = prices.get((symbol, valuation_date))
-                if price_row is None:
-                    missing = True
-                    continue
-                market_value += Decimal(position.quantity) * _decimal(price_row["close"])
-            if missing:
-                continue
-            valuations.append({
-                "date": valuation_date,
-                "equity": result.cash + market_value,
-                "external_flow": flow_by_day.get(valuation_date, Decimal(0)),
-            })
+        flow_by_day = _cash_flow_by_day(cash_flows, valuation_dates)
+        valuations = _mark_to_market_valuations(
+            initial_capital=initial_capital,
+            events=events,
+            prices=prices,
+            valuation_dates=valuation_dates,
+            flow_by_day=flow_by_day,
+        )
+        nav_points = build_nav(base_equity=initial_capital, valuations=valuations)
         if valuations and not (quality == "unavailable" and symbols):
-            nav_points = build_nav(base_equity=_decimal(account["initial_capital"]), valuations=valuations)
             last = nav_points[-1]
-            position_market_value = valuations[-1]["equity"] - replay_ledger(_decimal(account["initial_capital"]), [event for event in events if event.occurred_at.date() <= valuations[-1]["date"]]).cash
+            position_market_value = valuations[-1]["equity"] - replay_ledger(initial_capital, [event for event in events if event.occurred_at.date() <= valuations[-1]["date"]]).cash
             daily_pnl = None if last.previous_equity is None else last.equity - last.previous_equity - last.external_flow
             return {
                 "account_id": account["account_id"],
@@ -1008,6 +1093,46 @@ class AccountValuationService:
             "data_quality_warnings": ["missing_close_price"] if symbols else [],
         }
 
+    def nav_points(
+        self,
+        account: Mapping[str, Any],
+        executions: Sequence[Mapping[str, Any]],
+        cash_flows: Sequence[Mapping[str, Any]],
+    ) -> list[NavPoint]:
+        activation = _business_date(account["activated_on"])
+        events = [_event_from_cash_flow(row) for row in cash_flows]
+        events.extend(_event_from_execution(row) for row in executions)
+        initial_capital = _decimal(account["initial_capital"])
+        current_result = replay_ledger(
+            initial_capital,
+            [event for event in events if event.occurred_at.date() <= self._now().date()],
+        )
+        symbols = _symbols_for_valuation(executions, current_result.positions)
+        valuation_dates = self._calendar_dates(activation, self._now().date())
+        prices, _quality, _warnings = self._market_prices(account["account_id"], symbols, valuation_dates)
+        flow_by_day = _cash_flow_by_day(cash_flows, valuation_dates)
+        valuations = _mark_to_market_valuations(
+            initial_capital=initial_capital,
+            events=events,
+            prices=prices,
+            valuation_dates=valuation_dates,
+            flow_by_day=flow_by_day,
+        )
+        return build_nav(base_equity=initial_capital, valuations=valuations)
+
+    def daily_pnl_series(
+        self,
+        account: Mapping[str, Any],
+        executions: Sequence[Mapping[str, Any]],
+        cash_flows: Sequence[Mapping[str, Any]],
+    ) -> dict[date, Decimal]:
+        series: dict[date, Decimal] = {}
+        for point in self.nav_points(account, executions, cash_flows):
+            if point.previous_equity is None:
+                continue
+            series[point.date] = point.equity - point.previous_equity - point.external_flow
+        return series
+
 
 __all__ = [
     "AccountValuationService",
@@ -1022,7 +1147,9 @@ __all__ = [
     "holding_trade_days",
     "nullable_metric",
     "period_max_drawdown",
+    "period_return_curve",
     "previous_period_bounds",
     "raw_bar_digest",
     "replay_rows",
+    "window_max_drawdown",
 ]

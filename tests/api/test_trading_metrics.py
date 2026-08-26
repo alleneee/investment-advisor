@@ -16,6 +16,7 @@ from app.trading.metrics import (
     compare_period_metrics,
     holding_trade_days,
     period_max_drawdown,
+    period_return_curve,
     previous_period_bounds,
     raw_bar_digest,
 )
@@ -86,6 +87,111 @@ def test_period_drawdown_uses_period_start_as_peak() -> None:
     )
 
     assert period_max_drawdown(points) == Decimal("0.25")
+
+
+def test_period_return_curve_normalizes_positive_nav_and_keeps_gaps() -> None:
+    points = [
+        NavPoint(date(2026, 1, 1), Decimal(1), Decimal(0), None, Decimal(2), None),
+        NavPoint(date(2026, 1, 2), Decimal(0), Decimal(0), None, Decimal(0), None),
+        NavPoint(
+            date(2026, 1, 3),
+            Decimal(0),
+            Decimal(0),
+            None,
+            None,
+            None,
+            "no_sample",
+        ),
+        NavPoint(date(2026, 1, 4), Decimal(0), Decimal(0), None, None, None),
+        NavPoint(date(2026, 1, 5), Decimal(100), Decimal(100), None, Decimal(1), Decimal(0)),
+        NavPoint(date(2026, 1, 6), Decimal(110), Decimal(0), None, Decimal("1.1"), Decimal(0)),
+        NavPoint(
+            date(2026, 1, 7),
+            Decimal(110),
+            Decimal(0),
+            None,
+            None,
+            None,
+            "zero_equity_baseline",
+        ),
+        NavPoint(date(2026, 1, 8), Decimal(0), Decimal(0), None, Decimal(0), Decimal(1)),
+        NavPoint(date(2026, 1, 9), Decimal(1), Decimal(0), None, Decimal(1), Decimal(0)),
+    ]
+
+    assert period_return_curve(points, date(2026, 1, 2), date(2026, 1, 8)) == [
+        {
+            "date": "2026-01-02",
+            "cumulative_return_rate": {
+                "value": None,
+                "unavailable_reason": "zero_equity_baseline",
+            },
+        },
+        {
+            "date": "2026-01-03",
+            "cumulative_return_rate": {
+                "value": None,
+                "unavailable_reason": "no_sample",
+            },
+        },
+        {
+            "date": "2026-01-04",
+            "cumulative_return_rate": {
+                "value": None,
+                "unavailable_reason": "zero_equity_baseline",
+            },
+        },
+        {
+            "date": "2026-01-05",
+            "cumulative_return_rate": {"value": "0", "unavailable_reason": None},
+        },
+        {
+            "date": "2026-01-06",
+            "cumulative_return_rate": {"value": "0.1", "unavailable_reason": None},
+        },
+        {
+            "date": "2026-01-07",
+            "cumulative_return_rate": {
+                "value": None,
+                "unavailable_reason": "zero_equity_baseline",
+            },
+        },
+        {
+            "date": "2026-01-08",
+            "cumulative_return_rate": {"value": "-1", "unavailable_reason": None},
+        },
+    ]
+
+
+def test_period_return_curve_keeps_all_dates_when_no_positive_nav_exists() -> None:
+    points = [
+        NavPoint(date(2026, 1, 2), Decimal(0), Decimal(0), None, Decimal(0), None),
+        NavPoint(
+            date(2026, 1, 5),
+            Decimal(100),
+            Decimal(0),
+            None,
+            None,
+            None,
+            "zero_equity_baseline",
+        ),
+    ]
+
+    assert period_return_curve(points, date(2026, 1, 1), date(2026, 1, 31)) == [
+        {
+            "date": "2026-01-02",
+            "cumulative_return_rate": {
+                "value": None,
+                "unavailable_reason": "zero_equity_baseline",
+            },
+        },
+        {
+            "date": "2026-01-05",
+            "cumulative_return_rate": {
+                "value": None,
+                "unavailable_reason": "zero_equity_baseline",
+            },
+        },
+    ]
 
 
 @pytest.mark.parametrize(
@@ -323,7 +429,14 @@ class FakeMarketProvider:
 
     def daily(self, symbol: str, *, as_of: date, start_date: date | None = None, end_date: date | None = None) -> list[dict]:
         self.calls += 1
-        return [row for row in self.rows if _date(row["trade_date"]) <= as_of]
+        rows = []
+        for row in self.rows:
+            if _date(row["trade_date"]) > as_of:
+                continue
+            if "symbol" in row and row["symbol"] != symbol:
+                continue
+            rows.append({key: value for key, value in row.items() if key != "symbol"})
+        return rows
 
 
 class FakeCalendarProvider:
@@ -786,3 +899,240 @@ async def test_calendar_failure_is_retried_for_same_range_and_can_recover() -> N
 
     assert RecoveringCalendarProvider.calls == 2
     assert account.json()["valuation_date"] == "2026-01-05"
+
+
+def _bar(symbol: str, day: str, close: str) -> dict:
+    return {
+        "symbol": symbol,
+        "trade_date": day.replace("-", ""),
+        "open": close,
+        "high": close,
+        "low": close,
+        "close": close,
+        "vol": "1000",
+    }
+
+
+@pytest.mark.anyio
+async def test_calendar_values_sold_holdings_and_does_not_count_deposits_as_pnl() -> None:
+    provider = FakeMarketProvider(
+        [
+            _bar("600000.SH", "2026-01-05", "10"),
+            _bar("600000.SH", "2026-01-06", "10"),
+            _bar("600000.SH", "2026-01-07", "10"),
+            _bar("600519.SH", "2026-01-07", "10"),
+        ]
+    )
+    calendar = FakeCalendarProvider([date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7)])
+    app = create_app(
+        database=Database(),
+        trading_market_provider=provider,
+        trading_calendar_provider=calendar,
+        trading_clock=lambda: datetime(2026, 1, 7, 16, tzinfo=SHANGHAI),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/api/trading/account", json={"name": "主账户", "activated_on": "2026-01-05", "initial_capital": "100000"})).status_code == 201
+        assert (await client.post("/api/trading/executions", json={
+            "symbol": "600000.SH",
+            "name": "浦发银行",
+            "executed_at": "2026-01-05T10:00:00+08:00",
+            "side": "buy",
+            "price": "10",
+            "quantity": 1000,
+            "fee": "0",
+            "primary_reason": "other",
+            "tags": [],
+            "note": "",
+            "client_idempotency_key": "11111111-1111-4111-8111-111111111111",
+        })).status_code == 201
+        assert (await client.post("/api/trading/cash-flows", json={
+            "occurred_at": "2026-01-06T10:00:00+08:00",
+            "kind": "deposit",
+            "amount": "50000",
+            "note": "转入",
+            "client_idempotency_key": "22222222-2222-4222-8222-222222222222",
+        })).status_code == 201
+        assert (await client.post("/api/trading/executions", json={
+            "symbol": "600000.SH",
+            "name": "浦发银行",
+            "executed_at": "2026-01-07T10:00:00+08:00",
+            "side": "sell",
+            "price": "10",
+            "quantity": 1000,
+            "fee": "0",
+            "primary_reason": "other",
+            "tags": [],
+            "note": "",
+            "client_idempotency_key": "33333333-3333-4333-8333-333333333333",
+        })).status_code == 201
+        assert (await client.post("/api/trading/executions", json={
+            "symbol": "600519.SH",
+            "name": "贵州茅台",
+            "executed_at": "2026-01-07T10:01:00+08:00",
+            "side": "buy",
+            "price": "10",
+            "quantity": 1000,
+            "fee": "0",
+            "primary_reason": "other",
+            "tags": [],
+            "note": "",
+            "client_idempotency_key": "44444444-4444-4444-8444-444444444444",
+        })).status_code == 201
+        month = await client.get("/api/trading/calendar", params={"month": "2026-01"})
+
+    assert month.status_code == 200
+    by_date = {item["date"]: item for item in month.json()["days"]}
+    assert by_date["2026-01-05"]["daily_pnl"] == "0.00"
+    assert by_date["2026-01-06"]["daily_pnl"] == "0.00"
+    assert by_date["2026-01-07"]["daily_pnl"] == "0.00"
+    assert month.json()["net_pnl"] == "0.00"
+
+
+@pytest.mark.anyio
+async def test_period_summary_drawdown_is_intra_month_not_since_inception() -> None:
+    provider = FakeMarketProvider(
+        [
+            _bar("600000.SH", "2026-01-05", "10"),
+            _bar("600000.SH", "2026-01-06", "7"),
+            _bar("600000.SH", "2026-02-05", "7.2"),
+            _bar("600000.SH", "2026-02-06", "7"),
+        ]
+    )
+    calendar = FakeCalendarProvider(
+        [date(2026, 1, 5), date(2026, 1, 6), date(2026, 2, 5), date(2026, 2, 6)]
+    )
+    app = create_app(
+        database=Database(),
+        trading_market_provider=provider,
+        trading_calendar_provider=calendar,
+        trading_clock=lambda: datetime(2026, 2, 6, 16, tzinfo=SHANGHAI),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/api/trading/account", json={"name": "主账户", "activated_on": "2026-01-05", "initial_capital": "100000"})).status_code == 201
+        assert (await client.post("/api/trading/executions", json={
+            "symbol": "600000.SH",
+            "name": "浦发银行",
+            "executed_at": "2026-01-05T10:00:00+08:00",
+            "side": "buy",
+            "price": "10",
+            "quantity": 9000,
+            "fee": "0",
+            "primary_reason": "other",
+            "tags": [],
+            "note": "",
+            "client_idempotency_key": "11111111-1111-4111-8111-111111111111",
+        })).status_code == 201
+        january = await client.get("/api/trading/calendar", params={"month": "2026-01"})
+        february = await client.get("/api/trading/calendar", params={"month": "2026-02"})
+        account = await client.get("/api/trading/account")
+        february_window = await client.get(
+            "/api/trading/period-summary", params={"start": "2026-02-05", "end": "2026-02-06"}
+        )
+        year_window = await client.get(
+            "/api/trading/period-summary", params={"start": "2026-01-01", "end": "2026-12-31"}
+        )
+        inverted = await client.get(
+            "/api/trading/period-summary", params={"start": "2026-02-06", "end": "2026-02-05"}
+        )
+
+    assert january.status_code == 200
+    assert february.status_code == 200
+    january_dd = Decimal(january.json()["max_drawdown"])
+    february_dd = Decimal(february.json()["max_drawdown"])
+    since_inception = Decimal(account.json()["since_inception_drawdown"])
+    assert january_dd == Decimal("0.27")
+    assert february_dd < Decimal("0.05")
+    assert since_inception == Decimal("0.27")
+    assert february_dd != since_inception
+    assert february_window.status_code == 200
+    assert Decimal(february_window.json()["max_drawdown"]) == february_dd
+    february_curve = february_window.json()["return_curve"]
+    assert [point["date"] for point in february_curve] == ["2026-02-05", "2026-02-06"]
+    assert february_curve[0]["cumulative_return_rate"] == {
+        "value": "0",
+        "unavailable_reason": None,
+    }
+    assert year_window.status_code == 200
+    assert Decimal(year_window.json()["max_drawdown"]) == since_inception
+    assert inverted.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_period_summary_cash_flows_do_not_create_cumulative_return() -> None:
+    calendar = FakeCalendarProvider(
+        [date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7)]
+    )
+    app = create_app(
+        database=Database(),
+        trading_market_provider=FakeMarketProvider([]),
+        trading_calendar_provider=calendar,
+        trading_clock=lambda: datetime(2026, 1, 7, 16, tzinfo=SHANGHAI),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/api/trading/account", json={
+            "name": "主账户",
+            "activated_on": "2026-01-05",
+            "initial_capital": "100",
+        })).status_code == 201
+        assert (await client.post("/api/trading/cash-flows", json={
+            "occurred_at": "2026-01-06T10:00:00+08:00",
+            "kind": "deposit",
+            "amount": "50",
+            "note": "入金",
+            "client_idempotency_key": "55555555-5555-4555-8555-555555555555",
+        })).status_code == 201
+        assert (await client.post("/api/trading/cash-flows", json={
+            "occurred_at": "2026-01-07T10:00:00+08:00",
+            "kind": "withdrawal",
+            "amount": "20",
+            "note": "出金",
+            "client_idempotency_key": "66666666-6666-4666-8666-666666666666",
+        })).status_code == 201
+        summary = await client.get(
+            "/api/trading/period-summary",
+            params={"start": "2026-01-05", "end": "2026-01-07"},
+        )
+
+    assert summary.status_code == 200
+    assert summary.json()["return_curve"] == [
+        {
+            "date": day,
+            "cumulative_return_rate": {"value": "0", "unavailable_reason": None},
+        }
+        for day in ["2026-01-05", "2026-01-06", "2026-01-07"]
+    ]
+
+
+@pytest.mark.anyio
+async def test_period_summary_returns_failure_when_valuation_fails(monkeypatch) -> None:
+    app = create_app(
+        database=Database(),
+        trading_market_provider=FakeMarketProvider([]),
+        trading_calendar_provider=FakeCalendarProvider([date(2026, 1, 5)]),
+        trading_clock=lambda: datetime(2026, 1, 5, 16, tzinfo=SHANGHAI),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/api/trading/account", json={
+            "name": "主账户",
+            "activated_on": "2026-01-05",
+            "initial_capital": "100",
+        })).status_code == 201
+        monkeypatch.setattr(
+            "app.trading.metrics.AccountValuationService.nav_points",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("估值失败")),
+        )
+        summary = await client.get(
+            "/api/trading/period-summary",
+            params={"start": "2026-01-05", "end": "2026-01-05"},
+        )
+
+    assert summary.status_code == 500
+    assert summary.json() == {
+        "status": "failed",
+        "error": {"code": "INTERNAL_ERROR", "message": "交易服务内部错误"},
+        "retryable": True,
+    }

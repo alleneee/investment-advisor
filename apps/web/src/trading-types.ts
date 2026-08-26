@@ -87,6 +87,31 @@ export interface DailyReview {
   dailyReviewRevision: number;
 }
 
+export interface TradingCalendarDay {
+  date: string;
+  executionCount: number;
+  dailyPnl: string | null;
+  reviewStatus: DailyReviewStatus | null;
+  isOpen: boolean;
+}
+
+export interface TradingCalendarMonth {
+  month: string;
+  netPnl: string | null;
+  maxDrawdown: string | null;
+  days: TradingCalendarDay[];
+}
+
+export interface TradingPeriodSummary {
+  start: string;
+  end: string;
+  maxDrawdown: string | null;
+  returnCurve: Array<{
+    date: string;
+    cumulativeReturnRate: NullableDecimalMetric;
+  }>;
+}
+
 export interface NullableDecimalMetric {
   value: string | null;
   unavailableReason: string | null;

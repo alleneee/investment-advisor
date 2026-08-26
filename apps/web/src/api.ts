@@ -27,6 +27,7 @@ import type {
   SharedReport,
   SharedReportOutcome,
   StockInformation,
+  StockSuggestion,
   StructureFact,
   Timeframe,
   WatchItem,
@@ -55,6 +56,7 @@ export interface WorkbenchApi {
   getWatchlist(): Promise<WatchItem[]>;
   addWatchlist(symbol: string): Promise<WatchItem>;
   removeWatchlist(symbol: string): Promise<void>;
+  searchStocks(query: string): Promise<StockSuggestion[]>;
   createBatch(): Promise<{ id: string }>;
   getProgress(): Promise<RunProgress[]>;
   getReport(symbol: string, timeframe: Timeframe): Promise<Report>;
@@ -99,6 +101,8 @@ export interface MarketAnalysisResponse {
       confirmed: Array<Record<string, unknown>>;
       provisional: Array<Record<string, unknown>>;
       centers: Array<Record<string, unknown>>;
+      segments?: Array<Record<string, unknown>>;
+      segment_centers?: Array<Record<string, unknown>>;
     };
   };
 }
@@ -241,15 +245,34 @@ export function createMockApi(initialError?: string): WorkbenchApi {
   const mockReviews = new Map<string, ReportReviewStatus>();
   const mockPublications = new Map<string, string>();
   const mockShares = new Map<string, string>();
+  const universe: StockSuggestion[] = [
+    { symbol: "600519.SH", name: "贵州茅台", cnspell: "gzmt" },
+    { symbol: "000858.SZ", name: "五粮液", cnspell: "wly" },
+    { symbol: "601318.SH", name: "中国平安", cnspell: "zgpa" },
+    { symbol: "000333.SZ", name: "美的集团", cnspell: "mdjt" },
+    { symbol: "600036.SH", name: "招商银行", cnspell: "zsyh" },
+    { symbol: "002940.SZ", name: "昂利康", cnspell: "alk" },
+    { symbol: "300750.SZ", name: "宁德时代", cnspell: "ndsd" },
+  ];
   return {
     async getWatchlist() {
       return watchlist;
+    },
+    async searchStocks(query) {
+      const q = query.trim().toLowerCase();
+      if (!q) return [];
+      return universe.filter((item) => (
+        item.name.includes(query.trim())
+        || item.symbol.toLowerCase().includes(q)
+        || item.cnspell.startsWith(q)
+      )).slice(0, 8);
     },
     async addWatchlist(symbol) {
       if (initialError) throw new ApiError(initialError, 503);
       if (watchlist.length >= 50) throw new ApiError("自选池最多 50 只股票", 409);
       const normalized = symbol.includes(".") ? symbol : normalizeSymbol(symbol);
-      const item = { symbol: normalized, name: normalized, market: normalized.endsWith(".SH") ? "SH" : "SZ" as "SH" | "SZ" };
+      const known = universe.find((item) => item.symbol === normalized);
+      const item = { symbol: normalized, name: known?.name ?? normalized, market: normalized.endsWith(".SH") ? "SH" : "SZ" as "SH" | "SZ" };
       watchlist = [...watchlist, item];
       return item;
     },
@@ -436,8 +459,19 @@ export function createHttpApi(baseUrl: string): WorkbenchApi {
       if (result[0]) activeSymbol = result[0].symbol;
       return result;
     },
+    async searchStocks(query) {
+      const rows = await request<Array<{ symbol: string; name?: string; cnspell?: string }>>(
+        `/api/stocks?q=${encodeURIComponent(query)}`,
+      );
+      if (!Array.isArray(rows)) throw adapterError("股票搜索结果无效");
+      return rows.map((row) => ({
+        symbol: row.symbol,
+        name: row.name ?? row.symbol,
+        cnspell: row.cnspell ?? "",
+      }));
+    },
     async addWatchlist(symbol) {
-      const row = await request<{ symbol: string }>("/api/watchlist", {
+      const row = await request<{ symbol: string; name?: string }>("/api/watchlist", {
         method: "POST",
         body: JSON.stringify({ symbol }),
       });
@@ -1288,11 +1322,15 @@ export function toReport(
   const confirmedStrokes = snapshot.confirmed.flatMap((stroke) => toStroke(stroke, "confirmed", structureDates));
   const provisionalStrokes = snapshot.provisional.flatMap((stroke) => toStroke(stroke, "provisional", structureDates));
   const centers = snapshot.centers.flatMap((center) => toCenter(center, structureDates));
+  const segments = (snapshot.segments ?? []).flatMap((segment) => toStroke(segment, segment.status === "provisional" ? "provisional" : "confirmed", structureDates));
+  const segmentCenters = (snapshot.segment_centers ?? []).flatMap((center) => toCenter(center, structureDates));
   const chart: ChanChartData = {
     timeframe,
     bars,
     strokes: [...confirmedStrokes, ...provisionalStrokes],
     centers,
+    segments,
+    segmentCenters,
   };
   const confirmed = confirmedStrokes.length;
   const provisional = provisionalStrokes.length;

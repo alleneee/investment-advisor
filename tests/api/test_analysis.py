@@ -47,7 +47,7 @@ async def test_market_analysis_connects_tushare_to_chan_engine():
     assert payload["market_snapshot"]["window"]["bar_count"] == 3
     assert len(payload["market_snapshot"]["bars"]) == 3
     assert Decimal(payload["market_snapshot"]["bars"][0]["close"]) == Decimal(8)
-    assert payload["chan_analysis"]["engine_version"] == "chan-engine.v1.1"
+    assert payload["chan_analysis"]["engine_version"] == "chan-engine.v1.2"
     assert len(payload["chan_analysis"]["snapshot"]["bars"]) < 3
     assert payload["market_snapshot"]["bars"][0]["occurred_at"].startswith("2024-08-01")
     assert payload["chan_analysis"]["snapshot"]["bars"][0]["occurred_at"].startswith("2024-08-02")
