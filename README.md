@@ -1,4 +1,6 @@
-# Tushare → 缠论引擎 → Pi 投研报告
+# 琪先一步
+
+A 股结构投研台：Tushare → 缠论引擎 → Pi 投研报告。
 
 这是一个可运行的 A 股结构投研 MVP：Python 从 Tushare 获取并缓存行情，
 确定性 ChanEngine 计算结构，运行时公开 HTTP 数据源补充新闻、互动问答和热榜，
@@ -9,7 +11,7 @@ Node sidecar 让 Pi 只生成受证据引用约束的三情景研究叙述。Rea
 
 ```mermaid
 flowchart LR
-    A[React 结构投研台] --> B[FastAPI]
+    A[琪先一步] --> B[FastAPI]
     B --> C[(PostgreSQL 行情与资讯缓存)]
     C -- 行情未命中 --> D[Tushare Python SDK]
     C -- 资讯未命中或过期 --> E[三源公开 HTTP]
@@ -48,6 +50,15 @@ Key 读取顺序：`HITHINK_FINANCE_API_KEY`、`FUYAO_API_KEY`、`FUYAO_TOKEN`�
 - [Tushare adj_factor](https://tushare.pro/document/2?doc_id=28)
 - [Tushare trade_cal](https://tushare.pro/document/2?doc_id=26)
 
+## 运行时架构
+
+GitHub 仓库页直接看下图。交互版是单文件 HTML：克隆后用浏览器打开
+`docs/architecture/runtime-architecture.html`，主题切换、缩放和节点溯源都在文件内。
+
+[交互图 HTML](docs/architecture/runtime-architecture.html)
+
+![Investment Advisor runtime](docs/architecture/runtime-architecture.visual-check.1440x900.light.png)
+
 ## 目录
 
 - `apps/api`：FastAPI、PostgreSQL、Tushare provider、ChanEngine 编排入口。
@@ -56,8 +67,9 @@ Key 读取顺序：`HITHINK_FINANCE_API_KEY`、`FUYAO_API_KEY`、`FUYAO_TOKEN`�
 - `apps/agent-runtime`：Pi 状态机、Python RPC client、HTTP sidecar 和受限报告工具。
 - `packages/contracts`：Node 状态机、证据引用和 `ReportDraftV2` 校验，并保留
   `ReportDraftV1` 读取兼容。
-- `apps/web`：React/Vite 结构投研台，使用 hash 导航提供今日批次、研究记录和数据快照三个页面。
+- `apps/web`：React/Vite 琪先一步工作台，使用 hash 导航提供投顾报告和交易日记两个独立入口。
 - `tests/api`：Python provider、引擎、分析接口和内部 RPC 测试。
+- `docs/architecture`：运行时架构图（规格 JSON、交互 HTML、README 预览 PNG）。
 
 ## 启动
 
@@ -143,10 +155,11 @@ npm --prefix apps/web run dev
 - Python API：<http://127.0.0.1:8000>
 - Pi sidecar：<http://127.0.0.1:8081>
 
-前端菜单对应 `#/batch`、`#/records` 和 `#/snapshots`，支持刷新及浏览器前进、后退。
-点击“生成本批报告”会为当前自选池逐只创建日线 Report V2 任务，页面立即显示
+前端菜单对应 `#/advisory`（兼容 `#/batch`）和 `#/journal`，支持刷新及浏览器前进、后退。
+点击“生成投顾报告”会为当前自选池逐只创建日线 Report V2 任务，页面立即显示
 排队状态并每两秒刷新进度；已完成的报告会自动进入对应股票的 AI 条件展望区。
-今日批次桌面端将自选池和本批进度集中在左侧，结构报告位于右侧主分析区。
+投顾报告与交易日记互不共用数据：前者是自选池结构分析，后者是成交账本与周期复盘。
+投顾报告桌面端将自选池和生成进度集中在左侧，结构报告位于右侧主分析区。
 公司新闻与互动问答默认各显示前 4 条，点击栏目底部按钮可展开或收起全部资讯。
 
 报告通过审阅并发布后，在“对客交付”区域点击“生成分享链接”，再点击“打开对客报告”

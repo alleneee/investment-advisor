@@ -1,0 +1,235 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Investment Advisor runtime",
+    "locale": "en",
+    "output": "runtime-architecture.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/alleneee/investment-advisor.git",
+      "revision": "e3e0565a4a977bdfe470405293a71b08bdaa29ee"
+    },
+    "views": [
+      {
+        "id": "request-path",
+        "label": "Analyst request path",
+        "focus": ["analyst", "web", "api", "postgres"],
+        "note": "Browser workbench talks only to FastAPI; durable snapshots live in PostgreSQL."
+      },
+      {
+        "id": "cache-upstreams",
+        "label": "Cache and upstreams",
+        "focus": ["api", "postgres", "market", "info"],
+        "note": "Cache hits stay in PostgreSQL; misses go to Fuyao/Tushare or public HTTP."
+      },
+      {
+        "id": "report-loop",
+        "label": "Pi report loop",
+        "focus": ["api", "sidecar", "llm"],
+        "note": "FastAPI posts :execute; the sidecar calls Python RPC then emit_research_report."
+      }
+    ]
+  },
+  "layout": {
+    "mode": "grid",
+    "cols": 4,
+    "gapX": 120,
+    "gapY": 108,
+    "cellW": 148,
+    "cellH": 68
+  },
+  "components": [
+    {
+      "id": "analyst",
+      "type": "external",
+      "label": "Analyst",
+      "sublabel": "Browser",
+      "row": 1,
+      "col": 0
+    },
+    {
+      "id": "web",
+      "type": "frontend",
+      "label": "Workbench",
+      "sublabel": "React Vite :5173",
+      "brand": "react",
+      "row": 1,
+      "col": 1,
+      "sources": [
+        { "path": "apps/web/vite.config.ts", "line": 7, "label": "Vite :5173" },
+        { "path": "apps/web/src/main.tsx", "line": 7, "end_line": 13, "label": "VITE_API_BASE_URL" },
+        { "path": "apps/web/src/api.ts", "line": 429, "end_line": 440, "label": "createHttpApi" }
+      ]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Chan Market API",
+      "sublabel": "FastAPI :8000",
+      "brand": "fastapi",
+      "row": 1,
+      "col": 2,
+      "sources": [
+        { "path": "apps/api/app/main.py", "line": 45, "end_line": 107, "label": "create_app" },
+        { "path": "apps/api/app/analysis.py", "line": 19, "end_line": 57, "label": "ChanEngine replay" },
+        { "path": "apps/api/app/reporting.py", "line": 80, "end_line": 103, "label": "AgentRuntimeClient" }
+      ]
+    },
+    {
+      "id": "sidecar",
+      "type": "backend",
+      "label": "Pi sidecar",
+      "sublabel": "Node :8081",
+      "brand": "node-js",
+      "row": 1,
+      "col": 3,
+      "sources": [
+        { "path": "apps/agent-runtime/src/server-entry.ts", "line": 4, "end_line": 10, "label": "listen :8081" },
+        { "path": "apps/agent-runtime/src/server.ts", "line": 72, "end_line": 97, "label": "POST :execute" },
+        { "path": "apps/agent-runtime/src/rpc.ts", "line": 18, "end_line": 42, "label": "Python RPC" }
+      ]
+    },
+    {
+      "id": "llm",
+      "type": "external",
+      "label": "Pi model",
+      "sublabel": "New API glm-5.2",
+      "row": 0,
+      "col": 3,
+      "sources": [
+        { "path": "apps/agent-runtime/src/pi-session.ts", "line": 44, "end_line": 63, "label": "PI_PROVIDER MODEL KEY" }
+      ]
+    },
+    {
+      "id": "market",
+      "type": "external",
+      "label": "Fuyao / Tushare",
+      "sublabel": "MARKET_PROVIDER",
+      "row": 0,
+      "col": 2,
+      "sources": [
+        { "path": "apps/api/app/providers/factory.py", "line": 34, "end_line": 51, "label": "provider factory" },
+        { "path": "apps/api/app/providers/hithink.py", "line": 12, "end_line": 40, "label": "Fuyao REST" },
+        { "path": "apps/api/app/providers/tushare.py", "line": 24, "end_line": 47, "label": "Tushare pro_api" }
+      ]
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "PostgreSQL",
+      "sublabel": "chan_market",
+      "brand": "postgresql",
+      "row": 2,
+      "col": 2,
+      "sources": [
+        { "path": "apps/api/app/db.py", "line": 113, "end_line": 129, "label": "DATABASE_URL" }
+      ]
+    },
+    {
+      "id": "info",
+      "type": "external",
+      "label": "Info HTTP",
+      "sublabel": "Eastmoney CNINFO THS",
+      "row": 2,
+      "col": 0,
+      "sources": [
+        { "path": "apps/api/app/providers/a_stock_data.py", "line": 90, "end_line": 171, "label": "three HTTP sources" },
+        { "path": "apps/api/app/information.py", "line": 21, "end_line": 26, "label": "source TTLs" }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "127.0.0.1 local runtime",
+      "wraps": ["web", "api", "sidecar", "postgres"]
+    }
+  ],
+  "connections": [
+    {
+      "id": "analyst-to-web",
+      "from": "analyst",
+      "to": "web",
+      "label": "HTTP :5173",
+      "variant": "emphasis"
+    },
+    {
+      "id": "web-to-api",
+      "from": "web",
+      "to": "api",
+      "label": "HTTP :8000"
+    },
+    {
+      "id": "api-to-postgres",
+      "from": "api",
+      "to": "postgres",
+      "label": "SQL",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "api-to-market",
+      "from": "api",
+      "to": "market",
+      "label": "qfq history",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "api-to-info",
+      "from": "api",
+      "to": "info",
+      "label": "httpx",
+      "variant": "dashed",
+      "fromSide": "left",
+      "toSide": "top"
+    },
+    {
+      "id": "api-to-sidecar",
+      "from": "api",
+      "to": "sidecar",
+      "label": "Bearer HTTP",
+      "variant": "security"
+    },
+    {
+      "id": "sidecar-to-llm",
+      "from": "sidecar",
+      "to": "llm",
+      "label": "PI_BASE_URL",
+      "fromSide": "top",
+      "toSide": "bottom"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Three local processes",
+      "items": [
+        "Vite serves 127.0.0.1:5173",
+        "uvicorn create_app listens on :8000",
+        "npm run agent:dev binds :8081"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Cache-first reads",
+      "items": [
+        "market_history_snapshots cache qfq K-lines",
+        "info cache TTLs: 30m / 6h / 5m",
+        "ChanEngine.replay runs in-process"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Closed report loop",
+      "items": [
+        "FastAPI freezes snapshots then POST :execute",
+        "Sidecar RPC uses /internal/v1 Bearer token",
+        "Only emit_research_report; missing PI_* is MODEL_NOT_READY"
+      ]
+    }
+  ]
+}
