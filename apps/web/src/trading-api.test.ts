@@ -26,6 +26,7 @@ function bsSymbol(overrides: Record<string, unknown> = {}) {
     symbol: "002041.SZ",
     name: "登海种业",
     realized_pnl: "4377.88",
+    period_pnl: "4377.88",
     closed_cycle_count: 2,
     median_holding_days: metric("13"),
     win_rate: metric("1"),
@@ -110,6 +111,73 @@ function chartMarkType(overrides: Record<string, unknown> = {}) {
     preset: true,
     enabled: true,
     created_at: "2026-08-01T00:00:00+08:00",
+    ...overrides,
+  };
+}
+
+function reasonPerformance(overrides: Record<string, unknown> = {}) {
+  return {
+    side: "buy",
+    reason_code: "pullback_confirmation",
+    sample_count: 1,
+    conclusion_allowed: false,
+    win_rate: metric("1"),
+    net_pnl: "2",
+    average_cycle_return_rate: metric("0.02"),
+    median_holding_days: metric("1"),
+    max_cycle_profit: metric("2"),
+    max_cycle_loss: metric(null, "no_losing_cycle"),
+    ...overrides,
+  };
+}
+
+function deterministicReport(overrides: Record<string, unknown> = {}) {
+  return {
+    schema_version: "deterministic_trading_review.v1",
+    sample: {
+      trading_day_count: 1,
+      execution_count: 2,
+      closed_cycle_count: 1,
+      overall_conclusion_allowed: false,
+    },
+    metrics: {
+      period_realized_pnl: "2",
+      closed_cycle_pnl: "2",
+      account_adjusted_return_rate: metric("0.02"),
+      period_max_drawdown_rate: metric("0"),
+      win_rate: metric("1"),
+      average_win_loss_ratio: metric(null, "no_losing_cycle"),
+      profit_factor: metric(null, "no_losing_cycle"),
+      median_holding_days: metric("1"),
+      median_capital_efficiency: metric("0.02"),
+      discipline_adherence_rate: metric("1"),
+    },
+    equity_curve: [],
+    execution_reason_facts: [],
+    reason_performance: [reasonPerformance()],
+    cycle_cases: [],
+    comparison: null,
+    comparison_unavailable_reason: "partial_period",
+    chart_bundles: [],
+    quality: { warnings: [] },
+    ...overrides,
+  };
+}
+
+function previewReview(overrides: Record<string, unknown> = {}) {
+  return {
+    period_kind: "month",
+    period_start: "2026-08-01",
+    period_end: "2026-08-31",
+    partial_period: true,
+    data_quality: "ok",
+    input_digest: "digest-1",
+    ledger_revision: 1,
+    daily_review_revision: 1,
+    market_revision: 1,
+    market_watermark: "market-1",
+    deterministic_report: deterministicReport(),
+    error: null,
     ...overrides,
   };
 }
@@ -327,6 +395,7 @@ describe("trading API", () => {
           symbol: "000001.SZ",
           name: "平安银行",
           realized_pnl: "0.00",
+          period_pnl: "0.00",
           closed_cycle_count: 0,
           median_holding_days: metric(null, "no_closed_cycle"),
           win_rate: metric(null, "no_closed_cycle"),
@@ -346,6 +415,7 @@ describe("trading API", () => {
           symbol: "002041.SZ",
           name: "登海种业",
           realizedPnl: "4377.88",
+          periodPnl: "4377.88",
           closedCycleCount: 2,
           medianHoldingDays: { value: "13", unavailableReason: null },
           winRate: { value: "1", unavailableReason: null },
@@ -354,6 +424,7 @@ describe("trading API", () => {
           symbol: "000001.SZ",
           name: "平安银行",
           realizedPnl: "0.00",
+          periodPnl: "0.00",
           closedCycleCount: 0,
           medianHoldingDays: { value: null, unavailableReason: "no_closed_cycle" },
           winRate: { value: null, unavailableReason: "no_closed_cycle" },
@@ -453,6 +524,24 @@ describe("trading API", () => {
       .rejects.toThrow("MACD 序列长度无效");
   });
 
+  it("rejects scientific-notation MACD values that the exact-decimal contract forbids", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(bsChart({
+      macd: { ready: true, warmup_bars: 26, dif: ["0"], dea: ["0"], histogram: ["0E-26"] },
+    }))));
+
+    await expect(createTradingApi("").getBsChart("600000.SH", "1d", "2026-08-01", "2026-08-31"))
+      .rejects.toThrow("MACD 柱 1无效");
+  });
+
+  it("parses a ready MACD whose warmup zeros are plain 0", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(bsChart({
+      macd: { ready: true, warmup_bars: 26, dif: ["0"], dea: ["0"], histogram: ["0"] },
+    }))));
+
+    const chart = await createTradingApi("").getBsChart("600000.SH", "1d", "2026-08-01", "2026-08-31");
+    expect(chart.macd).toMatchObject({ ready: true, dif: ["0"], dea: ["0"], histogram: ["0"] });
+  });
+
   it("rejects a BS chart with an unknown field or a non-none adjustment", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ ...bsChart(), extra: true })));
     await expect(createTradingApi("").getBsChart("600000.SH", "1d", "2026-08-01", "2026-08-31"))
@@ -534,6 +623,37 @@ describe("trading API", () => {
       body: JSON.stringify({ label: "突破", letter: "突", color: "#123456" }),
     }));
     expect(created).toMatchObject({ typeId: "type-2", preset: false, label: "突破" });
+  });
+
+  it("parses preview reason_performance max cycle profit and loss without converting decimal text", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(previewReview({
+      deterministic_report: deterministicReport({
+        reason_performance: [reasonPerformance({
+          max_cycle_profit: metric("2"),
+          max_cycle_loss: metric(null, "no_losing_cycle"),
+        })],
+      }),
+    })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const report = await createTradingApi("").getReviewPreview("month", "2026-08-01", "2026-08-31");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/trading/reviews/preview?period_kind=month&start=2026-08-01&end=2026-08-31",
+      expect.anything(),
+    );
+    expect(report.deterministicReport?.reasonPerformance).toEqual([{
+      side: "buy",
+      reasonCode: "pullback_confirmation",
+      sampleCount: 1,
+      conclusionAllowed: false,
+      winRate: { value: "1", unavailableReason: null },
+      netPnl: "2",
+      averageCycleReturnRate: { value: "0.02", unavailableReason: null },
+      medianHoldingDays: { value: "1", unavailableReason: null },
+      maxCycleProfit: { value: "2", unavailableReason: null },
+      maxCycleLoss: { value: null, unavailableReason: "no_losing_cycle" },
+    }]);
   });
 
   it("createMockTradingApi implements BS methods with empty data instead of 503", async () => {

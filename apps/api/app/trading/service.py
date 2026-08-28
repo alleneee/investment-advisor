@@ -15,7 +15,15 @@ import psycopg
 
 from .bs_analysis import BarNotFoundError, assert_bar_exists, build_bs_chart, symbol_bs_summary
 from .contracts import LedgerEvent, TradingReducerError
-from .metrics import AccountValuationService, period_return_curve, replay_rows, window_max_drawdown
+from .metrics import (
+    AccountValuationService,
+    _business_date,
+    _decimal,
+    _symbols_for_valuation,
+    period_return_curve,
+    replay_rows,
+    window_max_drawdown,
+)
 from .reducer import (
     InsufficientCashError,
     InsufficientPositionError,
@@ -432,11 +440,35 @@ class TradingService:
             name = row.get("name")
             if symbol not in names and name:
                 names[symbol] = str(name)
-        trading_days = self.valuation._calendar_dates(start, end) or None
+        as_of = min(end, self.valuation._now().date())
+        trading_days = self.valuation._calendar_dates(start, min(end, as_of)) or None
+        activation = _business_date(account["activated_on"])
+        all_days = self.valuation._calendar_dates(activation, as_of)
+        mark_end = next((day for day in reversed(all_days) if start <= day <= end), None)
+        mark_start = next((day for day in reversed(all_days) if day < start), None)
+        price_days = [day for day in (mark_start, mark_end) if day is not None]
+        closes = None
+        if price_days:
+            symbols = _symbols_for_valuation(executions, ledger.result.positions)
+            prices, _, _ = self.valuation._market_prices(account["account_id"], symbols, price_days)
+            mapped = {key: _decimal(row["close"]) for key, row in prices.items()}
+            if mapped:
+                closes = mapped
         return {
             "start": start.isoformat(),
             "end": end.isoformat(),
-            "symbols": symbol_bs_summary(executions, ledger, names, start, end, trading_days),
+            "symbols": symbol_bs_summary(
+                executions,
+                ledger,
+                names,
+                start,
+                end,
+                trading_days,
+                initial_capital=account["initial_capital"],
+                closes=closes,
+                mark_start=mark_start,
+                mark_end=mark_end,
+            ),
         }
 
     def bs_chart(self, *, symbol: str, timeframe: str, start: date, end: date) -> dict[str, Any]:
@@ -612,7 +644,16 @@ class TradingService:
         return account
 
     def _chart_provider(self) -> _ChartMarketProvider:
-        return _ChartMarketProvider(self.valuation.market_provider)
+        inner = self.valuation.market_provider
+        if inner is None:
+            try:
+                from ..providers.factory import create_market_provider
+
+                inner = create_market_provider()
+                self.valuation.market_provider = inner
+            except (RuntimeError, TypeError, ValueError):
+                inner = None
+        return _ChartMarketProvider(inner)
 
     def _named_executions(self, account_id: str) -> list[dict[str, Any]]:
         rows = [dict(row) for row in self.store.list_executions(account_id)]

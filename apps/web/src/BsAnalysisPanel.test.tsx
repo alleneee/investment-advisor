@@ -34,6 +34,7 @@ vi.mock("./BsChart", () => ({
       data-mark-ids={props.marks.map((item) => item.markId).join(",")}
     >
       <button type="button" onClick={() => props.onSelectBar?.("2026-08-10T00:00:00+08:00")}>选择K线</button>
+      <button type="button" onClick={() => props.onSelectBar?.("2026-08-14T00:00:00+08:00")}>选择K线 8月14日</button>
     </div>;
   },
 }));
@@ -75,6 +76,7 @@ function symbolSummary(overrides: Partial<BsSymbolSummary> = {}): BsSymbolSummar
     symbol: "002041.SZ",
     name: "登海种业",
     realizedPnl: "4377.88",
+    periodPnl: "4377.88",
     closedCycleCount: 2,
     medianHoldingDays: { value: "13", unavailableReason: null },
     winRate: { value: "1", unavailableReason: null },
@@ -181,6 +183,7 @@ const symbols: BsSymbolSummary[] = [
     symbol: "000001.SZ",
     name: "平安银行",
     realizedPnl: "0.00",
+    periodPnl: "0.00",
     closedCycleCount: 0,
     medianHoldingDays: { value: null, unavailableReason: "no_closed_cycle" },
     winRate: { value: null, unavailableReason: "no_closed_cycle" },
@@ -253,7 +256,7 @@ describe("BsAnalysisPanel", () => {
     });
     renderPanel(api);
 
-    expect(await screen.findByText("本周期没有成交股票。")).toBeInTheDocument();
+    expect(await screen.findByText("本周期没有持仓或成交股票。")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /登海种业|平安银行|示例|演示/ })).not.toBeInTheDocument();
     expect(screen.queryByTestId("bs-chart")).not.toBeInTheDocument();
     expect(screen.queryByText("行情不可用")).not.toBeInTheDocument();
@@ -269,6 +272,29 @@ describe("BsAnalysisPanel", () => {
     expect(screen.queryByRole("button", { name: "BS点分析" })).not.toBeInTheDocument();
     expect(screen.queryByText("行情不可用")).not.toBeInTheDocument();
     expect(api.getBsChart).not.toHaveBeenCalled();
+  });
+
+  it("没有卖出时瓷砖按窗口收盘盯市收益而不是已实现零", async () => {
+    const api = apiForPanel({
+      getBsSummary: vi.fn(async (start: string, end: string) => ({
+        start,
+        end,
+        symbols: [symbolSummary({
+          symbol: "600156.SH",
+          name: "华升股份",
+          realizedPnl: "0.00",
+          periodPnl: "200.00",
+          closedCycleCount: 0,
+          medianHoldingDays: { value: null, unavailableReason: "no_closed_cycle" },
+          winRate: { value: null, unavailableReason: "no_closed_cycle" },
+        })],
+      })),
+    });
+    renderPanel(api);
+
+    const tile = await screen.findByRole("button", { name: /华升股份/ });
+    expect(tile).toHaveTextContent("+200.00");
+    expect(tile).toHaveClass("tone-up");
   });
 
   it("零盈亏块可见且为中性色", async () => {
@@ -355,6 +381,29 @@ describe("BsAnalysisPanel", () => {
       expect(created).toHaveLength(2);
     });
     expect(captured.props?.marks.some((item) => item.markId === "mark-disabled")).toBe(true);
+  });
+
+  it("点另一根 K 线后标注切到新柱，保存用新柱时间", async () => {
+    const { api, user } = renderPanel();
+
+    await user.click(await screen.findByRole("button", { name: /登海种业/ }));
+    await user.click(await screen.findByRole("button", { name: "选择K线" }));
+    const picker = await screen.findByRole("form", { name: "图标注记" });
+    expect(picker).toHaveTextContent("2026-08-10");
+
+    await user.click(screen.getByRole("button", { name: "选择K线 8月14日" }));
+    expect(picker).toHaveTextContent("2026-08-14");
+    expect(captured.props?.highlightOccurredAt).toBe("2026-08-14T00:00:00+08:00");
+
+    await user.click(within(picker).getByRole("button", { name: "理想买" }));
+    await user.click(within(picker).getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(api.createChartMark).toHaveBeenCalledWith({
+      symbol: "002041.SZ",
+      occurredAt: "2026-08-14T00:00:00+08:00",
+      typeId: "type-ideal-buy",
+      comment: "",
+      timeframe: "1d",
+    }));
   });
 
   it("「+ 新类型」只提交 label、letter、color", async () => {

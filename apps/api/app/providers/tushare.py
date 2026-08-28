@@ -255,8 +255,8 @@ class TushareMarketProvider:
             "stk_mins",
             ts_code=code,
             freq=tushare_freq,
-            start_date=start_date.strftime("%Y%m%d"),
-            end_date=end_date.strftime("%Y%m%d"),
+            start_date=f"{start_date.isoformat()} 09:30:00",
+            end_date=f"{end_date.isoformat()} 15:00:00",
         )
         factors = {
             str(item["trade_date"]): Decimal(str(item["adj_factor"]))

@@ -256,6 +256,8 @@ def test_minutes_rebases_with_same_day_factor_and_skips_missing_day():
         end_date=date(2024, 8, 2),
     )
     assert client.mins[0]["freq"] == "30min"
+    assert client.mins[0]["start_date"] == "2024-08-01 09:30:00"
+    assert client.mins[0]["end_date"] == "2024-08-02 15:00:00"
     by_day = {row["trade_date"]: row for row in rows}
     assert by_day["20240802"]["qfq_close"] == pytest.approx(31)
     assert "qfq_close" not in by_day["20240801"]

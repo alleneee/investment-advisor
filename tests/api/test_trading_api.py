@@ -1,6 +1,8 @@
 import asyncio
 import uuid
+from datetime import date, datetime
 from threading import Event
+from zoneinfo import ZoneInfo
 
 import pytest
 from app.db import Database
@@ -765,6 +767,34 @@ def _inactive_account(store: TradingStore) -> dict:
     return store.get_account(account_id)
 
 
+class _BsMarketProvider:
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+
+    def daily(self, symbol: str, *, as_of: date, start_date: date | None = None, end_date: date | None = None) -> list[dict]:
+        rows = []
+        for row in self.rows:
+            trade_date = date.fromisoformat(f"{row['trade_date'][:4]}-{row['trade_date'][4:6]}-{row['trade_date'][6:]}")
+            if trade_date > as_of:
+                continue
+            if row.get("symbol") not in {None, symbol}:
+                continue
+            rows.append({key: value for key, value in row.items() if key != "symbol"})
+        return rows
+
+
+class _BsCalendarProvider:
+    def __init__(self, days: list[date]) -> None:
+        self.days = days
+
+    def trade_cal(self, *, start_date: date, end_date: date) -> list[dict]:
+        return [
+            {"cal_date": day.isoformat(), "is_open": 1}
+            for day in self.days
+            if start_date <= day <= end_date
+        ]
+
+
 def _daily_bar(trade_date: str, close: str = "10") -> dict:
     return {
         "trade_date": trade_date,
@@ -796,8 +826,53 @@ async def test_bs_summary_lists_period_symbols_and_buy_only_realized_pnl_is_zero
     assert [row["symbol"] for row in body["symbols"]] == ["600000.SH"]
     assert body["symbols"][0]["realized_pnl"] == money_text(0)
     assert body["symbols"][0]["realized_pnl"] == "0.00"
+    assert body["symbols"][0]["period_pnl"] == money_text(body["symbols"][0]["period_pnl"])
     assert empty.status_code == 200
-    assert empty.json()["symbols"] == []
+    held = empty.json()["symbols"]
+    assert [row["symbol"] for row in held] == ["600000.SH"]
+    assert held[0]["realized_pnl"] == "0.00"
+    assert held[0]["period_pnl"] == money_text(held[0]["period_pnl"])
+
+
+@pytest.mark.anyio
+async def test_bs_summary_marks_held_symbol_to_window_close_without_trades() -> None:
+    shanghai = ZoneInfo("Asia/Shanghai")
+    provider = _BsMarketProvider([
+        {**_daily_bar("20260105", "10"), "symbol": "600000.SH"},
+        {**_daily_bar("20260109", "10"), "symbol": "600000.SH"},
+        {**_daily_bar("20260113", "12"), "symbol": "600000.SH"},
+    ])
+    calendar = _BsCalendarProvider([
+        date(2026, 1, 5),
+        date(2026, 1, 6),
+        date(2026, 1, 7),
+        date(2026, 1, 8),
+        date(2026, 1, 9),
+        date(2026, 1, 12),
+        date(2026, 1, 13),
+    ])
+    app = create_app(
+        database=Database(),
+        trading_market_provider=provider,
+        trading_calendar_provider=calendar,
+        trading_clock=lambda: datetime(2026, 1, 13, 16, tzinfo=shanghai),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/api/trading/account", json=_account())).status_code == 201
+        assert (await client.post("/api/trading/executions", json=_execution(
+            executed_at="2026-01-05T10:00:00+08:00",
+            price="10",
+            quantity=100,
+            fee="0",
+        ))).status_code == 201
+        summary = await client.get("/api/trading/bs-summary", params={"start": "2026-01-12", "end": "2026-01-16"})
+
+    assert summary.status_code == 200
+    body = summary.json()
+    assert [row["symbol"] for row in body["symbols"]] == ["600000.SH"]
+    assert body["symbols"][0]["realized_pnl"] == "0.00"
+    assert body["symbols"][0]["period_pnl"] == "200.00"
 
 
 @pytest.mark.anyio
@@ -913,6 +988,40 @@ async def test_delete_preset_chart_mark_type_is_rejected() -> None:
     assert deleted.status_code == 400
     assert deleted.json()["error"]["code"] == "MARK_TYPE_PRESET"
     assert any(row["type_id"] == preset_id for row in restored.json())
+
+
+@pytest.mark.anyio
+async def test_bs_chart_thirty_minute_uses_factory_provider_when_none_configured(monkeypatch) -> None:
+    class FactoryMinutes:
+        def daily(self, *args, **kwargs):
+            return []
+
+        def minutes(self, symbol, *, freq, as_of, start_date, end_date):
+            assert symbol == "600000.SH"
+            assert freq == "30m"
+            return [{
+                "trade_time": "2026-01-09 10:00:00",
+                "open": "10",
+                "high": "11",
+                "low": "9",
+                "close": "10.2",
+                "vol": "100",
+            }]
+
+    monkeypatch.setattr("app.providers.factory.create_market_provider", lambda: FactoryMinutes())
+    app = create_app(database=Database())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/api/trading/account", json=_account())).status_code == 201
+        chart = await client.get(
+            "/api/trading/bs-chart",
+            params={"symbol": "600000.SH", "timeframe": "30m", "start": "2026-01-01", "end": "2026-01-31"},
+        )
+
+    body = chart.json()
+    assert chart.status_code == 200
+    assert body["available"] is True
+    assert body["bars"][0]["occurred_at"] == "2026-01-09T10:00:00+08:00"
 
 
 @pytest.mark.anyio

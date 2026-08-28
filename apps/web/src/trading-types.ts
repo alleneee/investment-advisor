@@ -134,6 +134,8 @@ export interface TradingReasonPerformance {
   netPnl: string;
   averageCycleReturnRate: NullableDecimalMetric;
   medianHoldingDays: NullableDecimalMetric;
+  maxCycleProfit: NullableDecimalMetric;
+  maxCycleLoss: NullableDecimalMetric;
 }
 
 export interface TradingCycleCase {
@@ -368,6 +370,7 @@ export interface BsSymbolSummary {
   symbol: string;
   name: string;
   realizedPnl: string;
+  periodPnl: string;
   closedCycleCount: number;
   medianHoldingDays: NullableDecimalMetric;
   winRate: NullableDecimalMetric;

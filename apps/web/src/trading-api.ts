@@ -240,7 +240,7 @@ export function createTradingApi(baseUrl: string): TradingApi {
       return toStructureAttribution(await request<unknown>("/api/trading/structure-attribution"));
     },
     async getReviewPreview(periodKind, start, end) {
-      return toReviewReport(await request<unknown>(`/api/trading/reviews/preview?period_kind=${periodKind}&start=${start}&end=${end}`));
+      return toReviewReport(hydratePreviewReport(await request<unknown>(`/api/trading/reviews/preview?period_kind=${periodKind}&start=${start}&end=${end}`)));
     },
     async createReviewReport(periodKind, start, end) {
       return toReviewReport(await request<unknown>("/api/trading/reports", {
@@ -688,6 +688,41 @@ function toDailyReview(payload: unknown): DailyReview {
   };
 }
 
+function hydratePreviewReport(payload: unknown): unknown {
+  if (isRecord(payload) && "report_id" in payload) return payload;
+  const value = exactRecord(payload, [
+    "period_kind", "period_start", "period_end", "partial_period", "data_quality", "input_digest",
+    "ledger_revision", "daily_review_revision", "market_revision", "market_watermark",
+    "deterministic_report", "error",
+  ], "复盘预览");
+  return {
+    report_id: "preview",
+    snapshot_id: null,
+    report_version: 1,
+    supersedes_snapshot_id: null,
+    account_id: "preview",
+    period_kind: value.period_kind,
+    period_start: value.period_start,
+    period_end: value.period_end,
+    data_as_of: null,
+    input_digest: value.input_digest,
+    ledger_revision: value.ledger_revision,
+    daily_review_revision: value.daily_review_revision,
+    market_revision: value.market_revision,
+    market_watermark: value.market_watermark,
+    attempt: 1,
+    snapshot_status: value.deterministic_report === null ? "failed" : "ready",
+    data_quality: value.data_quality,
+    ai_status: "not_requested",
+    is_outdated: false,
+    partial_period: value.partial_period,
+    retryable: false,
+    deterministic_report: value.deterministic_report,
+    ai_review: null,
+    error: value.error,
+  };
+}
+
 export function toReviewReport(payload: unknown, name = "交易复盘报告"): TradingReviewReport {
   const value = exactRecord(payload, ["report_id", "snapshot_id", "report_version", "supersedes_snapshot_id", "account_id", "period_kind", "period_start", "period_end", "data_as_of", "input_digest", "ledger_revision", "daily_review_revision", "market_revision", "market_watermark", "attempt", "snapshot_status", "data_quality", "ai_status", "is_outdated", "partial_period", "retryable", "deterministic_report", "ai_review", "error"], name);
   const snapshotStatus = enumText(value.snapshot_status, SNAPSHOT_STATUSES, "复盘快照状态");
@@ -792,7 +827,7 @@ function toReasonFact(payload: unknown, index: number) {
 }
 
 function toReasonPerformance(payload: unknown, index: number) {
-  const value = exactRecord(payload, ["side", "reason_code", "sample_count", "conclusion_allowed", "win_rate", "net_pnl", "average_cycle_return_rate", "median_holding_days"], `理由表现 ${index + 1}`);
+  const value = exactRecord(payload, ["side", "reason_code", "sample_count", "conclusion_allowed", "win_rate", "net_pnl", "average_cycle_return_rate", "median_holding_days", "max_cycle_profit", "max_cycle_loss"], `理由表现 ${index + 1}`);
   return {
     side: enumText(value.side, SIDES, "理由表现方向"),
     reasonCode: enumText(value.reason_code, REASONS, "理由表现代码"),
@@ -802,6 +837,8 @@ function toReasonPerformance(payload: unknown, index: number) {
     netPnl: decimalText(value.net_pnl, "理由盈亏"),
     averageCycleReturnRate: toNullableMetric(value.average_cycle_return_rate, "理由收益率"),
     medianHoldingDays: toNullableMetric(value.median_holding_days, "理由持有日"),
+    maxCycleProfit: toNullableMetric(value.max_cycle_profit, "理由最大盈利"),
+    maxCycleLoss: toNullableMetric(value.max_cycle_loss, "理由最大亏损"),
   };
 }
 
@@ -969,11 +1006,12 @@ function toBsSummary(payload: unknown): BsSummary {
 }
 
 function toBsSymbolSummary(payload: unknown, index: number) {
-  const value = exactRecord(payload, ["symbol", "name", "realized_pnl", "closed_cycle_count", "median_holding_days", "win_rate"], `个股摘要 ${index + 1}`);
+  const value = exactRecord(payload, ["symbol", "name", "realized_pnl", "period_pnl", "closed_cycle_count", "median_holding_days", "win_rate"], `个股摘要 ${index + 1}`);
   return {
     symbol: text(value.symbol, "个股代码"),
     name: text(value.name, "个股名称", true),
     realizedPnl: decimalText(value.realized_pnl, "个股已实现盈亏"),
+    periodPnl: decimalText(value.period_pnl, "个股期间盯市盈亏"),
     closedCycleCount: nonNegativeInteger(value.closed_cycle_count, "建清仓次数"),
     medianHoldingDays: toNullableMetric(value.median_holding_days, "个股持有日"),
     winRate: toNullableMetric(value.win_rate, "个股胜率"),

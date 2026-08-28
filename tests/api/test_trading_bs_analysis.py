@@ -55,6 +55,91 @@ def _by_id(rows: list[dict], key: str) -> dict[str, dict]:
     return {row[key]: row for row in rows}
 
 
+def test_held_symbol_without_period_trades_uses_window_closes() -> None:
+    executions = [
+        _execution("buy", "2026-01-05", "buy", quantity=100),
+    ]
+    names = {"600000.SH": "浦发银行"}
+    ledger = replay_rows("100000", executions, [])
+    summary = _by_id(
+        symbol_bs_summary(
+            executions,
+            ledger,
+            names,
+            date(2026, 1, 12),
+            date(2026, 1, 16),
+            trading_days=[date(2026, 1, 12), date(2026, 1, 13), date(2026, 1, 14), date(2026, 1, 15), date(2026, 1, 16)],
+            initial_capital="100000",
+            closes={
+                ("600000.SH", date(2026, 1, 9)): Decimal(10),
+                ("600000.SH", date(2026, 1, 16)): Decimal(12),
+            },
+            mark_start=date(2026, 1, 9),
+            mark_end=date(2026, 1, 16),
+        ),
+        "symbol",
+    )
+
+    assert set(summary) == {"600000.SH"}
+    assert summary["600000.SH"]["realized_pnl"] == money_text(0)
+    assert summary["600000.SH"]["period_pnl"] == money_text(200)
+
+
+def test_held_symbol_period_pnl_replays_deposits() -> None:
+    executions = [_execution("buy", "2026-01-05", "buy", quantity=100)]
+    cash_flows = [{
+        "cash_flow_id": "cf-1",
+        "occurred_at": "2026-01-02T10:00:00+08:00",
+        "created_at": "2026-01-02T10:00:01+08:00",
+        "kind": "deposit",
+        "amount": "2000",
+        "note": "",
+    }]
+    ledger = replay_rows("100", executions, cash_flows)
+    summary = _by_id(
+        symbol_bs_summary(
+            executions,
+            ledger,
+            {"600000.SH": "浦发银行"},
+            date(2026, 1, 12),
+            date(2026, 1, 16),
+            trading_days=[date(2026, 1, 12), date(2026, 1, 16)],
+            initial_capital="100",
+            closes={
+                ("600000.SH", date(2026, 1, 9)): Decimal(10),
+                ("600000.SH", date(2026, 1, 16)): Decimal(12),
+            },
+            mark_start=date(2026, 1, 9),
+            mark_end=date(2026, 1, 16),
+        ),
+        "symbol",
+    )
+
+    assert summary["600000.SH"]["period_pnl"] == money_text(200)
+
+
+def test_open_buy_in_period_marks_to_end_close() -> None:
+    executions = [_execution("buy", "2026-01-12", "buy", quantity=100)]
+    summary = _by_id(
+        symbol_bs_summary(
+            executions,
+            replay_rows("100000", executions, []),
+            {"600000.SH": "浦发银行"},
+            date(2026, 1, 12),
+            date(2026, 1, 16),
+            trading_days=[date(2026, 1, 12), date(2026, 1, 13), date(2026, 1, 16)],
+            initial_capital="100000",
+            closes={("600000.SH", date(2026, 1, 16)): Decimal(12)},
+            mark_start=date(2026, 1, 9),
+            mark_end=date(2026, 1, 16),
+        ),
+        "symbol",
+    )
+
+    assert summary["600000.SH"]["realized_pnl"] == money_text(0)
+    assert summary["600000.SH"]["period_pnl"] == money_text(200)
+
+
 def test_symbol_realized_pnl_sums_to_account_and_includes_buy_only() -> None:
     executions = [
         _execution("a-buy", "2026-01-05", "buy", symbol="600000.SH", name="浦发银行"),

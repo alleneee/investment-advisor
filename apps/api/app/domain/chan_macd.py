@@ -18,14 +18,21 @@ def compute_macd(closes: Sequence[Decimal]) -> dict[str, Any]:
     ema26 = _ema(values, SLOW)
     dif = [fast - slow for fast, slow in zip(ema12, ema26, strict=True)]
     dea = _ema(dif, SIGNAL)
-    histogram = [str(2 * (left - right)) for left, right in zip(dif, dea, strict=True)]
+    histogram = [_plain(2 * (left - right)) for left, right in zip(dif, dea, strict=True)]
     return {
         "ready": True,
         "warmup_bars": SLOW,
         "histogram": histogram,
-        "dif": [str(value) for value in dif],
-        "dea": [str(value) for value in dea],
+        "dif": [_plain(value) for value in dif],
+        "dea": [_plain(value) for value in dea],
     }
+
+
+def _plain(value: Decimal) -> str:
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return "0" if not text or text == "-0" else text
 
 
 def histogram_area(histogram: Sequence[str], *, sign: int, start: int = 0, end: int | None = None) -> str:

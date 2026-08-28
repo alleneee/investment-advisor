@@ -19,6 +19,7 @@ from .metrics import (
     _parse_datetime,
     _provider_daily,
     _raw_bar,
+    replay_rows,
 )
 from .reducer import canonical_decimal_text, money_text
 
@@ -131,6 +132,11 @@ def symbol_bs_summary(
     period_start: date,
     period_end: date,
     trading_days: Iterable[date] | None,
+    *,
+    initial_capital: Decimal | int | str | None = None,
+    closes: Mapping[tuple[str, date], Decimal] | None = None,
+    mark_start: date | None = None,
+    mark_end: date | None = None,
 ) -> list[dict[str, Any]]:
     trading_days_tuple = (
         None if trading_days is None else tuple(_business_date(item) for item in trading_days)
@@ -151,8 +157,15 @@ def symbol_bs_summary(
             continue
         closed_by_symbol.setdefault(cycle.symbol, []).append(cycle)
 
+    symbols = {str(row["symbol"]) for row in period_rows if row.get("symbol")}
+    start_positions = _positions_as_of(executions, ledger.cash_flows, initial_capital, mark_start)
+    end_positions = _positions_as_of(executions, ledger.cash_flows, initial_capital, mark_end)
+    if closes is not None:
+        symbols.update(start_positions)
+        symbols.update(end_positions)
+
     summaries: list[dict[str, Any]] = []
-    for symbol in sorted({str(row["symbol"]) for row in period_rows if row.get("symbol")}):
+    for symbol in sorted(symbols):
         realized = sum(
             (
                 realized_by_event.get(_event_id(row), Decimal(0))
@@ -170,17 +183,86 @@ def symbol_bs_summary(
         else:
             win_rate = _metric(None, "no_closed_cycle")
             median_holding = _metric(None, "no_closed_cycle")
+        trade_rows = [row for row in period_rows if str(row["symbol"]) == symbol]
         summaries.append(
             {
                 "symbol": symbol,
                 "name": names.get(symbol, symbol),
                 "realized_pnl": money_text(realized),
+                "period_pnl": money_text(_period_pnl(
+                    symbol,
+                    realized,
+                    trade_rows,
+                    start_positions,
+                    end_positions,
+                    closes,
+                    mark_start,
+                    mark_end,
+                )),
                 "closed_cycle_count": len(closed),
                 "median_holding_days": median_holding,
                 "win_rate": win_rate,
             }
         )
     return summaries
+
+
+def _positions_as_of(
+    executions: Sequence[Mapping[str, Any]],
+    cash_flows: Sequence[Mapping[str, Any]],
+    initial_capital: Decimal | int | str | None,
+    as_of: date | None,
+) -> dict[str, Any]:
+    if initial_capital is None or as_of is None:
+        return {}
+    included_executions = [
+        row
+        for row in executions
+        if _business_date(row.get("occurred_at", row.get("executed_at"))) <= as_of
+    ]
+    included_flows = [
+        row
+        for row in cash_flows
+        if _business_date(row["occurred_at"]) <= as_of
+    ]
+    return dict(replay_rows(initial_capital, included_executions, included_flows).result.positions)
+
+
+def _period_pnl(
+    symbol: str,
+    realized: Decimal,
+    trade_rows: Sequence[Mapping[str, Any]],
+    start_positions: Mapping[str, Any],
+    end_positions: Mapping[str, Any],
+    closes: Mapping[tuple[str, date], Decimal] | None,
+    mark_start: date | None,
+    mark_end: date | None,
+) -> Decimal:
+    if closes is None:
+        return realized
+    start_qty = getattr(start_positions.get(symbol), "quantity", 0) or 0
+    end_qty = getattr(end_positions.get(symbol), "quantity", 0) or 0
+    start_close = closes.get((symbol, mark_start)) if mark_start is not None else None
+    end_close = closes.get((symbol, mark_end)) if mark_end is not None else None
+    if start_qty and start_close is None:
+        return realized
+    if end_qty and end_close is None:
+        return realized
+    start_mv = Decimal(start_qty) * start_close if start_qty else Decimal(0)
+    end_mv = Decimal(end_qty) * end_close if end_qty else Decimal(0)
+    return end_mv - start_mv + _period_trade_cash(trade_rows)
+
+
+def _period_trade_cash(rows: Sequence[Mapping[str, Any]]) -> Decimal:
+    total = Decimal(0)
+    for row in rows:
+        notional = _decimal(row["price"]) * Decimal(int(row["quantity"]))
+        fee = _decimal(row.get("fee") or 0)
+        if row.get("side") == "buy":
+            total -= notional + fee
+        else:
+            total += notional - fee
+    return total
 
 
 def project_marks(

@@ -159,21 +159,21 @@ export function BsAnalysisPanel({
 
   return <Panel title="个股 BS 分析" heading="h3" className="bs-analysis-panel">
     {error && <p className="journal-error" role="alert">{error}</p>}
-    {summary && summary.symbols.length === 0 && <EmptyState title="本周期没有成交股票。" />}
+    {summary && summary.symbols.length === 0 && <EmptyState title="本周期没有持仓或成交股票。" />}
     {summary && summary.symbols.length > 0 && <div className="bs-pnl-tiles" aria-label="个股盈亏">
       {summary.symbols.map((item) => {
-        const tone = signedTone(item.realizedPnl);
+        const tone = signedTone(item.periodPnl);
         return <button
           key={item.symbol}
           type="button"
           className={`bs-pnl-tile tone-${tone}`}
           aria-pressed={selected?.symbol === item.symbol}
-          style={{ flexGrow: tileWeight(item.realizedPnl), background: tileBackground(tone) }}
+          style={{ flexGrow: tileWeight(item.periodPnl), background: tileBackground(tone) }}
           onClick={() => selectSymbol(item)}
         >
           <span>{item.name}</span>
           <small>{item.symbol}</small>
-          <strong>{formatSignedMoney(item.realizedPnl)}</strong>
+          <strong>{formatSignedMoney(item.periodPnl)}</strong>
         </button>;
       })}
     </div>}
@@ -198,6 +198,23 @@ export function BsAnalysisPanel({
         highlightOccurredAt={highlightOccurredAt}
         onSelectBar={onSelectBar}
       />}
+      {selectedBar && <form className="bs-mark-picker" aria-label="图标注记" onSubmit={(event) => void saveMark(event)}>
+        <p className="bs-selected-bar">已选 K 线 {formatSelectedBar(selectedBar, timeframe)}</p>
+        <div className="bs-type-picker" role="group" aria-label="点位类型">
+          {enabledTypes.map((item) => <button key={item.typeId} type="button" aria-pressed={typeId === item.typeId} onClick={() => setTypeId(item.typeId)}>{item.label}</button>)}
+        </div>
+        <label>评论<input value={comment} onChange={(event) => setComment(event.target.value)} maxLength={1000} /></label>
+        <div className="journal-actions">
+          <button className="primary-button" type="submit">保存</button>
+          <button className="secondary-button" type="button" onClick={() => setShowNewType(true)}>+ 新类型</button>
+        </div>
+        {showNewType && <div className="bs-new-type">
+          <label>名称<input value={newType.label} onChange={(event) => setNewType((current) => ({ ...current, label: event.target.value }))} /></label>
+          <label>字母<input value={newType.letter} maxLength={2} onChange={(event) => setNewType((current) => ({ ...current, letter: event.target.value }))} /></label>
+          <label>颜色<input value={newType.color} onChange={(event) => setNewType((current) => ({ ...current, color: event.target.value }))} /></label>
+          <button className="secondary-button" type="button" onClick={() => void createType()}>创建类型</button>
+        </div>}
+      </form>}
       {tab === "analysis" && <div className="bs-symbol-stats">
         <article><span>建清仓次数</span><strong>{selected.closedCycleCount}</strong></article>
         <article><span>平均持仓</span><strong>{selected.medianHoldingDays.value ?? "—"}</strong></article>
@@ -214,24 +231,12 @@ export function BsAnalysisPanel({
           </tr>)}
         </tbody>
       </DataTable>}
-      {selectedBar && <form className="bs-mark-picker" aria-label="图标注记" onSubmit={(event) => void saveMark(event)}>
-        <div className="bs-type-picker" role="group" aria-label="点位类型">
-          {enabledTypes.map((item) => <button key={item.typeId} type="button" aria-pressed={typeId === item.typeId} onClick={() => setTypeId(item.typeId)}>{item.label}</button>)}
-        </div>
-        <label>评论<input value={comment} onChange={(event) => setComment(event.target.value)} maxLength={1000} /></label>
-        <div className="journal-actions">
-          <button className="primary-button" type="submit">保存</button>
-          <button className="secondary-button" type="button" onClick={() => setShowNewType(true)}>+ 新类型</button>
-        </div>
-        {showNewType && <div className="bs-new-type">
-          <label>名称<input value={newType.label} onChange={(event) => setNewType((current) => ({ ...current, label: event.target.value }))} /></label>
-          <label>字母<input value={newType.letter} maxLength={2} onChange={(event) => setNewType((current) => ({ ...current, letter: event.target.value }))} /></label>
-          <label>颜色<input value={newType.color} onChange={(event) => setNewType((current) => ({ ...current, color: event.target.value }))} /></label>
-          <button className="secondary-button" type="button" onClick={() => void createType()}>创建类型</button>
-        </div>}
-      </form>}
     </div>}
   </Panel>;
+}
+
+function formatSelectedBar(occurredAt: string, timeframe: BsTimeframe): string {
+  return timeframe === "1d" ? occurredAt.slice(0, 10) : occurredAt.slice(0, 16).replace("T", " ");
 }
 
 function tileWeight(pnl: string): number {

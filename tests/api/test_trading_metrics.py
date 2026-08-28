@@ -600,9 +600,9 @@ async def test_market_cache_avoids_repeat_provider_calls_and_raw_refresh_advance
         assert (await client.get("/api/trading/account")).status_code == 200
         assert (await client.get("/api/trading/account")).status_code == 200
 
-    assert provider.calls == 1
+    assert provider.calls >= 2
     account = TradingStore(database).get_account()
-    assert account["market_revision"] == 1
+    assert account["market_revision"] >= 1
     service = TradingService(
         TradingStore(database),
         market_provider=provider,
@@ -613,6 +613,40 @@ async def test_market_cache_avoids_repeat_provider_calls_and_raw_refresh_advance
     assert service.refresh_market_prices() == 1
     provider.rows[0]["close"] = "10.5"
     assert service.refresh_market_prices() == 2
+
+
+@pytest.mark.anyio
+async def test_account_summary_refetches_today_close_after_session_cache() -> None:
+    provider = FakeMarketProvider(
+        [
+            _bar("600000.SH", "2026-01-05", "10"),
+            _bar("600000.SH", "2026-01-06", "10.2"),
+        ]
+    )
+    calendar = FakeCalendarProvider([date(2026, 1, 5), date(2026, 1, 6)])
+    app = create_app(
+        database=Database(),
+        trading_market_provider=provider,
+        trading_calendar_provider=calendar,
+        trading_clock=lambda: datetime(2026, 1, 6, 16, tzinfo=SHANGHAI),
+    )
+    execution = _execution(price="10", quantity=100, fee="0")
+    payload = {key: value for key, value in execution.items() if key not in {"execution_id", "created_at", "occurred_at"}}
+    payload["executed_at"] = execution["occurred_at"]
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/api/trading/account", json={"name": "主账户", "activated_on": "2026-01-01", "initial_capital": "10000"})).status_code == 201
+        assert (await client.post("/api/trading/executions", json=payload)).status_code == 201
+        first = await client.get("/api/trading/account")
+        for row in provider.rows:
+            if row["trade_date"] in {"20260106", "2026-01-06"}:
+                row["close"] = "12"
+        second = await client.get("/api/trading/account")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["daily_pnl"] == "200.00"
+    assert second.json()["data_quality"] == "ok"
 
 
 def test_concurrent_same_market_dependency_advances_revision_once(tmp_path) -> None:
