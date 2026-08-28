@@ -73,6 +73,7 @@ const profitSymbol: BsSymbolSummary = {
   symbol: "002041.SZ",
   name: "登海种业",
   realizedPnl: "4377.88",
+  periodPnl: "4377.88",
   closedCycleCount: 2,
   medianHoldingDays: { value: "13", unavailableReason: null },
   winRate: { value: "1", unavailableReason: null },
@@ -82,6 +83,7 @@ const zeroSymbol: BsSymbolSummary = {
   symbol: "000001.SZ",
   name: "平安银行",
   realizedPnl: "0.00",
+  periodPnl: "0.00",
   closedCycleCount: 0,
   medianHoldingDays: { value: null, unavailableReason: "no_closed_cycle" },
   winRate: { value: null, unavailableReason: "no_closed_cycle" },
@@ -202,7 +204,7 @@ async function generateReview(overrides: Partial<TradingApi> = {}) {
 }
 
 describe("复盘中心", () => {
-  it("选择完整周期后展示账户指标带、理由事实、交易周期和 BS 分析，不再画旧复盘图", async () => {
+  it("选择完整周期后展示账户指标带、理由事实和交易周期，不再画旧复盘图", async () => {
     const { api } = await generateReview();
 
     await waitFor(() => expect(api.createReviewReport).toHaveBeenCalledWith("week", "2026-08-10", "2026-08-16"));
@@ -214,39 +216,7 @@ describe("复盘中心", () => {
     expect(screen.queryByText("权益、回撤与真实买卖点")).not.toBeInTheDocument();
     expect(screen.queryByRole("img", { name: /交易复盘图/ })).not.toBeInTheDocument();
     expect(screen.getByText("Pi 总结尚未请求")).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: /登海种业/ })).toBeInTheDocument();
-  });
-
-  it("BS 摘要为空时盈亏块为空态，不渲染假股票也不请求个股图", async () => {
-    const { api } = await generateReview({
-      getBsSummary: vi.fn(async (start: string, end: string) => ({ start, end, symbols: [] })),
-    });
-
-    expect(await screen.findByText("本周期没有成交股票。")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /登海种业|平安银行|示例|演示/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("img", { name: /BS点分析图|交易复盘图/ })).not.toBeInTheDocument();
-    expect(api.getBsChart).not.toHaveBeenCalled();
-  });
-
-  it("有盈亏块但尚未点选时不画个股图", async () => {
-    const { api } = await generateReview();
-
-    expect(await screen.findByRole("button", { name: /登海种业/ })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "BS点分析" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("img", { name: /BS点分析图|交易复盘图/ })).not.toBeInTheDocument();
-    expect(api.getBsChart).not.toHaveBeenCalled();
-  });
-
-  it("零盈亏块可见且为中性色", async () => {
-    await generateReview();
-
-    const tile = await screen.findByRole("button", { name: /平安银行/ });
-    expect(tile).toHaveTextContent("0.00");
-    expect(
-      tile.className.includes("tone-neutral")
-      || (tile.getAttribute("style") ?? "").includes("#bbcbb2")
-      || getComputedStyle(tile).backgroundColor === "rgb(187, 203, 178)",
-    ).toBe(true);
+    expect(screen.queryByRole("heading", { name: "个股 BS 分析" })).not.toBeInTheDocument();
   });
 
   it("展示结构位置归因：类别聚合、样本不足文案与逐笔明细", async () => {

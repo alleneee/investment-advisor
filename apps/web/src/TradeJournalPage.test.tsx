@@ -78,7 +78,8 @@ function apiForJournal(overrides: Partial<TradingApi> = {}): TradingApi {
     listReviewReports: vi.fn(async () => []),
     getReviewReport: vi.fn(),
     retryReviewReport: vi.fn(),
-    getBsSummary: vi.fn(), getBsChart: vi.fn(), listChartMarks: vi.fn(), createChartMark: vi.fn(), updateChartMark: vi.fn(), deleteChartMark: vi.fn(), listChartMarkTypes: vi.fn(), createChartMarkType: vi.fn(), updateChartMarkType: vi.fn(), deleteChartMarkType: vi.fn(),
+    getBsSummary: vi.fn(async (start: string, end: string) => ({ start, end, symbols: [] })),
+    getBsChart: vi.fn(), listChartMarks: vi.fn(), createChartMark: vi.fn(), updateChartMark: vi.fn(), deleteChartMark: vi.fn(), listChartMarkTypes: vi.fn(), createChartMarkType: vi.fn(), updateChartMarkType: vi.fn(), deleteChartMarkType: vi.fn(),
     ...overrides,
   };
 }
@@ -198,15 +199,21 @@ describe("交易日记", () => {
     const gains = screen.getAllByText("+350.50");
     expect(gains.length).toBeGreaterThan(0);
     expect(gains.some((node) => node.className.includes("tone-gain"))).toBe(true);
-    expect(screen.getByRole("button", { name: /2026年8月17日，1 笔成交/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByRole("dialog", { name: "当日明细" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /2026年8月17日，1 笔成交/ })).toHaveAttribute("aria-pressed", "false");
     await user.click(screen.getByRole("button", { name: "上个月" }));
     expect(getCalendar).toHaveBeenCalledWith("2026-07");
     expect(await screen.findByRole("heading", { name: "2026年7月" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "下个月" }));
     expect(await screen.findByRole("heading", { name: "2026年8月" })).toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: /2026年8月17日，1 笔成交/ }));
+    expect(await screen.findByRole("dialog", { name: "当日明细" })).toBeInTheDocument();
     expect(await screen.findByText("002940.SZ")).toBeInTheDocument();
     expect(screen.getByText("草稿")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /2026年8月17日，1 笔成交/ })).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByRole("button", { name: "关闭当日明细" }));
+    expect(screen.queryByRole("dialog", { name: "当日明细" })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: /2026年8月17日，1 笔成交/ }));
     await user.click(screen.getByRole("button", { name: "记录当日成交" }));
     expect(await screen.findByRole("heading", { name: "每日交易日志" })).toBeInTheDocument();
     expect(screen.getByLabelText("方向")).toBeInTheDocument();
@@ -296,6 +303,48 @@ describe("交易日记", () => {
     expect(styles).toMatch(/\.journal-calendar-legend \.is-loss::before \{ background: var\(--down\)/);
     expect(styles).toMatch(/\.journal-calendar-day\.is-gain::after \{ background: var\(--up\)/);
     expect(styles).toMatch(/\.journal-calendar-day\.is-loss::after \{ background: var\(--down\)/);
+    expect(styles).toMatch(/\.journal-calendar-layout \{\s*display: grid;\s*grid-template-columns: minmax\(0, 1fr\);/);
+  });
+
+  it("月视图在日历下方展示该月个股交易详情，不需要先生成复盘", async () => {
+    const getBsSummary = vi.fn(async (start: string, end: string) => ({
+      start,
+      end,
+      symbols: [{
+        symbol: "002041.SZ",
+        name: "登海种业",
+        realizedPnl: "4377.88",
+        periodPnl: "4377.88",
+        closedCycleCount: 2,
+        medianHoldingDays: { value: "13", unavailableReason: null },
+        winRate: { value: "1", unavailableReason: null },
+      }],
+    }));
+    const api = apiForJournal({
+      getAccount: vi.fn(async () => account),
+      getBsSummary,
+    });
+    render(<TradeJournalPage api={api} today="2026-08-17" />);
+
+    expect(await screen.findByRole("heading", { name: "2026年8月" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "个股 BS 分析" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /登海种业/ })).toBeInTheDocument();
+    expect(getBsSummary).toHaveBeenCalledWith("2026-08-01", "2026-08-31");
+    expect(screen.queryByRole("heading", { name: "周期复盘" })).not.toBeInTheDocument();
+  });
+
+  it("周视图按当周区间请求个股交易详情", async () => {
+    const getBsSummary = vi.fn(async (start: string, end: string) => ({ start, end, symbols: [] }));
+    const api = apiForJournal({
+      getAccount: vi.fn(async () => account),
+      getBsSummary,
+    });
+    render(<TradeJournalPage api={api} today="2026-08-17" initialView="week" />);
+
+    expect(await screen.findByRole("heading", { name: "个股 BS 分析" })).toBeInTheDocument();
+    await waitFor(() => expect(getBsSummary).toHaveBeenCalledWith("2026-08-17", "2026-08-21"));
+    expect(screen.getByText("本周期没有持仓或成交股票。")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "周期复盘" })).not.toBeInTheDocument();
   });
 
   it("月视图默认不展示复盘区块，发起本月复盘后才生成", async () => {
@@ -326,6 +375,7 @@ describe("交易日记", () => {
     expect(await screen.findByRole("heading", { name: "每日交易日志" })).toBeInTheDocument();
     expect(screen.getByLabelText("方向")).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "周期复盘" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "个股 BS 分析" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "生成本月复盘" })).not.toBeInTheDocument();
   });
 
@@ -590,16 +640,20 @@ describe("交易日记", () => {
 
     const monthCalendar = await screen.findByRole("grid", { name: "交易月历" });
     const monthChart = await screen.findByRole("img", { name: "收益图 month 2026-08-01 2026-08-31" });
+    const monthBs = await screen.findByRole("heading", { name: "个股 BS 分析" });
     const monthReview = screen.getByRole("button", { name: "生成本月复盘" });
     expect(monthCalendar.compareDocumentPosition(monthChart) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(monthChart.compareDocumentPosition(monthReview) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(monthChart.compareDocumentPosition(monthBs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(monthBs.compareDocumentPosition(monthReview) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "周视图" }));
     const weekCalendar = await screen.findByRole("grid", { name: "交易周历" });
     const weekChart = await screen.findByRole("img", { name: "收益图 week 2026-08-17 2026-08-21" });
+    const weekBs = await screen.findByRole("heading", { name: "个股 BS 分析" });
     const weekReview = screen.getByRole("button", { name: "生成本周复盘" });
     expect(weekCalendar.compareDocumentPosition(weekChart) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(weekChart.compareDocumentPosition(weekReview) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(weekChart.compareDocumentPosition(weekBs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(weekBs.compareDocumentPosition(weekReview) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("季年指标之后是收益图，收益图之后是周期复盘入口", async () => {

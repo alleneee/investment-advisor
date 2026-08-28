@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { BsAnalysisPanel } from "./BsAnalysisPanel";
 import { attributionCategoryLabels, attributionReasonLabels, reasonLabels } from "./trading-api";
 import type { TradingApi } from "./trading-api";
 import { DataTable } from "./ui/DataTable";
@@ -112,7 +111,13 @@ export function ReviewCenterPage({
       setReport(next);
       setHistory((items) => upsertReport(items, next));
     } catch (reason) {
-      setError(messageOf(reason));
+      try {
+        const previewed = await api.getReviewPreview(periodKind, periodStart, periodEnd);
+        setReport(previewed);
+        setError(null);
+      } catch {
+        setError(messageOf(reason));
+      }
     } finally {
       setBusy(null);
     }
@@ -169,7 +174,6 @@ export function ReviewCenterPage({
         {report?.partialPeriod && <p className="review-warning">本周期尚不完整，以下内容只作进行中记录，不和完整周期做结论比较。</p>}
         <ReasonMatrix report={deterministic} />
         <CycleCases report={deterministic} />
-        <BsAnalysisPanel api={api} periodStart={periodStart} periodEnd={periodEnd} />
         <Comparison report={deterministic} />
       </section> : <EmptyState title="该周期还没有固化报告。" />}
     />}

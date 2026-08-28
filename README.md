@@ -1,4 +1,6 @@
-# Tushare → 缠论引擎 → Pi 投研报告
+# 琪先一步
+
+A 股结构投研台：Tushare → 缠论引擎 → Pi 投研报告。
 
 这是一个可运行的 A 股结构投研 MVP：Python 从 Tushare 获取并缓存行情，
 确定性 ChanEngine 计算结构，运行时公开 HTTP 数据源补充新闻、互动问答和热榜，
@@ -9,7 +11,7 @@ Node sidecar 让 Pi 只生成受证据引用约束的三情景研究叙述。Rea
 
 ```mermaid
 flowchart LR
-    A[React 结构投研台] --> B[FastAPI]
+    A[琪先一步] --> B[FastAPI]
     B --> C[(PostgreSQL 行情与资讯缓存)]
     C -- 行情未命中 --> D[Tushare Python SDK]
     C -- 资讯未命中或过期 --> E[三源公开 HTTP]
@@ -56,7 +58,7 @@ Key 读取顺序：`HITHINK_FINANCE_API_KEY`、`FUYAO_API_KEY`、`FUYAO_TOKEN`�
 - `apps/agent-runtime`：Pi 状态机、Python RPC client、HTTP sidecar 和受限报告工具。
 - `packages/contracts`：Node 状态机、证据引用和 `ReportDraftV2` 校验，并保留
   `ReportDraftV1` 读取兼容。
-- `apps/web`：React/Vite 结构投研台，使用 hash 导航提供今日批次、研究记录和数据快照三个页面。
+- `apps/web`：React/Vite 琪先一步工作台，使用 hash 导航提供今日批次和交易日记两个独立入口。
 - `tests/api`：Python provider、引擎、分析接口和内部 RPC 测试。
 
 ## 启动

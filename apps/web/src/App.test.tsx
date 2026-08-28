@@ -214,6 +214,23 @@ function auxiliaryApi(): AuxiliaryApi {
   };
 }
 
+function completedProgress(...rows: Array<{ symbol: string; name: string }>) {
+  return rows.map((row) => ({
+    symbol: row.symbol,
+    name: row.name,
+    reportId: `report-${row.symbol}-1d`,
+    stage: "完成" as const,
+    state: "completed" as const,
+  }));
+}
+
+function maotaiWuliangWatchlist() {
+  return [
+    { symbol: "600519.SH", name: "贵州茅台", market: "SH" as const },
+    { symbol: "000858.SZ", name: "五粮液", market: "SZ" as const },
+  ];
+}
+
 function apiWith(getReport: WorkbenchApi["getReport"]): WorkbenchApi {
   return {
     ...auxiliaryApi(),
@@ -221,9 +238,34 @@ function apiWith(getReport: WorkbenchApi["getReport"]): WorkbenchApi {
     async addWatchlist(symbol) { return { symbol, name: symbol, market: symbol.endsWith(".SH") ? "SH" : "SZ" }; },
     async removeWatchlist() {},
     async createBatch() { return { id: "batch" }; },
-    async getProgress() { return []; },
+    async getProgress() { return completedProgress({ symbol: "600519.SH", name: "贵州茅台" }); },
     getReport,
   };
+}
+
+type User = ReturnType<typeof userEvent.setup>;
+
+async function goToPool(user: User) {
+  await user.click(await screen.findByRole("button", { name: /查询候选/ }));
+}
+
+async function viewReport(user: User, name = "贵州茅台", symbol = "600519.SH") {
+  const label = `查看 ${name} ${symbol} 报告`;
+  if (!screen.queryByRole("button", { name: label })) {
+    await user.click(screen.getByRole("button", { name: /观察进度/ }));
+  }
+  await user.click(await screen.findByRole("button", { name: label }));
+}
+
+async function openMaotaiReport() {
+  if (!screen.queryByRole("button", { name: "查看 贵州茅台 600519.SH 报告" })) {
+    fireEvent.click(await screen.findByRole("button", { name: /观察进度/ }));
+  }
+  const button = await screen.findByRole("button", { name: "查看 贵州茅台 600519.SH 报告" });
+  await act(async () => {
+    fireEvent.click(button);
+    await Promise.resolve();
+  });
 }
 
 afterEach(() => {
@@ -242,26 +284,45 @@ function deferred<T>() {
 }
 
 describe("research workbench", () => {
-  it("organizes the batch view as a two-column analysis cockpit", async () => {
-    const { container } = render(<App />);
+  it("walks the batch page as search, pool, progress, then report", async () => {
+    const user = userEvent.setup();
+    const getReport = vi.fn(async (symbol: string, timeframe: Timeframe) => makeReport(symbol, timeframe, true));
+    const getProgress = vi.fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([{
+        symbol: "600519.SH",
+        name: "贵州茅台",
+        reportId: "report-600519.SH-1d",
+        stage: "完成",
+        state: "completed" as const,
+      }]);
+    const api: WorkbenchApi = {
+      ...apiWith(getReport),
+      async getWatchlist() { return []; },
+      getProgress,
+      async searchStocks() { return [{ symbol: "600519.SH", name: "贵州茅台", cnspell: "gzmt" }]; },
+    };
+    render(<App api={api} />);
 
-    await screen.findByRole("heading", { name: "自选池" });
-    const batchPage = container.querySelector(".batch-page");
-    const batchCockpit = batchPage?.querySelector(".batch-cockpit");
-    const panes = batchCockpit?.querySelectorAll(":scope > .ui-split > .ui-split-pane") ?? [];
+    expect(await screen.findByRole("heading", { name: "候选池" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "本批进度" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "结构报告" })).not.toBeInTheDocument();
 
-    expect(batchPage).toBeInTheDocument();
-    expect(batchCockpit).toBeInTheDocument();
-    expect(panes).toHaveLength(2);
-    expect(within(panes[0] as HTMLElement).getByRole("heading", { name: "自选池" })).toBeInTheDocument();
-    expect(within(panes[0] as HTMLElement).getByRole("heading", { name: "本批进度" })).toBeInTheDocument();
-    const analysisPane = panes[1] as HTMLElement;
-    const structure = within(analysisPane).getByRole("heading", { name: "结构报告" });
-    const outlook = within(analysisPane).getByRole("heading", { name: "Pi AI 三情景走势报告" });
-    const news = within(analysisPane).getByRole("heading", { name: "资讯与市场热度" });
-    expect(within(analysisPane).queryByRole("heading", { name: "本批进度" })).not.toBeInTheDocument();
-    expect(structure.compareDocumentPosition(outlook) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(outlook.compareDocumentPosition(news) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await user.type(screen.getByLabelText("添加股票"), "茅台");
+    await user.click(await screen.findByRole("option", { name: /贵州茅台/ }));
+    expect(await screen.findByText("贵州茅台")).toBeInTheDocument();
+    expect(getReport).not.toHaveBeenCalled();
+    expect(screen.queryByRole("heading", { name: "结构报告" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /生成本批报告/ }));
+    expect(await screen.findByRole("heading", { name: "本批进度" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "结构报告" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "候选池" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "查看 贵州茅台 600519.SH 报告" }));
+    expect(await screen.findByRole("heading", { name: "结构报告" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "报告 600519.SH 1d" })).toBeInTheDocument();
+    expect(getReport).toHaveBeenCalledWith("600519.SH", "1d");
   });
 
   it("navigates the remaining workbench pages without archive sidebars", async () => {
@@ -272,21 +333,65 @@ describe("research workbench", () => {
     expect(batch).toHaveAttribute("aria-current", "page");
     expect(screen.queryByRole("link", { name: "数据快照" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /研究记录/ })).not.toBeInTheDocument();
-    expect(await screen.findByRole("heading", { name: "自选池" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "本批进度" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "批次步骤" })).toBeInTheDocument();
   });
 
   it("opens the batch view when retired archive hashes are loaded", async () => {
     window.location.hash = "#/records";
     const { unmount } = render(<App />);
-    expect(await screen.findByRole("heading", { name: "自选池" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "本批进度" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /今日批次/ })).toHaveAttribute("aria-current", "page");
     expect(screen.queryByRole("heading", { name: "研究记录" })).not.toBeInTheDocument();
     unmount();
 
     window.location.hash = "#/snapshots";
     render(<App />);
-    expect(await screen.findByRole("heading", { name: "自选池" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "本批进度" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "数据快照" })).not.toBeInTheDocument();
+  });
+
+  it("does not show a workbench outage notice when the journal is open", async () => {
+    window.location.hash = "#/journal";
+    const getWatchlist = vi.fn(async () => {
+      throw new TypeError("Failed to fetch");
+    });
+    const getProgress = vi.fn(async () => {
+      throw new TypeError("Failed to fetch");
+    });
+    render(<App api={{ ...apiWith(async () => makeReport("600519.SH")), getWatchlist, getProgress }} />);
+
+    expect(await screen.findByRole("heading", { name: "创建交易账户" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText("数据服务暂不可用")).not.toBeInTheDocument();
+  });
+
+  it("does not load the watchlist chart report while the trading journal is open", async () => {
+    window.location.hash = "#/journal";
+    const getReport = vi.fn(async (symbol: string, timeframe: Timeframe) => makeReport(symbol, timeframe));
+    const getInformation = vi.fn(async (symbol: string) => makeInformation(symbol));
+    render(<App api={{ ...apiWith(getReport), getInformation }} />);
+
+    expect(await screen.findByRole("heading", { name: "创建交易账户" })).toBeInTheDocument();
+    await act(async () => { await Promise.resolve(); });
+    expect(getReport).not.toHaveBeenCalled();
+    expect(getInformation).not.toHaveBeenCalled();
+  });
+
+  it("loads the watchlist report when returning from the journal to the batch view", async () => {
+    window.location.hash = "#/journal";
+    const getReport = vi.fn(async (symbol: string, timeframe: Timeframe) => makeReport(symbol, timeframe));
+    const user = userEvent.setup();
+    render(<App api={apiWith(getReport)} />);
+    expect(await screen.findByRole("heading", { name: "创建交易账户" })).toBeInTheDocument();
+    expect(getReport).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("link", { name: /今日批次/ }));
+    expect(await screen.findByRole("heading", { name: "候选池" })).toBeInTheDocument();
+    expect(getReport).not.toHaveBeenCalled();
+    await viewReport(user);
+    expect(await screen.findByRole("heading", { name: "报告 600519.SH 1d" })).toBeInTheDocument();
+    expect(getReport).toHaveBeenCalledWith("600519.SH", "1d");
   });
 
   it("exposes the independent trading journal instead of reusing research records", async () => {
@@ -359,10 +464,11 @@ describe("research workbench", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    expect((await screen.findAllByText("600519.SH")).length).toBeGreaterThanOrEqual(2);
     await screen.findByText("运行中 · 3 / 6");
+    await goToPool(user);
+    expect((await screen.findAllByText("600519.SH")).length).toBeGreaterThanOrEqual(1);
     await user.type(screen.getByLabelText("添加股票"), "601318");
-    await user.click(screen.getByRole("button", { name: "加入自选" }));
+    await user.click(screen.getByRole("button", { name: "加入候选" }));
     expect(screen.getByRole("button", { name: "移除 601318.SH" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "移除 601318.SH" }));
@@ -393,9 +499,9 @@ describe("research workbench", () => {
     await user.click(await screen.findByRole("option", { name: /贵州茅台/ }));
 
     expect(added).toEqual(["600519.SH"]);
-    const row = screen.getByRole("button", { name: "选择 贵州茅台 600519.SH" });
-    expect(row.querySelector("strong")).toHaveTextContent("贵州茅台");
-    expect(row.querySelector("small")).toHaveTextContent("600519.SH");
+    expect(screen.getByText("贵州茅台")).toBeInTheDocument();
+    expect(screen.getByText("600519.SH")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "移除 600519.SH" })).toBeInTheDocument();
     expect(screen.queryByRole("listbox", { name: "股票候选" })).not.toBeInTheDocument();
   });
 
@@ -417,95 +523,59 @@ describe("research workbench", () => {
 
     await user.type(screen.getByLabelText("添加股票"), "五粮");
     await screen.findByRole("option", { name: /五粮液/ });
-    await user.click(screen.getByRole("button", { name: "加入自选" }));
+    await user.click(screen.getByRole("button", { name: "加入候选" }));
 
-    expect(screen.getByRole("button", { name: "选择 五粮液 000858.SZ" })).toBeInTheDocument();
+    expect(screen.getByText("五粮液")).toBeInTheDocument();
+    expect(screen.getByText("000858.SZ")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "移除 000858.SZ" })).toBeInTheDocument();
   });
 
-  it("refreshes the report after adding a watchlist symbol", async () => {
-    let activeSymbol = "600519.SH";
-    const report = (): Report => ({
-      symbol: activeSymbol,
-      name: activeSymbol,
-      asOf: "2026-08-11",
-      timeframe: "1d",
-      chart: emptyChart(),
-      headline: `报告 ${activeSymbol}`,
-      conclusion: "结构事实",
-      structure: [],
-      quality: "ok",
-      qualityNote: "行情窗口完整。",
-      sources: ["Tushare"],
-      review: "未审阅",
-    });
-    const api: WorkbenchApi = {
-      ...auxiliaryApi(),
-      async getWatchlist() {
-        return [{ symbol: "600519.SH", name: "600519.SH", market: "SH" }];
-      },
-      async addWatchlist(symbol) {
-        activeSymbol = symbol;
-        return { symbol, name: symbol, market: "SZ" };
-      },
-      async removeWatchlist() {},
-      async createBatch() { return { id: "batch" }; },
-      async getProgress() { return []; },
-      async getReport() { return report(); },
-    };
+  it("does not load a report when a stock is added to the candidate pool", async () => {
+    const getReport = vi.fn(async (symbol: string, timeframe: Timeframe) => makeReport(symbol, timeframe));
     const user = userEvent.setup();
-    render(<App api={api} />);
-    expect(await screen.findByRole("heading", { name: "报告 600519.SH" })).toBeInTheDocument();
+    render(<App api={{
+      ...apiWith(getReport),
+      async getProgress() { return []; },
+    }} />);
+    expect(await screen.findByRole("heading", { name: "候选池" })).toBeInTheDocument();
 
     await user.type(screen.getByLabelText("添加股票"), "002940");
-    await user.click(screen.getByRole("button", { name: "加入自选" }));
+    await user.click(screen.getByRole("button", { name: "加入候选" }));
 
-    expect(await screen.findByRole("heading", { name: "报告 002940.SZ" })).toBeInTheDocument();
-    expect(screen.getByText("SZ", { selector: ".market-chip" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "移除 002940.SZ" })).toBeInTheDocument();
+    expect(getReport).not.toHaveBeenCalled();
+    expect(screen.queryByRole("heading", { name: "结构报告" })).not.toBeInTheDocument();
   });
 
-  it("loads the report after resolving the initial watchlist", async () => {
-    let activeSymbol = "600519.SH";
+  it("does not load a report from the watchlist until the user opens it from progress", async () => {
     let releaseWatchlist!: () => void;
     const watchlistGate = new Promise<void>((resolve) => { releaseWatchlist = resolve; });
-    const api: WorkbenchApi = {
-      ...auxiliaryApi(),
+    const getReport = vi.fn(async (symbol: string, timeframe: Timeframe) => makeReport(symbol, timeframe));
+    render(<App api={{
+      ...apiWith(getReport),
       async getWatchlist() {
         await watchlistGate;
-        activeSymbol = "002940.SZ";
-        return [{ symbol: activeSymbol, name: activeSymbol, market: "SZ" }];
+        return [{ symbol: "002940.SZ", name: "昂利康", market: "SZ" }];
       },
-      async addWatchlist(symbol) { return { symbol, name: symbol, market: "SZ" }; },
-      async removeWatchlist() {},
-      async createBatch() { return { id: "batch" }; },
-      async getProgress() { return []; },
-      async getReport() {
-        return {
-          symbol: activeSymbol,
-          name: activeSymbol,
-          asOf: "2026-08-11",
-          timeframe: "1d",
-          chart: emptyChart(),
-          headline: `报告 ${activeSymbol}`,
-          conclusion: "结构事实",
-          structure: [],
-          quality: "ok",
-          qualityNote: "行情窗口完整。",
-          sources: ["Tushare"],
-          review: "未审阅",
-        };
+      async getProgress() {
+        return completedProgress({ symbol: "002940.SZ", name: "昂利康" });
       },
-    };
-    render(<App api={api} />);
+    }} />);
 
     releaseWatchlist();
 
-    expect(await screen.findByRole("heading", { name: "报告 002940.SZ" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "候选池" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /观察进度/ })).toBeEnabled();
+    expect(getReport).not.toHaveBeenCalled();
+    expect(screen.queryByRole("heading", { name: "报告 002940.SZ 1d" })).not.toBeInTheDocument();
   });
 
-  it("requests the initial report with an explicit symbol and timeframe", async () => {
+  it("requests the report with an explicit symbol and timeframe after the user opens it", async () => {
     const getReport = vi.fn(async (symbol: string, timeframe: Timeframe) => makeReport(symbol, timeframe));
+    const user = userEvent.setup();
     render(<App api={apiWith(getReport)} />);
 
+    await viewReport(user);
     expect(await screen.findByRole("heading", { name: "报告 600519.SH 1d" })).toBeInTheDocument();
     expect(getReport).toHaveBeenCalledWith("600519.SH", "1d");
   });
@@ -518,6 +588,7 @@ describe("research workbench", () => {
     });
     const user = userEvent.setup();
     render(<App api={api} />);
+    await viewReport(user);
     await screen.findByRole("heading", { name: "报告 600519.SH 1d" });
 
     await user.click(screen.getByRole("button", { name: "周线" }));
@@ -533,6 +604,7 @@ describe("research workbench", () => {
     const api = apiWith(async (symbol, timeframe) => timeframe === "1w" ? weekly.promise : makeReport(symbol, timeframe, true));
     const user = userEvent.setup();
     render(<App api={api} />);
+    await viewReport(user);
     await screen.findByRole("heading", { name: "报告 600519.SH 1d" });
 
     await user.click(screen.getByRole("button", { name: "周线" }));
@@ -554,6 +626,7 @@ describe("research workbench", () => {
     });
     const user = userEvent.setup();
     render(<App api={api} />);
+    await viewReport(user);
     await screen.findByRole("heading", { name: "报告 600519.SH 1d" });
 
     await user.click(screen.getByRole("button", { name: "周线" }));
@@ -565,57 +638,82 @@ describe("research workbench", () => {
     expect(weeklyAttempts).toBe(2);
   });
 
-  it("clears the old report while a newly added symbol loads", async () => {
+  it("does not keep showing the previous report after opening another completed stock", async () => {
     const nextReport = deferred<Report>();
-    const api = apiWith(async (symbol, timeframe) => symbol === "002940.SZ"
-      ? nextReport.promise
-      : makeReport(symbol, timeframe, true));
+    const api: WorkbenchApi = {
+      ...apiWith(async (symbol, timeframe) => symbol === "000858.SZ"
+        ? nextReport.promise
+        : makeReport(symbol, timeframe, true)),
+      async getWatchlist() { return maotaiWuliangWatchlist(); },
+      async getProgress() {
+        return completedProgress(
+          { symbol: "600519.SH", name: "贵州茅台" },
+          { symbol: "000858.SZ", name: "五粮液" },
+        );
+      },
+    };
     const user = userEvent.setup();
     render(<App api={api} />);
+    await viewReport(user);
     await screen.findByRole("heading", { name: "报告 600519.SH 1d" });
 
-    await user.type(screen.getByLabelText("添加股票"), "002940");
-    await user.click(screen.getByRole("button", { name: "加入自选" }));
+    await user.click(screen.getByRole("button", { name: "返回进度" }));
+    await viewReport(user, "五粮液", "000858.SZ");
 
     expect(screen.queryByRole("heading", { name: "报告 600519.SH 1d" })).not.toBeInTheDocument();
     expect(screen.getByText("正在加载结构报告…")).toBeInTheDocument();
-    nextReport.resolve(makeReport("002940.SZ", "1d", true));
-    expect(await screen.findByRole("heading", { name: "报告 002940.SZ 1d" })).toBeInTheDocument();
+    nextReport.resolve(makeReport("000858.SZ", "1d", true));
+    expect(await screen.findByRole("heading", { name: "报告 000858.SZ 1d" })).toBeInTheDocument();
   });
 
-  it("does not let a late old-symbol response replace the new report", async () => {
+  it("does not let a late previous-stock response replace the opened report", async () => {
     const oldReport = deferred<Report>();
-    const api = apiWith(async (symbol, timeframe) => symbol === "600519.SH"
-      ? oldReport.promise
-      : makeReport(symbol, timeframe, true));
+    const api: WorkbenchApi = {
+      ...apiWith(async (symbol, timeframe) => symbol === "600519.SH"
+        ? oldReport.promise
+        : makeReport(symbol, timeframe, true)),
+      async getWatchlist() { return maotaiWuliangWatchlist(); },
+      async getProgress() {
+        return completedProgress(
+          { symbol: "600519.SH", name: "贵州茅台" },
+          { symbol: "000858.SZ", name: "五粮液" },
+        );
+      },
+    };
     const user = userEvent.setup();
     render(<App api={api} />);
 
-    await user.type(screen.getByLabelText("添加股票"), "002940");
-    await user.click(screen.getByRole("button", { name: "加入自选" }));
-    await screen.findByRole("heading", { name: "报告 002940.SZ 1d" });
+    await viewReport(user);
+    await user.click(screen.getByRole("button", { name: "返回进度" }));
+    await viewReport(user, "五粮液", "000858.SZ");
+    await screen.findByRole("heading", { name: "报告 000858.SZ 1d" });
     oldReport.resolve(makeReport("600519.SH", "1d", true));
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "报告 002940.SZ 1d" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "报告 000858.SZ 1d" })).toBeInTheDocument());
     expect(screen.queryByRole("heading", { name: "报告 600519.SH 1d" })).not.toBeInTheDocument();
   });
 
-  it("shows the existing service error when the initial daily report fails", async () => {
+  it("shows the existing service error when the opened daily report fails", async () => {
+    const user = userEvent.setup();
     render(<App api={apiWith(async () => { throw new ApiError("Tushare 不可用", 503); })} />);
+    await viewReport(user);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("数据服务暂不可用");
   });
 
   it("shows an explicit chart state for an empty market response", async () => {
+    const user = userEvent.setup();
     render(<App api={apiWith(async (symbol, timeframe) => makeReport(symbol, timeframe))} />);
+    await viewReport(user);
 
     expect(await screen.findByText("当前周期暂无可绘制行情")).toBeInTheDocument();
   });
 
-  it("shows progress without repeating the structure conclusion beside the chart", async () => {
+  it("shows progress without the structure report until the user opens it", async () => {
     render(<App />);
     expect(await screen.findByText("运行中 · 3 / 6")).toBeInTheDocument();
-    expect(screen.getByRole("img", { name: "600519.SH 图表" })).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "600519.SH 图表" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "结构报告" })).not.toBeInTheDocument();
     expect(document.querySelector(".report-copy")).not.toBeInTheDocument();
     expect(screen.queryByText(/结构结论 \/ DAILY/)).not.toBeInTheDocument();
   });
@@ -660,7 +758,12 @@ describe("research workbench", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     expect(getProgress).toHaveBeenCalledTimes(3);
     expect(screen.getByText("运行中 · 1 / 1")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "本批 AI 报告" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "结构报告" })).not.toBeInTheDocument();
+    await act(async () => { await Promise.resolve(); });
+    vi.useRealTimers();
+    fireEvent.click(screen.getByRole("button", { name: "查看 贵州茅台 600519.SH 报告" }));
+    expect(await screen.findByRole("heading", { name: "报告 600519.SH 1d" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "本批 AI 报告" })).toBeInTheDocument();
   });
 
   it("shows a Chinese API error state", async () => {
@@ -678,7 +781,9 @@ describe("research workbench", () => {
     const createInvestmentReport = vi.fn(auxiliaryApi().createInvestmentReport);
     const api = { ...apiWith(getReport), getInformation, createInvestmentReport };
 
+    const user = userEvent.setup();
     render(<App api={api} />);
+    await viewReport(user);
 
     await waitFor(() => {
       expect(getReport).toHaveBeenCalledWith("600519.SH", "1d");
@@ -696,6 +801,7 @@ describe("research workbench", () => {
     const api = { ...apiWith(async (symbol, timeframe) => makeReport(symbol, timeframe, true)), getInformation };
     const user = userEvent.setup();
     render(<App api={api} />);
+    await viewReport(user);
     await screen.findByRole("heading", { name: "资讯 600519.SH" });
 
     await user.click(screen.getByRole("button", { name: "周线" }));
@@ -704,38 +810,38 @@ describe("research workbench", () => {
     expect(getInformation).toHaveBeenCalledOnce();
   });
 
-  it("selects existing watch rows and keeps remove clicks from selecting", async () => {
+  it("opens another completed stock report from progress without loading from the pool", async () => {
     const getReport = vi.fn(async (symbol: string, timeframe: Timeframe) => makeReport(symbol, timeframe, true));
     const getInformation = vi.fn(async (symbol: string) => makeInformation(symbol));
     const api: WorkbenchApi = {
       ...apiWith(getReport),
       getInformation,
-      async getWatchlist() {
-        return [
-          { symbol: "600519.SH", name: "贵州茅台", market: "SH" },
-          { symbol: "000858.SZ", name: "五粮液", market: "SZ" },
-        ];
+      async getWatchlist() { return maotaiWuliangWatchlist(); },
+      async getProgress() {
+        return completedProgress(
+          { symbol: "600519.SH", name: "贵州茅台" },
+          { symbol: "000858.SZ", name: "五粮液" },
+        );
       },
     };
     const user = userEvent.setup();
     render(<App api={api} />);
 
-    const first = await screen.findByRole("button", { name: "选择 贵州茅台 600519.SH" });
-    const second = screen.getByRole("button", { name: "选择 五粮液 000858.SZ" });
-    expect(first).toHaveAttribute("aria-pressed", "true");
-
-    await user.click(second);
-    expect(second).toHaveAttribute("aria-pressed", "true");
+    expect(await screen.findByRole("heading", { name: "候选池" })).toBeInTheDocument();
+    expect(getReport).not.toHaveBeenCalled();
+    await viewReport(user, "五粮液", "000858.SZ");
     await screen.findByRole("heading", { name: "资讯 000858.SZ" });
     const reportCalls = getReport.mock.calls.length;
     const informationCalls = getInformation.mock.calls.length;
 
+    await user.click(screen.getByRole("button", { name: "返回进度" }));
+    await goToPool(user);
     await user.click(screen.getByRole("button", { name: "移除 600519.SH" }));
     expect(getReport).toHaveBeenCalledTimes(reportCalls);
     expect(getInformation).toHaveBeenCalledTimes(informationCalls);
   });
 
-  it("selects the deterministic remaining stock after removing the current stock", async () => {
+  it("keeps a completed report available after the stock is removed from the pool", async () => {
     const getReport = vi.fn(async (symbol: string, timeframe: Timeframe) => makeReport(symbol, timeframe, true));
     const getInformation = vi.fn(async (symbol: string) => makeInformation(symbol));
     const getInvestmentReport = vi.fn(async () => makeInvestmentJob("completed", "600519.SH", "1d", "digest-removed", "待删除股票 AI 报告"));
@@ -744,22 +850,25 @@ describe("research workbench", () => {
       getInformation,
       createInvestmentReport: vi.fn(async () => ({ reportId: "report-600519.SH-1d", status: "completed" as const, cached: true })),
       getInvestmentReport,
-      async getWatchlist() {
-        return [
-          { symbol: "600519.SH", name: "贵州茅台", market: "SH" },
-          { symbol: "000858.SZ", name: "五粮液", market: "SZ" },
-        ];
+      async getWatchlist() { return maotaiWuliangWatchlist(); },
+      async getProgress() {
+        return completedProgress(
+          { symbol: "600519.SH", name: "贵州茅台" },
+          { symbol: "000858.SZ", name: "五粮液" },
+        );
       },
     };
     const user = userEvent.setup();
     render(<App api={api} />);
+    await viewReport(user);
     await user.click(await screen.findByRole("button", { name: "生成 Pi AI 走势报告" }));
     expect(await screen.findByRole("heading", { name: "待删除股票 AI 报告" })).toBeInTheDocument();
 
+    await user.click(screen.getByRole("button", { name: "返回进度" }));
+    await goToPool(user);
     await user.click(screen.getByRole("button", { name: "移除 600519.SH" }));
+    await viewReport(user, "五粮液", "000858.SZ");
 
-    const remaining = await screen.findByRole("button", { name: "选择 五粮液 000858.SZ" });
-    expect(remaining).toHaveAttribute("aria-pressed", "true");
     expect(await screen.findByRole("heading", { name: "报告 000858.SZ 1d" })).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "资讯 000858.SZ" })).toBeInTheDocument();
     expect(screen.getByText("尚未生成 Pi AI 走势报告")).toBeInTheDocument();
@@ -769,35 +878,21 @@ describe("research workbench", () => {
   });
 
   it("clears the selection and pending local state after removing the final stock", async () => {
-    const reportResult = deferred<Report>();
-    const informationResult = deferred<StockInformation>();
+    const getReport = vi.fn(async (symbol: string, timeframe: Timeframe) => makeReport(symbol, timeframe, true));
     const createInvestmentReport = vi.fn(auxiliaryApi().createInvestmentReport);
     const api: WorkbenchApi = {
-      ...apiWith(() => reportResult.promise),
-      getInformation: vi.fn(() => informationResult.promise),
+      ...apiWith(getReport),
       createInvestmentReport,
     };
     const user = userEvent.setup();
     render(<App api={api} />);
-    const remove = await screen.findByRole("button", { name: "移除 600519.SH" });
-    expect(await screen.findByText("正在加载结构报告…")).toBeInTheDocument();
-    expect(screen.getByText("正在加载资讯证据…")).toBeInTheDocument();
-
-    await user.click(remove);
+    await goToPool(user);
+    await user.click(await screen.findByRole("button", { name: "移除 600519.SH" }));
 
     await waitFor(() => expect(screen.queryByRole("button", { name: "移除 600519.SH" })).not.toBeInTheDocument());
-    expect(screen.queryByText("正在加载结构报告…")).not.toBeInTheDocument();
-    expect(screen.queryByText("正在加载资讯证据…")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "生成 Pi AI 走势报告" }));
     expect(createInvestmentReport).not.toHaveBeenCalled();
-
-    await act(async () => {
-      reportResult.resolve(makeReport("600519.SH", "1d", true));
-      informationResult.reject(new ApiError("迟到的资讯错误", 503));
-      await Promise.resolve();
-    });
+    expect(getReport).not.toHaveBeenCalled();
     expect(screen.queryByRole("heading", { name: "报告 600519.SH 1d" })).not.toBeInTheDocument();
-    expect(screen.queryByText("迟到的资讯错误")).not.toBeInTheDocument();
   });
 
   it("uses the latest watchlist when concurrent removals resolve out of order", async () => {
@@ -810,17 +905,16 @@ describe("research workbench", () => {
       createInvestmentReport,
       getInvestmentReport: vi.fn(async () => makeInvestmentJob("completed", "600519.SH", "1d", "digest-concurrent-remove", "并发删除前 AI 报告")),
       removeWatchlist,
-      async getWatchlist() {
-        return [
-          { symbol: "600519.SH", name: "贵州茅台", market: "SH" },
-          { symbol: "000858.SZ", name: "五粮液", market: "SZ" },
-        ];
+      async getWatchlist() { return maotaiWuliangWatchlist(); },
+      async getProgress() {
+        return completedProgress(
+          { symbol: "600519.SH", name: "贵州茅台" },
+          { symbol: "000858.SZ", name: "五粮液" },
+        );
       },
     };
     render(<App api={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "生成 Pi AI 走势报告" }));
-    expect(await screen.findByRole("heading", { name: "并发删除前 AI 报告" })).toBeInTheDocument();
-
+    fireEvent.click(await screen.findByRole("button", { name: /查询候选/ }));
     fireEvent.click(screen.getByRole("button", { name: "移除 600519.SH" }));
     fireEvent.click(screen.getByRole("button", { name: "移除 000858.SZ" }));
     expect(removeWatchlist).toHaveBeenCalledTimes(2);
@@ -834,20 +928,19 @@ describe("research workbench", () => {
     expect(screen.queryByRole("heading", { name: /报告 (600519\.SH|000858\.SZ) 1d/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: /资讯 (600519\.SH|000858\.SZ)/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "并发删除前 AI 报告" })).not.toBeInTheDocument();
-    expect(screen.getByText("尚未生成 Pi AI 走势报告")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "生成 Pi AI 走势报告" }));
-    expect(createInvestmentReport).toHaveBeenCalledOnce();
+    expect(createInvestmentReport).not.toHaveBeenCalled();
   });
 
   it("discards late information from the previously selected stock", async () => {
     const oldInformation = deferred<StockInformation>();
     const api: WorkbenchApi = {
       ...apiWith(async (symbol, timeframe) => makeReport(symbol, timeframe, true)),
-      async getWatchlist() {
-        return [
-          { symbol: "600519.SH", name: "贵州茅台", market: "SH" },
-          { symbol: "000858.SZ", name: "五粮液", market: "SZ" },
-        ];
+      async getWatchlist() { return maotaiWuliangWatchlist(); },
+      async getProgress() {
+        return completedProgress(
+          { symbol: "600519.SH", name: "贵州茅台" },
+          { symbol: "000858.SZ", name: "五粮液" },
+        );
       },
       async getInformation(symbol) {
         return symbol === "600519.SH" ? oldInformation.promise : makeInformation(symbol, "五粮液新资讯");
@@ -855,9 +948,9 @@ describe("research workbench", () => {
     };
     const user = userEvent.setup();
     render(<App api={api} />);
-    const second = await screen.findByRole("button", { name: "选择 五粮液 000858.SZ" });
-
-    await user.click(second);
+    await viewReport(user);
+    await user.click(screen.getByRole("button", { name: "返回进度" }));
+    await viewReport(user, "五粮液", "000858.SZ");
     expect(await screen.findByRole("heading", { name: "五粮液新资讯" })).toBeInTheDocument();
     oldInformation.resolve(makeInformation("600519.SH", "迟到的茅台资讯"));
 
@@ -870,7 +963,9 @@ describe("research workbench", () => {
       ...apiWith(async (symbol, timeframe) => makeReport(symbol, timeframe, true)),
       async getInformation() { throw new ApiError("资讯服务不可用", 503); },
     };
+    const user = userEvent.setup();
     render(<App api={api} />);
+    await viewReport(user);
 
     expect(await screen.findByRole("img", { name: "600519.SH 图表" })).toBeInTheDocument();
     expect(await screen.findByText("资讯服务不可用")).toBeInTheDocument();
@@ -883,6 +978,7 @@ describe("research workbench", () => {
     const api = { ...apiWith(async (symbol, timeframe) => makeReport(symbol, timeframe, true)), createInvestmentReport };
     const user = userEvent.setup();
     render(<App api={api} />);
+    await viewReport(user);
     const button = await screen.findByRole("button", { name: "生成 Pi AI 走势报告" });
 
     await user.click(button);
@@ -899,6 +995,7 @@ describe("research workbench", () => {
       .mockResolvedValueOnce(makeInvestmentJob("completed"));
     const api = { ...apiWith(async (symbol, timeframe) => makeReport(symbol, timeframe, true)), getInvestmentReport };
     render(<App api={api} />);
+    await openMaotaiReport();
     const button = await screen.findByRole("button", { name: "生成 Pi AI 走势报告" });
     vi.useFakeTimers();
 
@@ -932,6 +1029,7 @@ describe("research workbench", () => {
       getInvestmentReport,
     };
     render(<App api={api} />);
+    await openMaotaiReport();
     const generate = await screen.findByRole("button", { name: "生成 Pi AI 走势报告" });
     vi.useFakeTimers();
 
@@ -955,14 +1053,16 @@ describe("research workbench", () => {
     const api: WorkbenchApi = {
       ...apiWith(async (symbol, timeframe) => makeReport(symbol, timeframe, true)),
       getInvestmentReport,
-      async getWatchlist() {
-        return [
-          { symbol: "600519.SH", name: "贵州茅台", market: "SH" },
-          { symbol: "000858.SZ", name: "五粮液", market: "SZ" },
-        ];
+      async getWatchlist() { return maotaiWuliangWatchlist(); },
+      async getProgress() {
+        return completedProgress(
+          { symbol: "600519.SH", name: "贵州茅台" },
+          { symbol: "000858.SZ", name: "五粮液" },
+        );
       },
     };
     render(<App api={api} />);
+    await openMaotaiReport();
     const generate = await screen.findByRole("button", { name: "生成 Pi AI 走势报告" });
     vi.useFakeTimers();
 
@@ -971,9 +1071,11 @@ describe("research workbench", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("报告生成超时");
     fireEvent.click(screen.getByRole("button", { name: "重试 Pi AI 报告" }));
     await act(async () => { await Promise.resolve(); });
-    fireEvent.click(screen.getByRole("button", { name: "选择 五粮液 000858.SZ" }));
+    fireEvent.click(screen.getByRole("button", { name: "返回进度" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看 五粮液 000858.SZ 报告" }));
     await act(async () => { await Promise.resolve(); });
-    fireEvent.click(screen.getByRole("button", { name: "选择 贵州茅台 600519.SH" }));
+    fireEvent.click(screen.getByRole("button", { name: "返回进度" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看 贵州茅台 600519.SH 报告" }));
     await act(async () => { await Promise.resolve(); });
 
     expect(screen.getByRole("status")).toHaveTextContent("报告已排队");
@@ -990,21 +1092,24 @@ describe("research workbench", () => {
     const api: WorkbenchApi = {
       ...apiWith(async (symbol, timeframe) => makeReport(symbol, timeframe, true)),
       getInvestmentReport,
-      async getWatchlist() {
-        return [
-          { symbol: "600519.SH", name: "贵州茅台", market: "SH" },
-          { symbol: "000858.SZ", name: "五粮液", market: "SZ" },
-        ];
+      async getWatchlist() { return maotaiWuliangWatchlist(); },
+      async getProgress() {
+        return completedProgress(
+          { symbol: "600519.SH", name: "贵州茅台" },
+          { symbol: "000858.SZ", name: "五粮液" },
+        );
       },
     };
     render(<App api={api} />);
+    await openMaotaiReport();
     const generate = await screen.findByRole("button", { name: "生成 Pi AI 走势报告" });
     vi.useFakeTimers();
 
     fireEvent.click(generate);
     await act(async () => { await Promise.resolve(); await vi.advanceTimersByTimeAsync(2000); });
     expect(getInvestmentReport).toHaveBeenCalledOnce();
-    fireEvent.click(screen.getByRole("button", { name: "选择 五粮液 000858.SZ" }));
+    fireEvent.click(screen.getByRole("button", { name: "返回进度" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看 五粮液 000858.SZ 报告" }));
     oldPoll.resolve(makeInvestmentJob("completed", "600519.SH", "1d", "digest-old", "旧股票 AI 报告"));
     await act(async () => { await Promise.resolve(); });
 
@@ -1020,6 +1125,7 @@ describe("research workbench", () => {
       getInvestmentReport: vi.fn(() => oldPoll.promise),
     };
     render(<App api={api} />);
+    await openMaotaiReport();
     const generate = await screen.findByRole("button", { name: "生成 Pi AI 走势报告" });
     vi.useFakeTimers();
 
@@ -1041,9 +1147,10 @@ describe("research workbench", () => {
       createInvestmentReport: vi.fn(() => creation.promise),
       getInvestmentReport,
     };
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const { unmount } = render(<App api={api} />);
+    await openMaotaiReport();
     const generate = await screen.findByRole("button", { name: "生成 Pi AI 走势报告" });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.useFakeTimers();
 
     fireEvent.click(generate);
@@ -1064,9 +1171,10 @@ describe("research workbench", () => {
       retryInvestmentReport: vi.fn(() => retry.promise),
       getInvestmentReport,
     };
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const { unmount } = render(<App api={api} />);
+    await openMaotaiReport();
     const generate = await screen.findByRole("button", { name: "生成 Pi AI 走势报告" });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.useFakeTimers();
 
     fireEvent.click(generate);
@@ -1088,21 +1196,25 @@ describe("research workbench", () => {
       ...apiWith(async (symbol, timeframe) => makeReport(symbol, timeframe, true)),
       createInvestmentReport: vi.fn(() => creation.promise),
       getInvestmentReport,
-      async getWatchlist() {
-        return [
-          { symbol: "600519.SH", name: "贵州茅台", market: "SH" },
-          { symbol: "000858.SZ", name: "五粮液", market: "SZ" },
-        ];
+      async getWatchlist() { return maotaiWuliangWatchlist(); },
+      async getProgress() {
+        return completedProgress(
+          { symbol: "600519.SH", name: "贵州茅台" },
+          { symbol: "000858.SZ", name: "五粮液" },
+        );
       },
     };
     const user = userEvent.setup();
     render(<App api={api} />);
+    await viewReport(user);
     await user.click(await screen.findByRole("button", { name: "生成 Pi AI 走势报告" }));
-    await user.click(screen.getByRole("button", { name: "选择 五粮液 000858.SZ" }));
+    await user.click(screen.getByRole("button", { name: "返回进度" }));
+    await viewReport(user, "五粮液", "000858.SZ");
 
     await act(async () => creation.resolve({ reportId: "report-600519.SH-1d", status: "completed", cached: true }));
     expect(screen.getByText("尚未生成 Pi AI 走势报告")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "选择 贵州茅台 600519.SH" }));
+    await user.click(screen.getByRole("button", { name: "返回进度" }));
+    await viewReport(user);
 
     expect(await screen.findByRole("heading", { name: "切回后的完整报告" })).toBeInTheDocument();
     expect(getInvestmentReport).toHaveBeenCalledWith("report-600519.SH-1d");
@@ -1155,9 +1267,15 @@ describe("research workbench", () => {
       /text-overflow:\s*ellipsis/,
       /white-space:\s*nowrap/,
     ]);
-    expectDeclarations(declarations(/\.batch-cockpit\s+\.run-list\s*\{([^}]*)\}/), [/grid-template-columns:\s*1fr/]);
+    expectDeclarations(declarations(/\.batch-cockpit\s+\.run-list\s*\{([^}]*)\}/), [
+      /display:\s*flex/,
+      /flex-direction:\s*column/,
+      /width:\s*100%/,
+    ]);
     expectDeclarations(declarations(/\.batch-cockpit\s+\.run-row\s*\{([^}]*)\}/), [
-      /grid-template-columns:\s*8px\s+minmax\(72px,\s*84px\)\s+minmax\(0,\s*1fr\)\s+auto/,
+      /display:\s*flex/,
+      /align-items:\s*center/,
+      /gap:\s*14px/,
     ]);
     expectDeclarations(declarations(/\.batch-cockpit\s+\.report-section\s*\{([^}]*)\}/), [
       /margin-top:\s*0/,
