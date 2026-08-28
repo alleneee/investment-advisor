@@ -13,8 +13,17 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
+from .bs_analysis import BarNotFoundError, assert_bar_exists, build_bs_chart, symbol_bs_summary
 from .contracts import LedgerEvent, TradingReducerError
-from .metrics import AccountValuationService, period_return_curve, window_max_drawdown
+from .metrics import (
+    AccountValuationService,
+    _business_date,
+    _decimal,
+    _symbols_for_valuation,
+    period_return_curve,
+    replay_rows,
+    window_max_drawdown,
+)
 from .reducer import (
     InsufficientCashError,
     InsufficientPositionError,
@@ -30,6 +39,14 @@ from .store import (
     TradingStore,
     TradingStoreError,
 )
+
+_CLIENT_STORE_CODES = {
+    "DUPLICATE_TYPE",
+    "MARK_TYPE_IN_USE",
+    "MARK_TYPE_PRESET",
+    "MARK_TYPE_DISABLED",
+    "BAR_NOT_FOUND",
+}
 
 
 class TradingServiceError(ValueError):
@@ -53,6 +70,38 @@ class TradingConflictError(TradingServiceError):
 
 class InvalidTradingRequestError(TradingServiceError):
     code = "INVALID_REQUEST"
+
+
+class _ChartMarketProvider:
+    def __init__(self, inner: Any | None) -> None:
+        self._inner = inner
+
+    def daily(self, symbol: str, *, as_of=None, start_date=None, end_date=None):
+        inner = self._inner
+        if inner is None:
+            raise RuntimeError("行情不可用")
+        method = getattr(inner, "daily", None) or getattr(inner, "get_daily", None)
+        if method is None:
+            raise RuntimeError("行情不可用")
+        return method(symbol, as_of=as_of, start_date=start_date, end_date=end_date)
+
+    def minutes(self, symbol: str, *, freq: str, as_of, start_date, end_date):
+        inner = self._inner
+        if inner is None:
+            raise RuntimeError("分钟行情不可用")
+        method = getattr(inner, "minutes", None)
+        if method is None:
+            raise RuntimeError("分钟行情不可用")
+        return method(symbol, freq=freq, as_of=as_of, start_date=start_date, end_date=end_date)
+
+
+def _from_store_error(exc: TradingStoreError) -> TradingServiceError:
+    code = getattr(exc, "code", "INVALID_REQUEST")
+    if code == "REVISION_CONFLICT":
+        return TradingConflictError(str(exc), code=code)
+    if code in _CLIENT_STORE_CODES:
+        return InvalidTradingRequestError(str(exc), code=code)
+    return InvalidTradingRequestError(str(exc))
 
 
 class TradingService:
@@ -375,6 +424,181 @@ class TradingService:
             "return_curve": period_return_curve(nav, start, end),
         }
 
+    def bs_summary(self, start: date, end: date) -> dict[str, Any]:
+        if end < start:
+            raise InvalidTradingRequestError("start 必须早于或等于 end")
+        account = self._account()
+        executions = self._named_executions(account["account_id"])
+        ledger = replay_rows(
+            account["initial_capital"],
+            executions,
+            self.store.list_cash_flows(account["account_id"]),
+        )
+        names: dict[str, str] = {}
+        for row in executions:
+            symbol = str(row["symbol"])
+            name = row.get("name")
+            if symbol not in names and name:
+                names[symbol] = str(name)
+        as_of = min(end, self.valuation._now().date())
+        trading_days = self.valuation._calendar_dates(start, min(end, as_of)) or None
+        activation = _business_date(account["activated_on"])
+        all_days = self.valuation._calendar_dates(activation, as_of)
+        mark_end = next((day for day in reversed(all_days) if start <= day <= end), None)
+        mark_start = next((day for day in reversed(all_days) if day < start), None)
+        price_days = [day for day in (mark_start, mark_end) if day is not None]
+        closes = None
+        if price_days:
+            symbols = _symbols_for_valuation(executions, ledger.result.positions)
+            prices, _, _ = self.valuation._market_prices(account["account_id"], symbols, price_days)
+            mapped = {key: _decimal(row["close"]) for key, row in prices.items()}
+            if mapped:
+                closes = mapped
+        return {
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "symbols": symbol_bs_summary(
+                executions,
+                ledger,
+                names,
+                start,
+                end,
+                trading_days,
+                initial_capital=account["initial_capital"],
+                closes=closes,
+                mark_start=mark_start,
+                mark_end=mark_end,
+            ),
+        }
+
+    def bs_chart(self, *, symbol: str, timeframe: str, start: date, end: date) -> dict[str, Any]:
+        if end < start:
+            raise InvalidTradingRequestError("start 必须早于或等于 end")
+        account = self._account()
+        return build_bs_chart(
+            symbol=symbol,
+            timeframe=timeframe,
+            period_start=start,
+            period_end=end,
+            executions=self._named_executions(account["account_id"]),
+            provider=self._chart_provider(),
+            store=self.store,
+            account_id=account["account_id"],
+        )
+
+    def list_chart_mark_types(self) -> list[dict[str, Any]]:
+        account = self._account()
+        return self.store.ensure_preset_mark_types(account["account_id"])
+
+    def create_chart_mark_type(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        account = self._account()
+        self.store.ensure_preset_mark_types(account["account_id"])
+        try:
+            return self.store.create_chart_mark_type({"account_id": account["account_id"], **payload})
+        except TradingStoreError as exc:
+            raise _from_store_error(exc) from exc
+
+    def update_chart_mark_type(self, type_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        account = self._account()
+        self._require_owned(
+            self.store.list_chart_mark_types(account["account_id"]), "type_id", type_id, "点位类型"
+        )
+        try:
+            return self.store.update_chart_mark_type(type_id, payload)
+        except TradingStoreError as exc:
+            raise _from_store_error(exc) from exc
+
+    def delete_chart_mark_type(self, type_id: str) -> None:
+        account = self._account()
+        self._require_owned(
+            self.store.list_chart_mark_types(account["account_id"]), "type_id", type_id, "点位类型"
+        )
+        try:
+            self.store.delete_chart_mark_type(type_id)
+        except TradingStoreError as exc:
+            raise _from_store_error(exc) from exc
+
+    def list_chart_marks(self, *, symbol: str, start: date, end: date) -> list[dict[str, Any]]:
+        account = self._account()
+        if end < start:
+            raise InvalidTradingRequestError("start 不能晚于 end")
+        return [
+            row
+            for row in self.store.list_chart_marks(account["account_id"])
+            if row["symbol"] == symbol and self._in_range(row["occurred_at"], None, start, end)
+        ]
+
+    def create_chart_mark(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        start: date | None = None,
+        end: date | None = None,
+    ) -> dict[str, Any]:
+        account = self._account()
+        self.store.ensure_preset_mark_types(account["account_id"])
+        comment = payload.get("comment") or ""
+        if not isinstance(comment, str):
+            raise InvalidTradingRequestError("comment 必须是字符串")
+        if len(comment) > 1000:
+            raise InvalidTradingRequestError("comment 不能超过 1000 字")
+        occurred = datetime.fromisoformat(str(payload["occurred_at"]))
+        occurred_on = _shanghai_date(occurred)
+        period_start = start or occurred_on
+        period_end = end or occurred_on
+        if period_end < period_start:
+            raise InvalidTradingRequestError("start 不能晚于 end")
+        chart = build_bs_chart(
+            symbol=str(payload["symbol"]),
+            timeframe=str(payload["timeframe"]),
+            period_start=period_start,
+            period_end=period_end,
+            executions=self.store.list_executions(account["account_id"]),
+            provider=self._chart_provider(),
+            store=self.store,
+            account_id=account["account_id"],
+        )
+        try:
+            assert_bar_exists(chart["bars"], occurred)
+        except BarNotFoundError as exc:
+            raise InvalidTradingRequestError(str(exc), code=exc.code) from exc
+        try:
+            return self.store.create_chart_mark(
+                {
+                    "account_id": account["account_id"],
+                    "symbol": payload["symbol"],
+                    "occurred_at": payload["occurred_at"],
+                    "type_id": payload["type_id"],
+                    "comment": comment,
+                }
+            )
+        except TradingStoreError as exc:
+            raise _from_store_error(exc) from exc
+
+    def update_chart_mark(
+        self, mark_id: str, payload: Mapping[str, Any], revision: int
+    ) -> dict[str, Any]:
+        account = self._account()
+        self._require_owned(self.store.list_chart_marks(account["account_id"]), "mark_id", mark_id, "手标")
+        comment = payload.get("comment")
+        if comment is not None:
+            if not isinstance(comment, str):
+                raise InvalidTradingRequestError("comment 必须是字符串")
+            if len(comment) > 1000:
+                raise InvalidTradingRequestError("comment 不能超过 1000 字")
+        try:
+            return self.store.update_chart_mark(mark_id, payload, expected_revision=revision)
+        except TradingStoreError as exc:
+            raise _from_store_error(exc) from exc
+
+    def delete_chart_mark(self, mark_id: str, revision: int) -> None:
+        account = self._account()
+        self._require_owned(self.store.list_chart_marks(account["account_id"]), "mark_id", mark_id, "手标")
+        try:
+            self.store.delete_chart_mark(mark_id, expected_revision=revision)
+        except TradingStoreError as exc:
+            raise _from_store_error(exc) from exc
+
     def get_daily_review(self, trade_date: date) -> dict[str, Any]:
         account = self._account()
         with self.database.read() as connection:
@@ -418,6 +642,32 @@ class TradingService:
         if account is None:
             raise TradingNotFoundError("交易账户不存在")
         return account
+
+    def _chart_provider(self) -> _ChartMarketProvider:
+        inner = self.valuation.market_provider
+        if inner is None:
+            try:
+                from ..providers.factory import create_market_provider
+
+                inner = create_market_provider()
+                self.valuation.market_provider = inner
+            except (RuntimeError, TypeError, ValueError):
+                inner = None
+        return _ChartMarketProvider(inner)
+
+    def _named_executions(self, account_id: str) -> list[dict[str, Any]]:
+        rows = [dict(row) for row in self.store.list_executions(account_id)]
+        with self.database.read() as connection:
+            for row in rows:
+                detail = connection.execute(
+                    "SELECT name, tags, note FROM trading_execution_details WHERE execution_id = %s",
+                    (row["execution_id"],),
+                ).fetchone()
+                if detail is not None:
+                    row["name"] = detail["name"]
+                    row["tags"] = json.loads(detail["tags"])
+                    row["note"] = detail["note"]
+        return rows
 
     def _account_summary(self, account: dict[str, Any]) -> dict[str, Any]:
         return self.valuation.account_summary(
@@ -574,6 +824,15 @@ class TradingService:
     @staticmethod
     def _find_by_id(rows: list[dict[str, Any]], field: str, value: str) -> dict[str, Any] | None:
         return next((row for row in rows if row[field] == value), None)
+
+    @classmethod
+    def _require_owned(
+        cls, rows: list[dict[str, Any]], field: str, value: str, label: str
+    ) -> dict[str, Any]:
+        existing = cls._find_by_id(rows, field, value)
+        if existing is None:
+            raise TradingNotFoundError(f"{label}不存在")
+        return existing
 
     @staticmethod
     def _require_current(row: dict[str, Any] | None, revision: int, label: str) -> None:

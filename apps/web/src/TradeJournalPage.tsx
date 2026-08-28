@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { ChevronLeft, ChevronRight, ClipboardCheck, History, List, PlusSquare, Save, Wallet, type LucideIcon } from "lucide-react";
+import { ChevronLeft, ChevronRight, ClipboardCheck, History, List, PlusSquare, Save, Wallet, X, type LucideIcon } from "lucide-react";
+import { BsAnalysisPanel } from "./BsAnalysisPanel";
 import { JournalReturnChart } from "./JournalReturnChart";
 import { ReviewCenterPage } from "./ReviewCenterPage";
 import { buyReasons, reasonLabels, sellReasons } from "./trading-api";
@@ -84,6 +85,7 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
   const [activatedOn, setActivatedOn] = useState(today);
   const [initialCapital, setInitialCapital] = useState("100000.00");
   const [tradeDate, setTradeDate] = useState(today);
+  const [dayDetailOpen, setDayDetailOpen] = useState(false);
   const [journalView, setJournalView] = useState<JournalView>(initialView);
   const [openReviewKey, setOpenReviewKey] = useState<string | null>(null);
   const [calendar, setCalendar] = useState<TradingCalendarMonth | undefined>(undefined);
@@ -208,8 +210,28 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
     if (view === journalView) return;
     setPeriodSummaryResult(undefined);
     setPeriodSummaryFailure(undefined);
+    setDayDetailOpen(false);
     setJournalView(view);
   }
+
+  function selectCalendarDay(date: string) {
+    setTradeDate(date);
+    setDayDetailOpen(true);
+  }
+
+  function shiftCalendar(direction: -1 | 1) {
+    setDayDetailOpen(false);
+    setTradeDate(moveCalendar(tradeDate, journalView, direction));
+  }
+
+  useEffect(() => {
+    if (!dayDetailOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDayDetailOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [dayDetailOpen]);
 
   async function saveExecution(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -381,7 +403,7 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
         <p className="journal-lede">{journalView === "list" ? "记录、分析并优化您的交易表现。" : showCalendar ? "按日查看成交笔数、当日盈亏和复盘状态。" : "查看该周期的确定性复盘。"}</p>
       </div>
       {journalView === "list" ? <label className="journal-date">交易日期<input type="date" value={tradeDate} onChange={(event) => setTradeDate(event.target.value)} /></label> : <div className="journal-calendar-nav">
-        <button className="journal-calendar-chevron" type="button" aria-label={calendarNavLabel(journalView, -1)} onClick={() => setTradeDate(moveCalendar(tradeDate, journalView, -1))}>
+        <button className="journal-calendar-chevron" type="button" aria-label={calendarNavLabel(journalView, -1)} onClick={() => shiftCalendar(-1)}>
           <Icon icon={ChevronLeft} size={18} />
         </button>
         <div className="journal-calendar-net">
@@ -393,7 +415,7 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
             <strong>{reviewBounds ? `${reviewBounds.start} – ${reviewBounds.end}` : "—"}</strong>
           </>}
         </div>
-        <button className="journal-calendar-chevron" type="button" aria-label={calendarNavLabel(journalView, 1)} onClick={() => setTradeDate(moveCalendar(tradeDate, journalView, 1))}>
+        <button className="journal-calendar-chevron" type="button" aria-label={calendarNavLabel(journalView, 1)} onClick={() => shiftCalendar(1)}>
           <Icon icon={ChevronRight} size={18} />
         </button>
       </div>}
@@ -434,44 +456,58 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
         month={calendar.month}
         days={calendar.days}
         selectedDate={tradeDate}
+        highlightDate={dayDetailOpen ? tradeDate : null}
         view={journalView === "week" ? "week" : "month"}
-        onSelect={setTradeDate}
+        onSelect={selectCalendarDay}
       />}
-      <aside className="journal-calendar-sidebar" aria-label="当日明细">
-        <div className="journal-calendar-sidebar-head">
-          <h3>{longDateTitle(tradeDate)}</h3>
-          <span className={`journal-status${reviewDone ? " done" : ""}`}>{reviewStatusLabel(selectedDay?.reviewStatus ?? dailyReview?.status ?? null)}</span>
-        </div>
-        <div className="journal-calendar-sidebar-pnl">
-          <strong className={pnlToneClass(selectedDay?.dailyPnl ?? null)}>{selectedDay?.dailyPnl == null ? "—" : formatSignedMoney(selectedDay.dailyPnl)}</strong>
-          <span>当日盈亏</span>
-        </div>
-        <div className="journal-calendar-stats">
-          <div><span>成交笔数</span><strong>{selectedDay?.executionCount ?? executions?.length ?? 0}</strong></div>
-          <div><span>资金流水</span><strong>{cashFlows?.length ?? 0}</strong></div>
-        </div>
-        <section className="journal-calendar-notes">
-          <h4>当日成交</h4>
-          {executions === undefined ? <p className="journal-muted">正在读取成交…</p> : executions.length === 0 ? <p className="journal-muted">当日没有成交。</p> : <ul className="journal-list compact-list">
-            {executions.map((execution) => <li key={execution.executionId}>
-              <div>
-                <strong>{execution.side === "buy" ? "买入" : "卖出"} <span>{execution.symbol}</span></strong>
-                <span>{execution.name || "未填写名称"} · {formatMoney(execution.price)} × {execution.quantity}</span>
-              </div>
-            </li>)}
-          </ul>}
-        </section>
-        <section className="journal-calendar-notes">
-          <h4>复盘摘记</h4>
-          {dailyReview == null ? <p className="journal-muted">当日尚未写复盘。</p> : <>
-            {dailyReview.note && <p>{dailyReview.note}</p>}
-            {dailyReview.nextDayPlan && <p>次日计划：{dailyReview.nextDayPlan}</p>}
-            {dailyReview.invalidationCondition && <p>失效条件：{dailyReview.invalidationCondition}</p>}
-            {!dailyReview.note && !dailyReview.nextDayPlan && !dailyReview.invalidationCondition && <p className="journal-muted">复盘已保存，暂无文字摘记。</p>}
-          </>}
-        </section>
-        <button className="primary-button" type="button" onClick={() => selectJournalView("list")}>记录当日成交</button>
-      </aside>
+      {dayDetailOpen && <div className="journal-day-detail-backdrop" onClick={() => setDayDetailOpen(false)}>
+        <aside
+          className="journal-calendar-sidebar"
+          role="dialog"
+          aria-modal="true"
+          aria-label="当日明细"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="journal-calendar-sidebar-head">
+            <h3>{longDateTitle(tradeDate)}</h3>
+            <div className="journal-day-detail-head-actions">
+              <span className={`journal-status${reviewDone ? " done" : ""}`}>{reviewStatusLabel(selectedDay?.reviewStatus ?? dailyReview?.status ?? null)}</span>
+              <button className="journal-day-detail-close" type="button" aria-label="关闭当日明细" onClick={() => setDayDetailOpen(false)}>
+                <Icon icon={X} size={16} />
+              </button>
+            </div>
+          </div>
+          <div className="journal-calendar-sidebar-pnl">
+            <strong className={pnlToneClass(selectedDay?.dailyPnl ?? null)}>{selectedDay?.dailyPnl == null ? "—" : formatSignedMoney(selectedDay.dailyPnl)}</strong>
+            <span>当日盈亏</span>
+          </div>
+          <div className="journal-calendar-stats">
+            <div><span>成交笔数</span><strong>{selectedDay?.executionCount ?? executions?.length ?? 0}</strong></div>
+            <div><span>资金流水</span><strong>{cashFlows?.length ?? 0}</strong></div>
+          </div>
+          <section className="journal-calendar-notes">
+            <h4>当日成交</h4>
+            {executions === undefined ? <p className="journal-muted">正在读取成交…</p> : executions.length === 0 ? <p className="journal-muted">当日没有成交。</p> : <ul className="journal-list compact-list">
+              {executions.map((execution) => <li key={execution.executionId}>
+                <div>
+                  <strong>{execution.side === "buy" ? "买入" : "卖出"} <span>{execution.symbol}</span></strong>
+                  <span>{execution.name || "未填写名称"} · {formatMoney(execution.price)} × {execution.quantity}</span>
+                </div>
+              </li>)}
+            </ul>}
+          </section>
+          <section className="journal-calendar-notes">
+            <h4>复盘摘记</h4>
+            {dailyReview == null ? <p className="journal-muted">当日尚未写复盘。</p> : <>
+              {dailyReview.note && <p>{dailyReview.note}</p>}
+              {dailyReview.nextDayPlan && <p>次日计划：{dailyReview.nextDayPlan}</p>}
+              {dailyReview.invalidationCondition && <p>失效条件：{dailyReview.invalidationCondition}</p>}
+              {!dailyReview.note && !dailyReview.nextDayPlan && !dailyReview.invalidationCondition && <p className="journal-muted">复盘已保存，暂无文字摘记。</p>}
+            </>}
+          </section>
+          <button className="primary-button" type="button" onClick={() => selectJournalView("list")}>记录当日成交</button>
+        </aside>
+      </div>}
     </div>}
     {journalView === "list" && <>
     <div className="journal-workspace">
@@ -549,6 +585,12 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
         <button className="secondary-button" type="button" onClick={() => setPeriodSummaryEpoch((current) => current + 1)}>重新加载</button>
       </section>
       : <JournalReturnChart periodKind={reviewKind} summary={currentPeriodSummary} />)}
+    {showReview && reviewKind && reviewBounds && <BsAnalysisPanel
+      key={`bs-${reviewKey}`}
+      api={api}
+      periodStart={reviewBounds.start}
+      periodEnd={reviewBounds.end}
+    />}
     {showReview && !showCalendar && !periodReviewOpen && <EmptyState title="先根据该周期成交记录生成确定性复盘。" />}
     {showReview && !periodReviewOpen && reviewKey && <button className="primary-button" type="button" onClick={() => setOpenReviewKey(reviewKey)}>
       {reviewActionLabel(journalView)}
@@ -585,12 +627,14 @@ function CalendarGrid({
   month,
   days,
   selectedDate,
+  highlightDate,
   view,
   onSelect,
 }: {
   month: string;
   days: TradingCalendarDay[];
   selectedDate: string;
+  highlightDate: string | null;
   view: "month" | "week";
   onSelect: (date: string) => void;
 }) {
@@ -601,11 +645,12 @@ function CalendarGrid({
       {cells.map((cell) => {
         if (!cell.open) return <div key={cell.date} className="journal-calendar-day is-closed" aria-hidden="true" />;
         const tone = calendarTone(cell);
+        const highlighted = cell.date === highlightDate;
         return <button
           key={cell.date}
           type="button"
-          className={["journal-calendar-day", tone, cell.inMonth ? "" : "is-outside", cell.date === selectedDate ? "is-selected" : ""].filter(Boolean).join(" ")}
-          aria-pressed={cell.date === selectedDate}
+          className={["journal-calendar-day", tone, cell.inMonth ? "" : "is-outside", highlighted ? "is-selected" : ""].filter(Boolean).join(" ")}
+          aria-pressed={highlighted}
           aria-label={calendarDayLabel(cell)}
           onClick={() => onSelect(cell.date)}
         >

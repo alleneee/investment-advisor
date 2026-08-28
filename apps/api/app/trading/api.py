@@ -181,6 +181,33 @@ class TradingReportRequest(ExactModel):
     period_end: date
 
 
+class CreateChartMarkTypeRequest(ExactModel):
+    label: str = Field(min_length=1)
+    letter: str = Field(min_length=1, max_length=2)
+    color: str = Field(min_length=1)
+
+
+class UpdateChartMarkTypeRequest(ExactModel):
+    label: str | None = Field(default=None, min_length=1)
+    letter: str | None = Field(default=None, min_length=1, max_length=2)
+    color: str | None = Field(default=None, min_length=1)
+    enabled: StrictBool | None = None
+
+
+class CreateChartMarkRequest(ExactModel):
+    symbol: str = Field(min_length=1)
+    occurred_at: AwareDatetime
+    type_id: str = Field(min_length=1)
+    comment: str = Field(default="", max_length=1000)
+    timeframe: Literal["1d", "30m"]
+
+
+class UpdateChartMarkRequest(ExactModel):
+    revision: PositiveInt
+    type_id: str | None = Field(default=None, min_length=1)
+    comment: str | None = Field(default=None, max_length=1000)
+
+
 def create_trading_router(
     store: TradingStore,
     *,
@@ -322,6 +349,59 @@ def create_trading_router(
         result, _ = report_service.retry(report_id)
         response.status_code = status.HTTP_202_ACCEPTED
         return result
+
+    @router.get("/bs-summary")
+    def get_bs_summary(start: date, end: date) -> dict:
+        return service.bs_summary(start, end)
+
+    @router.get("/bs-chart")
+    def get_bs_chart(
+        symbol: str,
+        timeframe: Literal["1d", "30m"],
+        start: date,
+        end: date,
+    ) -> dict:
+        return service.bs_chart(symbol=symbol, timeframe=timeframe, start=start, end=end)
+
+    @router.get("/chart-mark-types")
+    def list_chart_mark_types() -> list[dict]:
+        return service.list_chart_mark_types()
+
+    @router.post("/chart-mark-types", status_code=status.HTTP_201_CREATED)
+    def create_chart_mark_type(payload: CreateChartMarkTypeRequest) -> dict:
+        return service.create_chart_mark_type(payload.model_dump(mode="json"))
+
+    @router.patch("/chart-mark-types/{type_id}")
+    def update_chart_mark_type(type_id: str, payload: UpdateChartMarkTypeRequest) -> dict:
+        return service.update_chart_mark_type(type_id, payload.model_dump(mode="json", exclude_unset=True))
+
+    @router.delete("/chart-mark-types/{type_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_chart_mark_type(type_id: str) -> None:
+        service.delete_chart_mark_type(type_id)
+
+    @router.get("/chart-marks")
+    def list_chart_marks(symbol: str, start: date, end: date) -> list[dict]:
+        return service.list_chart_marks(symbol=symbol, start=start, end=end)
+
+    @router.post("/chart-marks", status_code=status.HTTP_201_CREATED)
+    def create_chart_mark(
+        payload: CreateChartMarkRequest,
+        start: date | None = None,
+        end: date | None = None,
+    ) -> dict:
+        return service.create_chart_mark(payload.model_dump(mode="json"), start=start, end=end)
+
+    @router.patch("/chart-marks/{mark_id}")
+    def update_chart_mark(mark_id: str, payload: UpdateChartMarkRequest) -> dict:
+        body = payload.model_dump(mode="json", exclude_unset=True)
+        revision = body.pop("revision")
+        return service.update_chart_mark(mark_id, body, revision)
+
+    @router.delete("/chart-marks/{mark_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_chart_mark(
+        mark_id: str, if_match: Annotated[str | None, Header(alias="If-Match")] = None
+    ) -> None:
+        service.delete_chart_mark(mark_id, _if_match_revision(if_match))
 
     return router
 

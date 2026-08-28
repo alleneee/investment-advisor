@@ -1,8 +1,6 @@
 import { useEffect, useRef } from "react";
 import {
   CandlestickSeries,
-  ColorType,
-  CrosshairMode,
   HistogramSeries,
   createChart,
   type IChartApi,
@@ -16,6 +14,7 @@ import {
   formatChanTooltip,
 } from "./chan-chart-option";
 import type { ChanChartData } from "./types";
+import { WORKBENCH_CANDLE_SERIES, workbenchChartOptions } from "./workbench-chart";
 
 export function ChanChart({ symbol, data }: { symbol: string; data: ChanChartData }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -34,48 +33,12 @@ export function ChanChart({ symbol, data }: { symbol: string; data: ChanChartDat
   useEffect(() => {
     const container = containerRef.current;
     if (!hasData || !container) return;
-    const chart = createChart(container, {
+    const chart = createChart(container, workbenchChartOptions({
       width: container.clientWidth || 800,
       height: container.clientHeight || 411,
-      layout: {
-        background: { type: ColorType.Solid, color: "#131313" },
-        textColor: "#bbcbb2",
-        fontSize: 10,
-        fontFamily: '"JetBrains Mono", ui-monospace, monospace',
-        panes: {
-          enableResize: false,
-          separatorColor: "#2a2a2a",
-          separatorHoverColor: "#2a2a2a",
-        },
-      },
-      grid: {
-        vertLines: { color: "rgba(53, 53, 52, 0.7)" },
-        horzLines: { color: "rgba(53, 53, 52, 0.9)" },
-      },
-      crosshair: {
-        mode: CrosshairMode.Normal,
-        vertLine: { color: "#3de530", labelBackgroundColor: "#201f1f" },
-        horzLine: { color: "#3de530", labelBackgroundColor: "#201f1f" },
-      },
-      rightPriceScale: { borderColor: "#2a2a2a" },
-      timeScale: {
-        borderColor: "#2a2a2a",
-        timeVisible: false,
-        secondsVisible: false,
-        rightOffset: 2,
-      },
-      localization: { locale: "zh-CN" },
-    });
-    const candlestick = chart.addSeries(CandlestickSeries, {
-      upColor: "#f6465d",
-      downColor: "#0ecb81",
-      borderUpColor: "#f6465d",
-      borderDownColor: "#0ecb81",
-      wickUpColor: "#f6465d",
-      wickDownColor: "#0ecb81",
-      priceLineVisible: false,
-      lastValueVisible: false,
-    }, 0);
+      timeVisible: false,
+    }));
+    const candlestick = chart.addSeries(CandlestickSeries, WORKBENCH_CANDLE_SERIES, 0);
     chart.addPane();
     const volume = chart.addSeries(HistogramSeries, {
       priceFormat: { type: "volume" },

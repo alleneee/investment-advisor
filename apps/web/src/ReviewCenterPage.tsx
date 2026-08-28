@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { attributionCategoryLabels, attributionReasonLabels, reasonLabels } from "./trading-api";
 import type { TradingApi } from "./trading-api";
-import { TradingReviewChart } from "./TradingReviewChart";
 import { DataTable } from "./ui/DataTable";
 import { EmptyState } from "./ui/EmptyState";
 import { formatMoney, formatRate, formatSignedMoney, signedTone } from "./ui/formatDisplay";
@@ -53,7 +52,6 @@ export function ReviewCenterPage({
   const [history, setHistory] = useState<TradingReviewReport[]>([]);
   const [busy, setBusy] = useState<"preview" | "create" | "retry" | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [chartIndex, setChartIndex] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -87,7 +85,6 @@ export function ReviewCenterPage({
     setFreeStart(bounds.start);
     setFreeEnd(bounds.end);
     setReport(null);
-    setChartIndex(0);
     setError(null);
   }
 
@@ -98,7 +95,6 @@ export function ReviewCenterPage({
     try {
       const next = await api.getReviewPreview(periodKind, periodStart, periodEnd);
       setReport(next);
-      setChartIndex(0);
     } catch (reason) {
       setError(messageOf(reason));
     } finally {
@@ -114,9 +110,14 @@ export function ReviewCenterPage({
       const next = await api.createReviewReport(periodKind, periodStart, periodEnd);
       setReport(next);
       setHistory((items) => upsertReport(items, next));
-      setChartIndex(0);
     } catch (reason) {
-      setError(messageOf(reason));
+      try {
+        const previewed = await api.getReviewPreview(periodKind, periodStart, periodEnd);
+        setReport(previewed);
+        setError(null);
+      } catch {
+        setError(messageOf(reason));
+      }
     } finally {
       setBusy(null);
     }
@@ -130,7 +131,6 @@ export function ReviewCenterPage({
       const next = await api.retryReviewReport(report.reportId);
       setReport(next);
       setHistory((items) => upsertReport(items, next));
-      setChartIndex(0);
     } catch (reason) {
       setError(messageOf(reason));
     } finally {
@@ -144,7 +144,6 @@ export function ReviewCenterPage({
   }, [autoCreate]);
 
   const deterministic = report?.deterministicReport ?? null;
-  const selectedBundle = deterministic?.chartBundles[chartIndex] ?? deterministic?.chartBundles[0] ?? null;
   const showGenerated = !hidePeriodControls || report != null;
 
   return <section className="review-center-page" aria-label="复盘中心">
@@ -167,7 +166,7 @@ export function ReviewCenterPage({
     {deterministic && <MetricBand report={deterministic} />}
     {showGenerated && <SplitPane
       left={<Panel title="报告版本" heading="h2" aria-label="报告版本历史">
-        {history.length ? <div className="review-history-list">{history.map((item) => <button type="button" key={item.reportId} className={`review-history-item${report?.reportId === item.reportId ? " selected" : ""}`} onClick={() => { setReport(item); setChartIndex(0); }}><span>V{item.reportVersion}</span><strong>{statusLabel(item.snapshotStatus)}</strong><small>{item.periodStart} 至 {item.periodEnd}{item.isOutdated ? " · 已过期" : ""}</small></button>)}</div> : <EmptyState title="该周期还没有固化报告。" />}
+        {history.length ? <div className="review-history-list">{history.map((item) => <button type="button" key={item.reportId} className={`review-history-item${report?.reportId === item.reportId ? " selected" : ""}`} onClick={() => setReport(item)}><span>V{item.reportVersion}</span><strong>{statusLabel(item.snapshotStatus)}</strong><small>{item.periodStart} 至 {item.periodEnd}{item.isOutdated ? " · 已过期" : ""}</small></button>)}</div> : <EmptyState title="该周期还没有固化报告。" />}
       </Panel>}
       right={deterministic ? <section className="review-result" aria-label="确定性复盘结果">
         <div className="section-heading"><h2>确定性复盘结果</h2><ReportFlags report={report!} /></div>
@@ -175,10 +174,6 @@ export function ReviewCenterPage({
         {report?.partialPeriod && <p className="review-warning">本周期尚不完整，以下内容只作进行中记录，不和完整周期做结论比较。</p>}
         <ReasonMatrix report={deterministic} />
         <CycleCases report={deterministic} />
-        <Panel title="权益、回撤与真实买卖点" heading="h3" className="review-chart-panel">
-          {deterministic.chartBundles.length > 1 && <div className="bundle-switch" aria-label="图表标的">{deterministic.chartBundles.map((bundle, index) => <button type="button" key={bundle.symbol} aria-pressed={selectedBundle?.symbol === bundle.symbol} onClick={() => setChartIndex(index)}>{bundle.symbol}</button>)}</div>}
-          {selectedBundle ? <TradingReviewChart report={deterministic} bundle={selectedBundle} /> : <p className="journal-muted">当前周期没有固化行情图表。</p>}
-        </Panel>
         <Comparison report={deterministic} />
       </section> : <EmptyState title="该周期还没有固化报告。" />}
     />}

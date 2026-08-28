@@ -1,7 +1,16 @@
 import { ApiError } from "./api";
 import type {
+  BsChart,
+  BsChartExecution,
+  BsMacd,
+  BsSummary,
+  BsTimeframe,
   CashFlow,
+  ChartMark,
+  ChartMarkType,
   CreateCashFlowRequest,
+  CreateChartMarkRequest,
+  CreateChartMarkTypeRequest,
   CreateTradingAccountRequest,
   CreateTradingExecutionRequest,
   DailyReview,
@@ -13,6 +22,7 @@ import type {
   TradingAccount,
   TradingAiStatus,
   TradingCalendarMonth,
+  TradingChartBar,
   TradingPeriodSummary,
   TradingChartBundle,
   TradingDataQuality,
@@ -21,6 +31,8 @@ import type {
   TradingReviewDeterministicReport,
   TradingReviewReport,
   TradingSnapshotStatus,
+  UpdateChartMarkRequest,
+  UpdateChartMarkTypeRequest,
 } from "./trading-types";
 
 export { ApiError } from "./api";
@@ -45,6 +57,16 @@ export interface TradingApi {
   listReviewReports(periodKind: ReviewPeriodKind, start: string, end: string): Promise<TradingReviewReport[]>;
   getReviewReport(reportId: string): Promise<TradingReviewReport>;
   retryReviewReport(reportId: string): Promise<TradingReviewReport>;
+  getBsSummary(start: string, end: string): Promise<BsSummary>;
+  getBsChart(symbol: string, timeframe: BsTimeframe, start: string, end: string): Promise<BsChart>;
+  listChartMarks(symbol: string, start: string, end: string): Promise<ChartMark[]>;
+  createChartMark(request: CreateChartMarkRequest): Promise<ChartMark>;
+  updateChartMark(markId: string, request: UpdateChartMarkRequest, revision: number): Promise<ChartMark>;
+  deleteChartMark(markId: string, revision: number): Promise<void>;
+  listChartMarkTypes(): Promise<ChartMarkType[]>;
+  createChartMarkType(request: CreateChartMarkTypeRequest): Promise<ChartMarkType>;
+  updateChartMarkType(typeId: string, request: UpdateChartMarkTypeRequest): Promise<ChartMarkType>;
+  deleteChartMarkType(typeId: string): Promise<void>;
 }
 
 const DECIMAL = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;
@@ -61,6 +83,7 @@ const SELL_REASONS = ["stop_loss", "take_profit", "structure_invalidated", "targ
 const REASONS = [...BUY_REASONS, ...SELL_REASONS] as const;
 const ATTRIBUTION_CATEGORIES = ["above_center", "inside_center", "below_center", "no_center", "unclassified"] as const;
 const ATTRIBUTION_REASONS = ["missing_market_data", "missing_bar_on_execution_date", "adjustment_unavailable"] as const;
+const BS_TIMEFRAMES = ["1d", "30m"] as const;
 
 export const buyReasons = BUY_REASONS;
 export const sellReasons = SELL_REASONS;
@@ -217,7 +240,7 @@ export function createTradingApi(baseUrl: string): TradingApi {
       return toStructureAttribution(await request<unknown>("/api/trading/structure-attribution"));
     },
     async getReviewPreview(periodKind, start, end) {
-      return toReviewReport(await request<unknown>(`/api/trading/reviews/preview?period_kind=${periodKind}&start=${start}&end=${end}`));
+      return toReviewReport(hydratePreviewReport(await request<unknown>(`/api/trading/reviews/preview?period_kind=${periodKind}&start=${start}&end=${end}`)));
     },
     async createReviewReport(periodKind, start, end) {
       return toReviewReport(await request<unknown>("/api/trading/reports", {
@@ -238,6 +261,79 @@ export function createTradingApi(baseUrl: string): TradingApi {
         body: "{}",
       }));
     },
+    async getBsSummary(start, end) {
+      const summary = toBsSummary(await request<unknown>(`/api/trading/bs-summary?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`));
+      if (summary.start !== start || summary.end !== end) {
+        throw adapterError("BS 摘要边界与请求不一致");
+      }
+      return summary;
+    },
+    async getBsChart(symbol, timeframe, start, end) {
+      const chart = toBsChart(await request<unknown>(`/api/trading/bs-chart?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`));
+      if (chart.symbol !== symbol || chart.timeframe !== timeframe) {
+        throw adapterError("BS 图表与请求不一致");
+      }
+      return chart;
+    },
+    async listChartMarks(symbol, start, end) {
+      const value = await request<unknown>(`/api/trading/chart-marks?symbol=${encodeURIComponent(symbol)}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
+      return array(value, "手标列表").map((item, index) => toChartMark(item, `手标 ${index + 1}`));
+    },
+    async createChartMark(payload) {
+      return toChartMark(await request<unknown>("/api/trading/chart-marks", {
+        method: "POST",
+        body: JSON.stringify({
+          symbol: payload.symbol,
+          occurred_at: payload.occurredAt,
+          type_id: payload.typeId,
+          comment: payload.comment,
+          timeframe: payload.timeframe,
+        }),
+      }));
+    },
+    async updateChartMark(markId, payload, revision) {
+      const body: Record<string, unknown> = { revision };
+      if (payload.typeId !== undefined) body.type_id = payload.typeId;
+      if (payload.comment !== undefined) body.comment = payload.comment;
+      return toChartMark(await request<unknown>(`/api/trading/chart-marks/${encodeURIComponent(markId)}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      }));
+    },
+    async deleteChartMark(markId, revision) {
+      await request<void>(`/api/trading/chart-marks/${encodeURIComponent(markId)}`, {
+        method: "DELETE",
+        headers: { "If-Match": String(revision) },
+      });
+    },
+    async listChartMarkTypes() {
+      const value = await request<unknown>("/api/trading/chart-mark-types");
+      return array(value, "点位类型").map((item, index) => toChartMarkType(item, `点位类型 ${index + 1}`));
+    },
+    async createChartMarkType(payload) {
+      return toChartMarkType(await request<unknown>("/api/trading/chart-mark-types", {
+        method: "POST",
+        body: JSON.stringify({
+          label: payload.label,
+          letter: payload.letter,
+          color: payload.color,
+        }),
+      }));
+    },
+    async updateChartMarkType(typeId, payload) {
+      const body: Record<string, unknown> = {};
+      if (payload.label !== undefined) body.label = payload.label;
+      if (payload.letter !== undefined) body.letter = payload.letter;
+      if (payload.color !== undefined) body.color = payload.color;
+      if (payload.enabled !== undefined) body.enabled = payload.enabled;
+      return toChartMarkType(await request<unknown>(`/api/trading/chart-mark-types/${encodeURIComponent(typeId)}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      }));
+    },
+    async deleteChartMarkType(typeId) {
+      await request<void>(`/api/trading/chart-mark-types/${encodeURIComponent(typeId)}`, { method: "DELETE" });
+    },
   };
 }
 
@@ -245,8 +341,11 @@ export function createMockTradingApi(): TradingApi {
   let account: TradingAccount | null = null;
   let executions: TradingExecution[] = [];
   let cashFlows: CashFlow[] = [];
+  let chartMarks: ChartMark[] = [];
+  let chartMarkTypes: ChartMarkType[] = [];
   const dailyReviews = new Map<string, DailyReview>();
   const unavailable = () => Promise.reject(new ApiError("本地演示模式不生成周期复盘，请连接 API 服务。", 503));
+  const mockAccountId = () => account?.accountId ?? "mock-account";
 
   return {
     async getAccount() { return account; },
@@ -347,6 +446,93 @@ export function createMockTradingApi(): TradingApi {
     async listReviewReports() { return []; },
     getReviewReport: unavailable,
     retryReviewReport: unavailable,
+    async getBsSummary(start, end) {
+      return { start, end, symbols: [] };
+    },
+    async getBsChart(symbol, timeframe) {
+      return {
+        symbol,
+        timeframe,
+        available: false,
+        adjustment: "none",
+        bars: [],
+        executions: [],
+        macd: { ready: false, dif: [], dea: [], histogram: [] },
+        quality: { status: "unavailable", warnings: [] },
+      };
+    },
+    async listChartMarks(symbol, start, end) {
+      return chartMarks.filter((item) => (
+        item.symbol === symbol && item.occurredAt.slice(0, 10) >= start && item.occurredAt.slice(0, 10) <= end
+      ));
+    },
+    async createChartMark(request) {
+      const mark: ChartMark = {
+        markId: `mock-mark-${chartMarks.length + 1}`,
+        accountId: mockAccountId(),
+        symbol: request.symbol,
+        occurredAt: request.occurredAt,
+        typeId: request.typeId,
+        comment: request.comment,
+        revision: 1,
+        createdAt: request.occurredAt,
+        updatedAt: request.occurredAt,
+      };
+      chartMarks = [...chartMarks, mark];
+      return mark;
+    },
+    async updateChartMark(markId, request, revision) {
+      const index = chartMarks.findIndex((item) => item.markId === markId);
+      if (index < 0 || chartMarks[index].revision !== revision) throw new ApiError("手标版本冲突", 409);
+      const next: ChartMark = {
+        ...chartMarks[index],
+        typeId: request.typeId ?? chartMarks[index].typeId,
+        comment: request.comment ?? chartMarks[index].comment,
+        revision: revision + 1,
+      };
+      chartMarks = chartMarks.map((item, itemIndex) => itemIndex === index ? next : item);
+      return next;
+    },
+    async deleteChartMark(markId, revision) {
+      const target = chartMarks.find((item) => item.markId === markId);
+      if (!target || target.revision !== revision) throw new ApiError("手标版本冲突", 409);
+      chartMarks = chartMarks.filter((item) => item.markId !== markId);
+    },
+    async listChartMarkTypes() { return chartMarkTypes; },
+    async createChartMarkType(request) {
+      const next: ChartMarkType = {
+        typeId: `mock-mark-type-${chartMarkTypes.length + 1}`,
+        accountId: mockAccountId(),
+        code: `custom_${chartMarkTypes.length + 1}`,
+        label: request.label,
+        letter: request.letter,
+        color: request.color,
+        preset: false,
+        enabled: true,
+        createdAt: "2026-08-01T00:00:00+08:00",
+      };
+      chartMarkTypes = [...chartMarkTypes, next];
+      return next;
+    },
+    async updateChartMarkType(typeId, request) {
+      const index = chartMarkTypes.findIndex((item) => item.typeId === typeId);
+      if (index < 0) throw new ApiError("点位类型不存在", 404);
+      const next: ChartMarkType = {
+        ...chartMarkTypes[index],
+        label: request.label ?? chartMarkTypes[index].label,
+        letter: request.letter ?? chartMarkTypes[index].letter,
+        color: request.color ?? chartMarkTypes[index].color,
+        enabled: request.enabled ?? chartMarkTypes[index].enabled,
+      };
+      chartMarkTypes = chartMarkTypes.map((item, itemIndex) => itemIndex === index ? next : item);
+      return next;
+    },
+    async deleteChartMarkType(typeId) {
+      const target = chartMarkTypes.find((item) => item.typeId === typeId);
+      if (!target) throw new ApiError("点位类型不存在", 404);
+      if (target.preset) throw new ApiError("预置点位类型不能删除", 400);
+      chartMarkTypes = chartMarkTypes.filter((item) => item.typeId !== typeId);
+    },
   };
 }
 
@@ -502,6 +688,41 @@ function toDailyReview(payload: unknown): DailyReview {
   };
 }
 
+function hydratePreviewReport(payload: unknown): unknown {
+  if (isRecord(payload) && "report_id" in payload) return payload;
+  const value = exactRecord(payload, [
+    "period_kind", "period_start", "period_end", "partial_period", "data_quality", "input_digest",
+    "ledger_revision", "daily_review_revision", "market_revision", "market_watermark",
+    "deterministic_report", "error",
+  ], "复盘预览");
+  return {
+    report_id: "preview",
+    snapshot_id: null,
+    report_version: 1,
+    supersedes_snapshot_id: null,
+    account_id: "preview",
+    period_kind: value.period_kind,
+    period_start: value.period_start,
+    period_end: value.period_end,
+    data_as_of: null,
+    input_digest: value.input_digest,
+    ledger_revision: value.ledger_revision,
+    daily_review_revision: value.daily_review_revision,
+    market_revision: value.market_revision,
+    market_watermark: value.market_watermark,
+    attempt: 1,
+    snapshot_status: value.deterministic_report === null ? "failed" : "ready",
+    data_quality: value.data_quality,
+    ai_status: "not_requested",
+    is_outdated: false,
+    partial_period: value.partial_period,
+    retryable: false,
+    deterministic_report: value.deterministic_report,
+    ai_review: null,
+    error: value.error,
+  };
+}
+
 export function toReviewReport(payload: unknown, name = "交易复盘报告"): TradingReviewReport {
   const value = exactRecord(payload, ["report_id", "snapshot_id", "report_version", "supersedes_snapshot_id", "account_id", "period_kind", "period_start", "period_end", "data_as_of", "input_digest", "ledger_revision", "daily_review_revision", "market_revision", "market_watermark", "attempt", "snapshot_status", "data_quality", "ai_status", "is_outdated", "partial_period", "retryable", "deterministic_report", "ai_review", "error"], name);
   const snapshotStatus = enumText(value.snapshot_status, SNAPSHOT_STATUSES, "复盘快照状态");
@@ -606,7 +827,7 @@ function toReasonFact(payload: unknown, index: number) {
 }
 
 function toReasonPerformance(payload: unknown, index: number) {
-  const value = exactRecord(payload, ["side", "reason_code", "sample_count", "conclusion_allowed", "win_rate", "net_pnl", "average_cycle_return_rate", "median_holding_days"], `理由表现 ${index + 1}`);
+  const value = exactRecord(payload, ["side", "reason_code", "sample_count", "conclusion_allowed", "win_rate", "net_pnl", "average_cycle_return_rate", "median_holding_days", "max_cycle_profit", "max_cycle_loss"], `理由表现 ${index + 1}`);
   return {
     side: enumText(value.side, SIDES, "理由表现方向"),
     reasonCode: enumText(value.reason_code, REASONS, "理由表现代码"),
@@ -616,6 +837,8 @@ function toReasonPerformance(payload: unknown, index: number) {
     netPnl: decimalText(value.net_pnl, "理由盈亏"),
     averageCycleReturnRate: toNullableMetric(value.average_cycle_return_rate, "理由收益率"),
     medianHoldingDays: toNullableMetric(value.median_holding_days, "理由持有日"),
+    maxCycleProfit: toNullableMetric(value.max_cycle_profit, "理由最大盈利"),
+    maxCycleLoss: toNullableMetric(value.max_cycle_loss, "理由最大亏损"),
   };
 }
 
@@ -768,6 +991,139 @@ export function toStructureAttribution(payload: unknown): StructureAttribution {
 function toError(payload: unknown, name: string) {
   const value = exactRecord(payload, ["code", "message"], name);
   return { code: text(value.code, `${name}代码`), message: text(value.message, `${name}信息`) };
+}
+
+function toBsSummary(payload: unknown): BsSummary {
+  const value = exactRecord(payload, ["start", "end", "symbols"], "BS 摘要");
+  const start = dateText(value.start, "周期开始");
+  const end = dateText(value.end, "周期结束");
+  if (end < start) throw adapterError("周期结束早于开始");
+  return {
+    start,
+    end,
+    symbols: array(value.symbols, "个股摘要").map((item, index) => toBsSymbolSummary(item, index)),
+  };
+}
+
+function toBsSymbolSummary(payload: unknown, index: number) {
+  const value = exactRecord(payload, ["symbol", "name", "realized_pnl", "period_pnl", "closed_cycle_count", "median_holding_days", "win_rate"], `个股摘要 ${index + 1}`);
+  return {
+    symbol: text(value.symbol, "个股代码"),
+    name: text(value.name, "个股名称", true),
+    realizedPnl: decimalText(value.realized_pnl, "个股已实现盈亏"),
+    periodPnl: decimalText(value.period_pnl, "个股期间盯市盈亏"),
+    closedCycleCount: nonNegativeInteger(value.closed_cycle_count, "建清仓次数"),
+    medianHoldingDays: toNullableMetric(value.median_holding_days, "个股持有日"),
+    winRate: toNullableMetric(value.win_rate, "个股胜率"),
+  };
+}
+
+function toBsChart(payload: unknown): BsChart {
+  const value = exactRecord(payload, ["symbol", "timeframe", "available", "adjustment", "bars", "executions", "macd", "quality"], "BS 图表");
+  if (value.adjustment !== "none") throw adapterError("BS 图表复权方式无效");
+  const bars = array(value.bars, "BS 图表 K 线").map((item, index) => toBsBar(item, index));
+  const quality = exactRecord(value.quality, ["status", "warnings"], "BS 图表质量");
+  return {
+    symbol: text(value.symbol, "图表股票"),
+    timeframe: enumText(value.timeframe, BS_TIMEFRAMES, "图表周期"),
+    available: booleanValue(value.available, "图表可用状态"),
+    adjustment: "none",
+    bars,
+    executions: array(value.executions, "图表成交").map((item, index) => toBsChartExecution(item, index)),
+    macd: toMacd(value.macd, bars.length),
+    quality: {
+      status: enumText(quality.status, DATA_QUALITIES, "图表质量状态"),
+      warnings: stringArray(quality.warnings, "图表质量警告"),
+    },
+  };
+}
+
+function toBsBar(payload: unknown, index: number): TradingChartBar {
+  const bar = exactRecord(payload, ["trade_date", "occurred_at", "open", "high", "low", "close", "volume"], `K 线 ${index + 1}`);
+  return {
+    tradeDate: dateText(bar.trade_date, "K线日期"),
+    occurredAt: dateTime(bar.occurred_at, "K线发生时间"),
+    open: decimalText(bar.open, "K线开盘价"),
+    high: decimalText(bar.high, "K线最高价"),
+    low: decimalText(bar.low, "K线最低价"),
+    close: decimalText(bar.close, "K线收盘价"),
+    volume: nullableDecimal(bar.volume, "K线成交量"),
+  };
+}
+
+function toBsChartExecution(payload: unknown, index: number): BsChartExecution {
+  const value = exactRecord(payload, ["execution_id", "symbol", "side", "price", "quantity", "fee", "primary_reason", "occurred_at", "bar_occurred_at"], `图表成交 ${index + 1}`);
+  return {
+    executionId: text(value.execution_id, "图表成交编号"),
+    symbol: text(value.symbol, "图表成交股票"),
+    occurredAt: dateTime(value.occurred_at, "图表成交时间"),
+    barOccurredAt: dateTime(value.bar_occurred_at, "图表成交柱时间"),
+    side: enumText(value.side, SIDES, "图表成交方向"),
+    price: decimalText(value.price, "图表成交价格"),
+    quantity: positiveInteger(value.quantity, "图表成交股数"),
+    fee: decimalText(value.fee, "图表成交手续费"),
+    primaryReason: enumText(value.primary_reason, REASONS, "图表成交理由"),
+  };
+}
+
+function toMacd(payload: unknown, barCount: number): BsMacd {
+  const raw = record(payload, "MACD");
+  const keys = "warmup_bars" in raw
+    ? ["ready", "warmup_bars", "dif", "dea", "histogram"] as const
+    : ["ready", "dif", "dea", "histogram"] as const;
+  const value = exactRecord(payload, keys, "MACD");
+  const dif = decimalSeries(value.dif, "MACD DIF");
+  const dea = decimalSeries(value.dea, "MACD DEA");
+  const histogram = decimalSeries(value.histogram, "MACD 柱");
+  if ([dif.length, dea.length, histogram.length].some((length) => length !== 0 && length !== barCount)
+    || dif.length !== dea.length
+    || dif.length !== histogram.length) {
+    throw adapterError("MACD 序列长度无效");
+  }
+  const macd: BsMacd = {
+    ready: booleanValue(value.ready, "MACD 就绪"),
+    dif,
+    dea,
+    histogram,
+  };
+  if ("warmup_bars" in value) {
+    macd.warmupBars = nonNegativeInteger(value.warmup_bars, "MACD 热身根数");
+  }
+  return macd;
+}
+
+function decimalSeries(payload: unknown, name: string): string[] {
+  return array(payload, name).map((item, index) => decimalText(item, `${name} ${index + 1}`));
+}
+
+function toChartMark(payload: unknown, name = "手标"): ChartMark {
+  const value = exactRecord(payload, ["mark_id", "account_id", "symbol", "occurred_at", "type_id", "comment", "revision", "created_at", "updated_at"], name);
+  return {
+    markId: text(value.mark_id, `${name}编号`),
+    accountId: text(value.account_id, `${name}账户`),
+    symbol: text(value.symbol, `${name}股票`),
+    occurredAt: dateTime(value.occurred_at, `${name}时间`),
+    typeId: text(value.type_id, `${name}类型`),
+    comment: text(value.comment, `${name}评论`, true),
+    revision: positiveInteger(value.revision, `${name}版本`),
+    createdAt: dateTime(value.created_at, `${name}创建时间`),
+    updatedAt: dateTime(value.updated_at, `${name}更新时间`),
+  };
+}
+
+function toChartMarkType(payload: unknown, name = "点位类型"): ChartMarkType {
+  const value = exactRecord(payload, ["type_id", "account_id", "code", "label", "letter", "color", "preset", "enabled", "created_at"], name);
+  return {
+    typeId: text(value.type_id, `${name}编号`),
+    accountId: text(value.account_id, `${name}账户`),
+    code: text(value.code, `${name}代码`),
+    label: text(value.label, `${name}名称`),
+    letter: text(value.letter, `${name}字母`),
+    color: text(value.color, `${name}颜色`),
+    preset: booleanValue(value.preset, `${name}预置`),
+    enabled: booleanValue(value.enabled, `${name}启用`),
+    createdAt: dateTime(value.created_at, `${name}创建时间`),
+  };
 }
 
 function backendErrorMessage(payload: unknown, fallback: string) {

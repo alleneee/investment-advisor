@@ -963,10 +963,16 @@ class AccountValuationService:
         for symbol in sorted(set(symbols)):
             cached = _cached_market_rows(self.database, account_id, symbol)
             missing = [day for day in valuation_dates if day not in cached]
+            latest = max(valuation_dates)
             rows: list[dict[str, Any]] = []
             if missing or force_refresh:
                 try:
                     rows = _provider_daily(self.market_provider, symbol, min(valuation_dates), max(valuation_dates))
+                except (RuntimeError, TypeError, ValueError):
+                    rows = []
+            elif latest in cached:
+                try:
+                    rows = _provider_daily(self.market_provider, symbol, latest, latest)
                 except (RuntimeError, TypeError, ValueError):
                     rows = []
             for valuation_date in valuation_dates:

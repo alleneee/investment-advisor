@@ -25,9 +25,8 @@ import { MetricTile } from "./ui/MetricTile";
 import { Notice } from "./ui/Notice";
 import { Panel } from "./ui/Panel";
 import { QuoteBand } from "./ui/QuoteBand";
-import { SplitPane } from "./ui/SplitPane";
 import { StatusChip } from "./ui/StatusChip";
-import { ArrowUpRight, LayoutDashboard, NotebookPen, Plus, Terminal, X } from "lucide-react";
+import { ArrowUpRight, ChevronLeft, LayoutDashboard, NotebookPen, Plus, Terminal, X } from "lucide-react";
 import type {
   InvestmentReportJob,
   InvestmentReportStatus,
@@ -47,6 +46,7 @@ interface AppProps {
 }
 
 type WorkbenchView = "batch" | "journal";
+type BatchStage = "pool" | "progress" | "report";
 
 function viewFromHash(): WorkbenchView {
   if (window.location.hash === "#/journal" || window.location.hash === "#/reviews") return "journal";
@@ -102,6 +102,7 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
   const [deliveryBusy, setDeliveryBusy] = useState(false);
   const [deliveryError, setDeliveryError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [batchStage, setBatchStage] = useState<BatchStage>("pool");
   const [view, setView] = useState<WorkbenchView>(viewFromHash);
   const [routeHash, setRouteHash] = useState(window.location.hash);
   const reportCache = useRef(new Map<string, Report>());
@@ -127,20 +128,6 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
   useEffect(() => {
     mounted.current = true;
     const token = ++lifecycleToken.current;
-    void service.getWatchlist().then((items) => {
-      if (!mounted.current || lifecycleToken.current !== token) return;
-      setWatchlist(items);
-      if (items.length) {
-        selectSymbol(items[0].symbol, true);
-      }
-    }).catch((error: unknown) => {
-      if (mounted.current && lifecycleToken.current === token) setNotice(errorMessage(error));
-    });
-    void service.getProgress().then((items) => {
-      if (mounted.current && lifecycleToken.current === token) setProgress(items);
-    }).catch((error: unknown) => {
-      if (mounted.current && lifecycleToken.current === token) setNotice(errorMessage(error));
-    });
     return () => {
       mounted.current = false;
       lifecycleToken.current += 1;
@@ -152,6 +139,32 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
   }, [service]);
 
   useEffect(() => {
+    if (view !== "batch") return;
+    let cancelled = false;
+    const token = lifecycleToken.current;
+    void service.getWatchlist().then((items) => {
+      if (cancelled || !mounted.current || lifecycleToken.current !== token) return;
+      setWatchlist(items);
+    }).catch((error: unknown) => {
+      if (cancelled || !mounted.current || lifecycleToken.current !== token || isAbortError(error)) return;
+      setNotice(errorMessage(error));
+    });
+    void service.getProgress().then((items) => {
+      if (cancelled || !mounted.current || lifecycleToken.current !== token) return;
+      setProgress(items);
+      if (items.some((item) => item.state === "queued" || item.state === "running")) {
+        setBatchStage((stage) => (stage === "report" ? stage : "progress"));
+      }
+    }).catch((error: unknown) => {
+      if (cancelled || !mounted.current || lifecycleToken.current !== token || isAbortError(error)) return;
+      setNotice(errorMessage(error));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [view, service]);
+
+  useEffect(() => {
     const syncView = () => {
       setView(viewFromHash());
       setRouteHash(window.location.hash);
@@ -161,13 +174,11 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
   }, []);
 
   useEffect(() => {
-    if (currentSymbol == null || watchlist.some((item) => item.symbol === currentSymbol)) return;
-    if (watchlist.length) {
-      selectSymbol(watchlist[0].symbol, true);
-      return;
-    }
+    if (batchStage !== "report") return;
+    if (currentSymbol != null) return;
     clearCurrentSelection();
-  }, [currentSymbol, watchlist]);
+    setBatchStage(progress.length ? "progress" : "pool");
+  }, [batchStage, currentSymbol, progress.length]);
 
   const completed = useMemo(() => progress.filter((item) => item.state === "completed").length, [progress]);
   const runningCount = useMemo(() => progress.filter((item) => item.state === "running").length, [progress]);
@@ -203,7 +214,7 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
       setNotice(null);
       showOutlookSelection(symbol, timeframe);
     } catch (error) {
-      if (currentRequest.current !== key) return;
+      if (currentRequest.current !== key || isAbortError(error)) return;
       if (timeframe === "1w" && report) {
         setChartNotice("周线加载失败，请重试。");
         showOutlookSelection(report.symbol, report.timeframe);
@@ -522,7 +533,6 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
     setCode("");
     setSuggestions([]);
     setNotice(null);
-    selectSymbol(item.symbol);
   }
 
   async function resolveWatchQuery(raw: string): Promise<{ symbol: string; name: string }> {
@@ -562,10 +572,22 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
     setWatchlist((items) => items.filter((item) => item.symbol !== symbol));
   }
 
+  function reportReady(item: RunProgress): boolean {
+    return item.state === "completed" || item.state === "degraded";
+  }
+
+  function openCompletedReport(item: RunProgress) {
+    if (!reportReady(item)) return;
+    setBatchStage("report");
+    selectSymbol(item.symbol);
+  }
+
   async function createBatch() {
+    if (!watchlist.length) return;
     stopBatchPolling();
     const token = batchPollToken.current;
     hydratedBatchReports.current.clear();
+    setBatchStage("progress");
     setProgress(watchlist.map((item) => ({ ...item, stage: "排队", state: "queued" })));
     setBusy(true);
     try {
@@ -584,9 +606,9 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
     <div className={`app-shell${view === "journal" ? " ledger-shell" : ""}`}>
       <Atmosphere />
       <aside className="rail">
-        <div className="brand-mark" aria-label="结构投研台">
+        <div className="brand-mark" aria-label="琪先一步">
           <Icon icon={Terminal} size={28} />
-          CHAN
+          琪先一步
         </div>
         <div className="rail-caption">结构投研台</div>
         <nav aria-label="主导航">
@@ -602,15 +624,27 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
             <div className="eyebrow">{viewEyebrow(view)}</div>
             {view === "batch" ? <h1>收盘后的结构，<em>现在</em>可见。</h1> : <h1>交易日记</h1>}
           </div>
-          {view === "batch" && <button className="primary-button" onClick={createBatch} disabled={busy}>
+          {view === "batch" && batchStage !== "report" && <button className="primary-button" onClick={() => void createBatch()} disabled={busy || !watchlist.length}>
             {busy ? "正在创建…" : "生成本批报告"}<Icon icon={ArrowUpRight} />
           </button>}
         </header>
 
-        {notice && <Notice title="数据服务暂不可用" detail={notice} />}
+        {notice && view === "batch" && <Notice title="数据服务暂不可用" detail={notice} />}
 
-        {view === "batch" && <div className="batch-page"><KpiStrip>
-          {quote
+        {view === "batch" && <div className="batch-page">
+          <nav className="batch-steps" aria-label="批次步骤">
+            <button type="button" className={batchStage === "pool" ? "is-current" : ""} aria-current={batchStage === "pool" ? "step" : undefined} onClick={() => setBatchStage("pool")}>
+              <span>1</span>查询候选
+            </button>
+            <button type="button" className={batchStage === "progress" ? "is-current" : ""} aria-current={batchStage === "progress" ? "step" : undefined} disabled={progress.length === 0 && !busy} onClick={() => setBatchStage("progress")}>
+              <span>2</span>观察进度
+            </button>
+            <button type="button" className={batchStage === "report" ? "is-current" : ""} aria-current={batchStage === "report" ? "step" : undefined} disabled={currentSymbol == null} onClick={() => setBatchStage("report")}>
+              <span>3</span>查看报告
+            </button>
+          </nav>
+          {batchStage !== "progress" && <KpiStrip>
+          {batchStage === "report" && quote
             ? <>
               <MetricTile
                 label={`最新收盘 · ${report?.symbol ?? ""}`}
@@ -637,30 +671,46 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
               />
             </>
             : <>
-              <MetricTile label="自选" value={String(watchlist.length).padStart(2, "0")} />
+              <MetricTile label="候选" value={String(watchlist.length).padStart(2, "0")} />
               <MetricTile label="已完成" value={String(completed).padStart(2, "0")} />
               <MetricTile label="运行中" value={String(runningCount).padStart(2, "0")} />
               <MetricTile label="本批状态" value={<StatusChip tone={batchChip.tone} label={batchChip.label} />} />
             </>}
-        </KpiStrip>
+        </KpiStrip>}
         <div className="batch-cockpit">
-        <SplitPane
-          left={<>
-          <Panel title="自选池" className="watchlist-panel">
+          {batchStage === "pool" && <Panel title="候选池" className="watchlist-panel">
             <div className="watch-suggest">
-            <div className="watch-input"><label htmlFor="watch-code">添加股票</label><input id="watch-code" role="combobox" aria-autocomplete="list" aria-expanded={suggestions.length > 0} aria-controls="watch-suggestions" value={code} onChange={(event) => setCode(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void addSymbol(); }} placeholder="名称、代码或拼音" /><button onClick={() => void addSymbol()}><Icon icon={Plus} />加入自选</button></div>
+            <div className="watch-input"><label htmlFor="watch-code">添加股票</label><input id="watch-code" role="combobox" aria-autocomplete="list" aria-expanded={suggestions.length > 0} aria-controls="watch-suggestions" value={code} onChange={(event) => setCode(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void addSymbol(); }} placeholder="名称、代码或拼音" /><button onClick={() => void addSymbol()}><Icon icon={Plus} />加入候选</button></div>
             {suggestions.length > 0 && <ul id="watch-suggestions" className="watch-suggest-list" role="listbox" aria-label="股票候选">{suggestions.map((item) => <li key={item.symbol}><button type="button" role="option" aria-selected="false" onClick={() => void addSuggestion(item)}><strong>{item.name}</strong><span>{item.symbol}</span></button></li>)}</ul>}
             </div>
-            <div className="watch-items">{watchlist.length ? watchlist.map((item, index) => <div className={`watch-row${currentSymbol === item.symbol ? " selected" : ""}`} key={item.symbol}><button type="button" className="watch-select" aria-label={`选择 ${item.name} ${item.symbol}`} aria-pressed={currentSymbol === item.symbol} onClick={() => selectSymbol(item.symbol)}><span className="row-number">{String(index + 1).padStart(2, "0")}</span><span className="market-dot" data-market={item.market} /><span className="watch-name"><strong>{item.name}</strong><small>{item.symbol}</small></span></button><button type="button" className="icon-button" aria-label={`移除 ${item.symbol}`} onClick={() => void removeSymbol(item.symbol)}><Icon icon={X} /></button></div>) : <EmptyState title="自选池还是空的。" />}</div>
-          </Panel>
-          <Panel title="本批进度" className="pulse-panel">
-            <span className="live-pill"><i />LIVE</span>
-            <div className="progress-summary"><strong>{runningLabel}</strong><span>盘后手动触发</span></div>
-            <div className="progress-track"><div style={{ width: `${progress.length ? Math.max(16, (completed / progress.length) * 100) : 0}%` }} /></div>
-            <div className="run-list">{progress.slice(0, 6).map((item) => <div className="run-row" key={item.symbol}><span className={`status-dot ${item.state}`} /><strong>{item.symbol}</strong><span>{item.stage}</span><small>{stateLabel(item.state)}</small></div>)}</div>
-          </Panel>
-          </>}
-          right={<>
+            <div className="watch-items">{watchlist.length ? watchlist.map((item, index) => <div className="watch-row" key={item.symbol}><div className="watch-select"><span className="row-number">{String(index + 1).padStart(2, "0")}</span><span className="market-dot" data-market={item.market} /><span className="watch-name"><strong>{item.name}</strong><small>{item.symbol}</small></span></div><button type="button" className="icon-button" aria-label={`移除 ${item.symbol}`} onClick={() => void removeSymbol(item.symbol)}><Icon icon={X} /></button></div>) : <EmptyState title="候选池还是空的。" />}</div>
+          </Panel>}
+          {batchStage === "progress" && <Panel title="本批进度" className="pulse-panel">
+            <div className="progress-toolbar">
+              <span className="live-pill"><i />LIVE</span>
+              <strong>{runningLabel}</strong>
+              <span className="progress-meta">盘后手动触发</span>
+            </div>
+            <div className="run-list">{progress.map((item) => (
+              <div className="run-row" key={item.symbol}>
+                <span className={`status-dot ${item.state}`} aria-hidden="true" />
+                <span className="run-name"><strong>{item.name}</strong><small>{item.symbol}</small></span>
+                <span className="run-actions">
+                  <span className="run-stage">{item.stage}</span>
+                  {reportReady(item) ? (
+                    <button
+                      type="button"
+                      className={`batch-view-report${item.state === "degraded" || item.state === "failed" ? " is-alert" : ""}`}
+                      aria-label={`查看 ${item.name} ${item.symbol} 报告`}
+                      onClick={() => openCompletedReport(item)}
+                    >查看报告</button>
+                  ) : null}
+                </span>
+              </div>
+            ))}</div>
+          </Panel>}
+          {batchStage === "report" && <>
+          <button type="button" className="batch-back" onClick={() => setBatchStage("progress")}><Icon icon={ChevronLeft} size={16} />返回进度</button>
           <Panel title="结构报告" className="report-section">
             {report && <ReportView
               report={report}
@@ -698,7 +748,6 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
             <StockInformationPanel information={information} loading={informationLoading} error={informationError} />
           </section>
           </>}
-        />
         </div></div>}
 
         {view === "journal" && <TradeJournalPage key={routeHash === "#/reviews" ? "week" : "month"} api={tradingService} initialView={routeHash === "#/reviews" ? "week" : "month"} />}
@@ -741,6 +790,10 @@ function parseWatchCode(value: string): string | null {
   } catch {
     return null;
   }
+}
+
+function isAbortError(error: unknown): boolean {
+  return (error instanceof DOMException || error instanceof Error) && error.name === "AbortError";
 }
 
 function errorMessage(error: unknown): string {

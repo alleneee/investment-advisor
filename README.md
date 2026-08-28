@@ -67,7 +67,7 @@ GitHub 仓库页直接看下图。交互版是单文件 HTML：克隆后用浏�
 - `apps/agent-runtime`：Pi 状态机、Python RPC client、HTTP sidecar 和受限报告工具。
 - `packages/contracts`：Node 状态机、证据引用和 `ReportDraftV2` 校验，并保留
   `ReportDraftV1` 读取兼容。
-- `apps/web`：React/Vite 琪先一步工作台，使用 hash 导航提供投顾报告和交易日记两个独立入口。
+- `apps/web`：React/Vite 琪先一步工作台，使用 hash 导航提供今日批次和交易日记两个独立入口。
 - `tests/api`：Python provider、引擎、分析接口和内部 RPC 测试。
 - `docs/architecture`：运行时架构图（规格 JSON、交互 HTML、README 预览 PNG）。
 
@@ -405,6 +405,10 @@ curl -X POST "http://127.0.0.1:8000/api/trading/reports/${REPORT_ID}/retry"
 报告中的确定性指标包括收益、胜率、盈亏比、最大回撤、持仓周期、理由表现、纪律
 执行、净值曲线和前后周期比较；样本不足或行情未就绪时会明确返回质量警告，不会
 用推测值填充。
+
+周期复盘可按股票进入个股 BS 分析：本周期盈亏块、日线 / 30 分钟 K 线、实盘 B/S
+与手标。手标独立于账本，不改持仓、已实现盈亏或成功率，也不写入报告快照；Pi 不
+读取手标评论。30 分钟行情失败时仍可使用日线 BS 分析。
 
 ## Pi 安全边界
 
