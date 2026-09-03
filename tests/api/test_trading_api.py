@@ -1,4 +1,5 @@
 import asyncio
+import time
 import uuid
 from datetime import date, datetime
 from threading import Event
@@ -786,8 +787,10 @@ class _BsMarketProvider:
 class _BsCalendarProvider:
     def __init__(self, days: list[date]) -> None:
         self.days = days
+        self.calls = 0
 
     def trade_cal(self, *, start_date: date, end_date: date) -> list[dict]:
+        self.calls += 1
         return [
             {"cal_date": day.isoformat(), "is_open": 1}
             for day in self.days
@@ -873,6 +876,50 @@ async def test_bs_summary_marks_held_symbol_to_window_close_without_trades() -> 
     assert [row["symbol"] for row in body["symbols"]] == ["600000.SH"]
     assert body["symbols"][0]["realized_pnl"] == "0.00"
     assert body["symbols"][0]["period_pnl"] == "200.00"
+    assert calendar.calls == 1
+
+
+@pytest.mark.anyio
+async def test_bs_summary_returns_when_market_provider_hangs() -> None:
+    shanghai = ZoneInfo("Asia/Shanghai")
+
+    class HangingMarketProvider:
+        def daily(self, symbol: str, *, as_of: date, start_date: date | None = None, end_date: date | None = None) -> list[dict]:
+            time.sleep(30)
+            return []
+
+    calendar = _BsCalendarProvider([
+        date(2026, 1, 5),
+        date(2026, 1, 9),
+        date(2026, 1, 12),
+        date(2026, 1, 13),
+    ])
+    app = create_app(
+        database=Database(),
+        trading_market_provider=HangingMarketProvider(),
+        trading_calendar_provider=calendar,
+        trading_clock=lambda: datetime(2026, 1, 13, 16, tzinfo=shanghai),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/api/trading/account", json=_account())).status_code == 201
+        assert (await client.post("/api/trading/executions", json=_execution(
+            executed_at="2026-01-05T10:00:00+08:00",
+            price="10",
+            quantity=100,
+            fee="0",
+        ))).status_code == 201
+        started = time.monotonic()
+        summary = await client.get("/api/trading/bs-summary", params={"start": "2026-01-12", "end": "2026-01-16"})
+        elapsed = time.monotonic() - started
+
+    assert summary.status_code == 200
+    assert elapsed < 8
+    body = summary.json()
+    assert body["start"] == "2026-01-12"
+    assert body["end"] == "2026-01-16"
+    assert [row["symbol"] for row in body["symbols"]] == ["600000.SH"]
+    assert body["symbols"][0]["realized_pnl"] == "0.00"
 
 
 @pytest.mark.anyio

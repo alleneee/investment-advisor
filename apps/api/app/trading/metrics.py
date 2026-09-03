@@ -991,6 +991,11 @@ class AccountValuationService:
         cache_key = (start_date, end_date)
         if cache_key in self._calendar_cache:
             return list(self._calendar_cache[cache_key])
+        for (cached_start, cached_end), days in self._calendar_cache.items():
+            if cached_start <= start_date and end_date <= cached_end:
+                sliced = [day for day in days if start_date <= day <= end_date]
+                self._calendar_cache[cache_key] = sliced
+                return list(sliced)
         if self.calendar_provider is None:
             try:
                 from ..providers.factory import create_market_provider

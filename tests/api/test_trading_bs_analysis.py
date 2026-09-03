@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import time
 from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
 from app.providers.tushare import MarketProviderError
+from app.trading import bs_analysis
 from app.trading.bs_analysis import (
     BarNotFoundError,
     assert_bar_exists,
@@ -607,6 +609,90 @@ def test_build_bs_chart_daily_provider_error_without_store_is_unavailable_with_w
     assert chart["quality"]["status"] == "unavailable"
     assert chart["quality"]["warnings"]
     assert "daily feed failed" in chart["quality"]["warnings"][0]
+
+
+def test_build_bs_chart_daily_timeout_is_unavailable_without_hanging(monkeypatch) -> None:
+    monkeypatch.setattr(bs_analysis, "BS_CHART_PROVIDER_TIMEOUT_SECONDS", 0.2)
+
+    class HangingDaily:
+        def daily(self, symbol: str, *, as_of=None, start_date=None, end_date=None) -> list[dict]:
+            time.sleep(5)
+            return []
+
+    started = time.monotonic()
+    chart = build_bs_chart(
+        symbol="600000.SH",
+        timeframe="1d",
+        period_start=PERIOD_START,
+        period_end=PERIOD_END,
+        executions=[],
+        provider=HangingDaily(),
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1
+    assert chart["available"] is False
+    assert chart["bars"] == []
+    assert chart["quality"]["status"] == "unavailable"
+    assert chart["quality"]["warnings"]
+    assert "超时" in chart["quality"]["warnings"][0]
+
+
+def test_build_bs_chart_minutes_timeout_is_unavailable_without_hanging(monkeypatch) -> None:
+    monkeypatch.setattr(bs_analysis, "BS_CHART_PROVIDER_TIMEOUT_SECONDS", 0.2)
+
+    class HangingMinutes:
+        def minutes(self, symbol: str, *, freq: str, as_of, start_date, end_date) -> list[dict]:
+            time.sleep(5)
+            return []
+
+    started = time.monotonic()
+    chart = build_bs_chart(
+        symbol="600000.SH",
+        timeframe="30m",
+        period_start=PERIOD_START,
+        period_end=PERIOD_END,
+        executions=[],
+        provider=HangingMinutes(),
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1
+    assert chart["available"] is False
+    assert chart["bars"] == []
+    assert chart["quality"]["status"] == "unavailable"
+    assert chart["quality"]["warnings"]
+    assert "超时" in chart["quality"]["warnings"][0]
+
+
+def test_build_bs_chart_daily_timeout_keeps_store_bars(monkeypatch) -> None:
+    monkeypatch.setattr(bs_analysis, "BS_CHART_PROVIDER_TIMEOUT_SECONDS", 0.2)
+    cached = _n_daily_rows(8)
+
+    class HangingDaily:
+        def daily(self, symbol: str, *, as_of=None, start_date=None, end_date=None) -> list[dict]:
+            time.sleep(5)
+            return []
+
+    started = time.monotonic()
+    chart = build_bs_chart(
+        symbol="600000.SH",
+        timeframe="1d",
+        period_start=PERIOD_START,
+        period_end=PERIOD_END,
+        executions=[],
+        provider=HangingDaily(),
+        store=_FakeStore(cached),
+        account_id="acct-1",
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1
+    assert chart["available"] is True
+    assert len(chart["bars"]) == 8
+    assert chart["quality"]["status"] == "degraded"
+    assert chart["quality"]["warnings"]
+    assert "超时" in chart["quality"]["warnings"][0]
 
 
 def test_build_bs_chart_daily_keeps_store_bars_when_provider_fails() -> None:

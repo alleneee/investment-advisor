@@ -16,6 +16,7 @@ import psycopg
 from .bs_analysis import BarNotFoundError, assert_bar_exists, build_bs_chart, symbol_bs_summary
 from .contracts import LedgerEvent, TradingReducerError
 from .metrics import (
+    ACCOUNT_MARKET_FETCH_BUDGET_SECONDS,
     AccountValuationService,
     _business_date,
     _decimal,
@@ -441,16 +442,21 @@ class TradingService:
             if symbol not in names and name:
                 names[symbol] = str(name)
         as_of = min(end, self.valuation._now().date())
-        trading_days = self.valuation._calendar_dates(start, min(end, as_of)) or None
         activation = _business_date(account["activated_on"])
         all_days = self.valuation._calendar_dates(activation, as_of)
+        trading_days = [day for day in all_days if start <= day <= min(end, as_of)] or None
         mark_end = next((day for day in reversed(all_days) if start <= day <= end), None)
         mark_start = next((day for day in reversed(all_days) if day < start), None)
         price_days = [day for day in (mark_start, mark_end) if day is not None]
         closes = None
         if price_days:
             symbols = _symbols_for_valuation(executions, ledger.result.positions)
-            prices, _, _ = self.valuation._market_prices(account["account_id"], symbols, price_days)
+            prices, _, _ = self.valuation._market_prices(
+                account["account_id"],
+                symbols,
+                price_days,
+                fetch_budget_seconds=ACCOUNT_MARKET_FETCH_BUDGET_SECONDS,
+            )
             mapped = {key: _decimal(row["close"]) for key, row in prices.items()}
             if mapped:
                 closes = mapped
@@ -657,16 +663,15 @@ class TradingService:
 
     def _named_executions(self, account_id: str) -> list[dict[str, Any]]:
         rows = [dict(row) for row in self.store.list_executions(account_id)]
-        with self.database.read() as connection:
-            for row in rows:
-                detail = connection.execute(
-                    "SELECT name, tags, note FROM trading_execution_details WHERE execution_id = %s",
-                    (row["execution_id"],),
-                ).fetchone()
-                if detail is not None:
-                    row["name"] = detail["name"]
-                    row["tags"] = json.loads(detail["tags"])
-                    row["note"] = detail["note"]
+        details = self.store.list_execution_details([row["execution_id"] for row in rows])
+        for row in rows:
+            detail = details.get(row["execution_id"])
+            if detail is None:
+                continue
+            row["name"] = detail["name"]
+            tags = detail["tags"]
+            row["tags"] = json.loads(tags) if isinstance(tags, str) else tags
+            row["note"] = detail["note"]
         return rows
 
     def _account_summary(self, account: dict[str, Any]) -> dict[str, Any]:

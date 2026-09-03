@@ -868,6 +868,21 @@ class TradingStore:
             rows = connection.execute(query, (account_id,)).fetchall()
         return [self._execution_row(row, revision) for row in rows]
 
+    def list_execution_details(self, execution_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
+        unique_ids = list(dict.fromkeys(str(item) for item in execution_ids if item))
+        if not unique_ids:
+            return {}
+        with self.database.read() as connection:
+            rows = connection.execute(
+                """
+                SELECT execution_id, name, tags, note
+                FROM trading_execution_details
+                WHERE execution_id = ANY(%s)
+                """,
+                (unique_ids,),
+            ).fetchall()
+        return {str(row["execution_id"]): dict(row) for row in rows}
+
     def update_execution(
         self,
         execution_id: str,

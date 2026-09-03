@@ -10,6 +10,7 @@ import pytest
 from app.db import Database
 from app.main import create_app
 from app.trading.metrics import (
+    AccountValuationService,
     NavPoint,
     build_chart_bundle,
     build_nav,
@@ -443,13 +444,26 @@ class FakeMarketProvider:
 class FakeCalendarProvider:
     def __init__(self, days: list[date]) -> None:
         self.days = days
+        self.calls = 0
 
     def trade_cal(self, *, start_date: date, end_date: date) -> list[dict]:
+        self.calls += 1
         return [
             {"cal_date": day.isoformat(), "is_open": 1}
             for day in self.days
             if start_date <= day <= end_date
         ]
+
+
+def test_calendar_dates_slices_from_wider_cached_range() -> None:
+    calendar = FakeCalendarProvider([date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 8)])
+    service = AccountValuationService(Database(), calendar_provider=calendar)
+    wide = service._calendar_dates(date(2026, 1, 5), date(2026, 1, 8))
+    narrow = service._calendar_dates(date(2026, 1, 6), date(2026, 1, 6))
+
+    assert calendar.calls == 1
+    assert wide == [date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 8)]
+    assert narrow == [date(2026, 1, 6)]
 
 
 def _date(value: str) -> date:

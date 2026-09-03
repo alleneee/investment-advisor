@@ -19,6 +19,7 @@ from .metrics import (
     _parse_datetime,
     _provider_daily,
     _raw_bar,
+    _run_with_timeout,
     replay_rows,
 )
 from .reducer import canonical_decimal_text, money_text
@@ -26,6 +27,7 @@ from .reducer import canonical_decimal_text, money_text
 MINUTE_BAR_WIDTH = timedelta(minutes=30)
 DAILY_LOOKBACK_DAYS = 180
 MINUTE_LOOKBACK_CALENDAR_DAYS = 40
+BS_CHART_PROVIDER_TIMEOUT_SECONDS = 8.0
 _PROVIDER_FAILURES = (
     MarketProviderError,
     RuntimeError,
@@ -33,6 +35,7 @@ _PROVIDER_FAILURES = (
     ValueError,
     OSError,
     LookupError,
+    TimeoutError,
 )
 _WARNING_MAX_LENGTH = 300
 
@@ -415,7 +418,13 @@ def _load_daily_bars(
             cached[str(bar["trade_date"])] = bar
     failure: BaseException | None = None
     try:
-        raw = _provider_daily(provider, symbol, start, end)
+        raw = _provider_daily(
+            provider,
+            symbol,
+            start,
+            end,
+            timeout_seconds=BS_CHART_PROVIDER_TIMEOUT_SECONDS,
+        )
     except _PROVIDER_FAILURES as exc:
         raw = []
         failure = exc
@@ -431,7 +440,10 @@ def _load_minute_bars(
     symbol: str, start: date, end: date, provider: Any
 ) -> tuple[list[dict[str, Any]], BaseException | None]:
     try:
-        rows = provider.minutes(symbol, freq="30m", as_of=end, start_date=start, end_date=end)
+        rows = _run_with_timeout(
+            lambda: provider.minutes(symbol, freq="30m", as_of=end, start_date=start, end_date=end),
+            BS_CHART_PROVIDER_TIMEOUT_SECONDS,
+        )
     except _PROVIDER_FAILURES as exc:
         return [], exc
     bars: list[dict[str, Any]] = []
