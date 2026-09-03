@@ -1,4 +1,5 @@
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from decimal import Decimal
@@ -647,6 +648,39 @@ async def test_account_summary_refetches_today_close_after_session_cache() -> No
     assert second.status_code == 200
     assert second.json()["daily_pnl"] == "200.00"
     assert second.json()["data_quality"] == "ok"
+
+
+@pytest.mark.anyio
+async def test_account_summary_returns_when_market_provider_hangs() -> None:
+    class HangingMarketProvider:
+        def daily(self, symbol: str, *, as_of: date, start_date: date | None = None, end_date: date | None = None) -> list[dict]:
+            time.sleep(30)
+            return []
+
+    calendar = FakeCalendarProvider([date(2026, 1, 5)])
+    app = create_app(
+        database=Database(),
+        trading_market_provider=HangingMarketProvider(),
+        trading_calendar_provider=calendar,
+        trading_clock=lambda: datetime(2026, 1, 5, 16, tzinfo=SHANGHAI),
+    )
+    execution = _execution(price="10", quantity=1, fee="0")
+    payload = {key: value for key, value in execution.items() if key not in {"execution_id", "created_at", "occurred_at"}}
+    payload["executed_at"] = execution["occurred_at"]
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/api/trading/account", json={"name": "主账户", "activated_on": "2026-01-01", "initial_capital": "100"})).status_code == 201
+        assert (await client.post("/api/trading/executions", json=payload)).status_code == 201
+        started = time.monotonic()
+        account = await client.get("/api/trading/account")
+        elapsed = time.monotonic() - started
+
+    assert account.status_code == 200
+    assert elapsed < 8
+    body = account.json()
+    assert body["name"] == "主账户"
+    assert Decimal(body["cash"]) == Decimal("90")
+    assert body["data_quality"] in {"degraded", "unavailable"}
 
 
 def test_concurrent_same_market_dependency_advances_revision_once(tmp_path) -> None:

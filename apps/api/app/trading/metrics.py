@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -16,6 +19,9 @@ from .reducer import ClosedCycle, canonical_decimal_text, money_text, replay_led
 from .store import outdate_market_snapshots_for_dependencies
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+ACCOUNT_MARKET_FETCH_BUDGET_SECONDS = 4.0
+PROVIDER_CALL_TIMEOUT_SECONDS = 2.5
+CALENDAR_FETCH_TIMEOUT_SECONDS = 3.0
 UnavailableReason = Literal[
     "no_sample",
     "no_winning_cycle",
@@ -766,6 +772,39 @@ def build_chart_bundle(
     }
 
 
+def _run_with_timeout[T](fn: Callable[[], T], timeout_seconds: float) -> T:
+    if timeout_seconds <= 0:
+        raise TimeoutError("行情拉取超时")
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        return executor.submit(fn).result(timeout=timeout_seconds)
+    except FuturesTimeout as exc:
+        raise TimeoutError("行情拉取超时") from exc
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _weekday_dates(start_date: date, end_date: date) -> list[date]:
+    if start_date > end_date:
+        return []
+    days: list[date] = []
+    cursor = start_date
+    while cursor <= end_date:
+        if cursor.weekday() < 5:
+            days.append(cursor)
+        cursor += timedelta(days=1)
+    return days
+
+
+def _remaining_timeout(deadline: float | None, default: float) -> float | None:
+    if deadline is None:
+        return default
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
+    return min(default, remaining)
+
+
 def _calendar_dates(
     provider: Any,
     start_date: date,
@@ -805,6 +844,8 @@ def _provider_daily(
     symbol: str,
     start_date: date,
     end_date: date,
+    *,
+    timeout_seconds: float | None = None,
 ) -> list[dict[str, Any]]:
     if provider is None:
         from ..providers.factory import create_market_provider
@@ -813,11 +854,17 @@ def _provider_daily(
     method = getattr(provider, "daily", None) or getattr(provider, "get_daily", None)
     if method is None:
         raise ValueError("行情 provider 必须提供 daily")
-    try:
-        rows = method(symbol, as_of=end_date, start_date=start_date, end_date=end_date)
-    except TypeError:
-        rows = method(symbol, start_date=start_date, end_date=end_date)
-    return [dict(row) for row in (rows or []) if isinstance(row, Mapping)]
+
+    def _invoke() -> list[dict[str, Any]]:
+        try:
+            rows = method(symbol, as_of=end_date, start_date=start_date, end_date=end_date)
+        except TypeError:
+            rows = method(symbol, start_date=start_date, end_date=end_date)
+        return [dict(row) for row in (rows or []) if isinstance(row, Mapping)]
+
+    if timeout_seconds is None:
+        return _invoke()
+    return _run_with_timeout(_invoke, timeout_seconds)
 
 
 def _candidate_price(rows: Sequence[Mapping[str, Any]], valuation_date: date) -> tuple[dict[str, Any] | None, bool]:
@@ -842,6 +889,12 @@ def _persist_market_rows(
     account_id: str,
     selected: Sequence[tuple[str, date, date, Decimal, str]],
 ) -> int:
+    if not selected:
+        with database.read() as connection:
+            meta = connection.execute(
+                "SELECT market_revision FROM trading_meta WHERE account_id = %s", (account_id,)
+            ).fetchone()
+        return int(meta["market_revision"]) if meta else 0
     with database.transaction(immediate=True) as connection:
         meta = connection.execute(
             "SELECT market_revision FROM trading_meta WHERE account_id = %s", (account_id,)
@@ -849,38 +902,44 @@ def _persist_market_rows(
         if meta is None:
             raise ValueError("交易账户不存在")
         revision = int(meta["market_revision"])
-        changed = False
+        existing_rows = connection.execute(
+            """
+            SELECT symbol, valuation_date, source_trade_date, close, bar_digest
+            FROM trading_market_prices
+            WHERE account_id = %s
+            """,
+            (account_id,),
+        ).fetchall()
+        existing_map = {
+            (str(row["symbol"]), _business_date(row["valuation_date"])): row
+            for row in existing_rows
+        }
         changed_dependencies: list[tuple[str, str]] = []
+        to_write: list[tuple[str, date, date, Decimal, str]] = []
         for symbol, valuation_date, source_date, close, digest in selected:
-            existing = connection.execute(
-                """
-                SELECT source_trade_date, close, bar_digest
-                FROM trading_market_prices
-                WHERE account_id = %s AND symbol = %s AND valuation_date = %s
-                """,
-                (account_id, symbol, valuation_date.isoformat()),
-            ).fetchone()
+            existing = existing_map.get((symbol, valuation_date))
             if (
                 existing is None
-                or existing["source_trade_date"] != source_date.isoformat()
+                or _business_date(existing["source_trade_date"]) != source_date
                 or _decimal(existing["close"], field="close") != close
-                or existing["bar_digest"] != digest
+                or str(existing["bar_digest"]) != digest
             ):
-                changed = True
                 changed_dependencies.append((symbol, valuation_date.isoformat()))
-        if changed:
-            revision += 1
-            connection.execute(
-                "UPDATE trading_meta SET market_revision = %s WHERE account_id = %s",
-                (revision, account_id),
-            )
-            outdate_market_snapshots_for_dependencies(
-                connection,
-                account_id,
-                changed_dependencies,
-                revision,
-            )
-        for symbol, valuation_date, source_date, close, digest in selected:
+                to_write.append((symbol, valuation_date, source_date, close, digest))
+        if not to_write:
+            return revision
+        revision += 1
+        connection.execute(
+            "UPDATE trading_meta SET market_revision = %s WHERE account_id = %s",
+            (revision, account_id),
+        )
+        outdate_market_snapshots_for_dependencies(
+            connection,
+            account_id,
+            changed_dependencies,
+            revision,
+        )
+        for symbol, valuation_date, source_date, close, digest in to_write:
             connection.execute(
                 """
                 INSERT INTO trading_market_prices(
@@ -940,7 +999,12 @@ class AccountValuationService:
             except (RuntimeError, TypeError, ValueError):
                 return []
         try:
-            result = _calendar_dates(self.calendar_provider, start_date, end_date)
+            result = _run_with_timeout(
+                lambda: _calendar_dates(self.calendar_provider, start_date, end_date),
+                CALENDAR_FETCH_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            result = _weekday_dates(start_date, end_date)
         except (RuntimeError, TypeError, ValueError):
             return []
         self._calendar_cache[cache_key] = result
@@ -953,6 +1017,7 @@ class AccountValuationService:
         valuation_dates: Sequence[date],
         *,
         force_refresh: bool = False,
+        fetch_budget_seconds: float | None = None,
     ) -> tuple[dict[tuple[str, date], dict[str, Any]], str, list[str]]:
         if not symbols or not valuation_dates:
             return {}, "ok", []
@@ -960,21 +1025,32 @@ class AccountValuationService:
         warnings: list[str] = []
         selected_rows: list[tuple[str, date, date, Decimal, str]] = []
         result: dict[tuple[str, date], dict[str, Any]] = {}
+        deadline = None if fetch_budget_seconds is None else time.monotonic() + fetch_budget_seconds
         for symbol in sorted(set(symbols)):
             cached = _cached_market_rows(self.database, account_id, symbol)
             missing = [day for day in valuation_dates if day not in cached]
             latest = max(valuation_dates)
             rows: list[dict[str, Any]] = []
-            if missing or force_refresh:
+            should_fetch = bool(missing or force_refresh or latest in cached)
+            timeout = _remaining_timeout(deadline, PROVIDER_CALL_TIMEOUT_SECONDS)
+            if should_fetch and timeout is not None:
                 try:
-                    rows = _provider_daily(self.market_provider, symbol, min(valuation_dates), max(valuation_dates))
-                except (RuntimeError, TypeError, ValueError):
+                    fetch_start = min(valuation_dates) if missing or force_refresh else latest
+                    rows = _provider_daily(
+                        self.market_provider,
+                        symbol,
+                        fetch_start,
+                        max(valuation_dates),
+                        timeout_seconds=timeout,
+                    )
+                except (RuntimeError, TypeError, ValueError, TimeoutError):
                     rows = []
-            elif latest in cached:
-                try:
-                    rows = _provider_daily(self.market_provider, symbol, latest, latest)
-                except (RuntimeError, TypeError, ValueError):
-                    rows = []
+                    if missing:
+                        quality = "degraded" if cached else "unavailable"
+                        warnings.append("missing_close_price")
+            elif should_fetch and missing:
+                quality = "degraded" if cached else "unavailable"
+                warnings.append("missing_close_price")
             for valuation_date in valuation_dates:
                 cached_row = cached.get(valuation_date)
                 candidate, degraded = _candidate_price(rows, valuation_date)
@@ -1054,7 +1130,12 @@ class AccountValuationService:
         symbols = _symbols_for_valuation(executions, current_result.positions)
         valuation_dates = self._calendar_dates(activation, as_of)
         calendar_available = bool(valuation_dates)
-        prices, quality, warnings = self._market_prices(account["account_id"], symbols, valuation_dates)
+        prices, quality, warnings = self._market_prices(
+            account["account_id"],
+            symbols,
+            valuation_dates,
+            fetch_budget_seconds=ACCOUNT_MARKET_FETCH_BUDGET_SECONDS,
+        )
         flow_by_day = _cash_flow_by_day(cash_flows, valuation_dates)
         valuations = _mark_to_market_valuations(
             initial_capital=initial_capital,
