@@ -577,6 +577,7 @@ async def test_missing_calendar_provider_is_lazy_tushare_calendar_not_weekday_fa
     monkeypatch.delenv("FUYAO_API_KEY", raising=False)
     monkeypatch.delenv("FUYAO_TOKEN", raising=False)
     monkeypatch.setattr("app.providers.tushare.TushareMarketProvider", LazyCalendarProvider)
+    monkeypatch.setattr("app.providers.factory.TushareMarketProvider", LazyCalendarProvider)
     app = create_app(
         database=Database(),
         trading_market_provider=FakeMarketProvider([]),
