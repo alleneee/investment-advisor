@@ -90,6 +90,26 @@ describe("OutlookPanel", () => {
     expect(screen.queryByText(/引用证据/)).not.toBeInTheDocument();
   });
 
+  it.each([null, job("running")])("offers query recovery without stale progress when the connection fails", async (currentJob) => {
+    const user = userEvent.setup();
+    const onResumeQuery = vi.fn();
+    const onGenerate = vi.fn();
+    render(<OutlookPanel
+      job={currentJob}
+      requestError="报告连接中断"
+      onGenerate={onGenerate}
+      onRetry={vi.fn()}
+      onResumeQuery={onResumeQuery}
+    />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("报告连接中断");
+    expect(screen.queryByText("Pi AI 正在生成三情景报告")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "生成 Pi AI 走势报告" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "恢复报告查询" }));
+    expect(onResumeQuery).toHaveBeenCalledOnce();
+    expect(onGenerate).not.toHaveBeenCalled();
+  });
+
   it("renders scenarios and risks without evidence labels or evidence details", () => {
     const { container } = render(<OutlookPanel job={job("completed")} onGenerate={vi.fn()} onRetry={vi.fn()} />);
 

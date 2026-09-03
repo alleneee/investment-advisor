@@ -1,6 +1,7 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ChevronLeft, ChevronRight, ClipboardCheck, History, List, PlusSquare, Save, Wallet, X, type LucideIcon } from "lucide-react";
 import { BsAnalysisPanel } from "./BsAnalysisPanel";
+import { JournalMonthPicker } from "./JournalMonthPicker";
 import { JournalReturnChart } from "./JournalReturnChart";
 import { ReviewCenterPage } from "./ReviewCenterPage";
 import { buyReasons, reasonLabels, sellReasons } from "./trading-api";
@@ -28,7 +29,6 @@ export type JournalView = "month" | "week" | "list" | "quarter" | "year";
 const journalViews: Array<{ id: JournalView; label: string }> = [
   { id: "month", label: "月视图" },
   { id: "week", label: "周视图" },
-  { id: "list", label: "列表视图" },
   { id: "quarter", label: "季报" },
   { id: "year", label: "年报" },
 ];
@@ -67,6 +67,14 @@ interface DailyReviewForm {
   note: string;
 }
 
+interface DailyReviewDraft {
+  form: DailyReviewForm;
+  review: DailyReview | null | undefined;
+  dirty: boolean;
+  saving: DailyReviewStatus | null;
+  error: string | null;
+}
+
 interface PeriodSummaryResult {
   summary: TradingPeriodSummary;
   dayRevision: number;
@@ -81,12 +89,21 @@ interface PeriodSummaryFailure {
 
 export function TradeJournalPage({ api, today = currentShanghaiDate(), initialView = "month" }: TradeJournalPageProps) {
   const [account, setAccount] = useState<TradingAccount | null | undefined>(undefined);
+  const [accountError, setAccountError] = useState<string | null>(null);
+  const [accountEpoch, setAccountEpoch] = useState(0);
   const [name, setName] = useState("主账户");
   const [activatedOn, setActivatedOn] = useState(today);
   const [initialCapital, setInitialCapital] = useState("100000.00");
   const [tradeDate, setTradeDate] = useState(today);
   const [dayDetailOpen, setDayDetailOpen] = useState(false);
   const [journalView, setJournalView] = useState<JournalView>(initialView);
+  const [entryTarget, setEntryTarget] = useState<"execution" | "review" | null>(null);
+  const executionEntryRef = useRef<HTMLFormElement>(null);
+  const dailyCloseRef = useRef<HTMLElement>(null);
+  const dayDetailRef = useRef<HTMLElement>(null);
+  const dayDetailTriggerRef = useRef<HTMLElement | null>(null);
+  const calendarLayoutRef = useRef<HTMLDivElement>(null);
+  const journalNavigationRef = useRef<HTMLElement>(null);
   const [openReviewKey, setOpenReviewKey] = useState<string | null>(null);
   const [calendar, setCalendar] = useState<TradingCalendarMonth | undefined>(undefined);
   const [periodSummaryResult, setPeriodSummaryResult] = useState<PeriodSummaryResult | undefined>(undefined);
@@ -94,36 +111,40 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
   const [periodSummaryEpoch, setPeriodSummaryEpoch] = useState(0);
   const [executions, setExecutions] = useState<TradingExecution[] | undefined>(undefined);
   const [cashFlows, setCashFlows] = useState<CashFlow[] | undefined>(undefined);
-  const [dailyReview, setDailyReview] = useState<DailyReview | null | undefined>(undefined);
+  const [dayError, setDayError] = useState<string | null>(null);
+  const [dayLoadedDate, setDayLoadedDate] = useState<string | null>(null);
   const [dayRevision, setDayRevision] = useState(0);
   const [busy, setBusy] = useState(false);
   const [savingExecution, setSavingExecution] = useState(false);
   const [savingCashFlow, setSavingCashFlow] = useState(false);
-  const [savingReview, setSavingReview] = useState<DailyReviewStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [executionForm, setExecutionForm] = useState<ExecutionForm>(() => defaultExecutionForm(today));
   const [cashFlowForm, setCashFlowForm] = useState<CashFlowForm>(() => defaultCashFlowForm(today));
-  const [dailyReviewForm, setDailyReviewForm] = useState<DailyReviewForm>(defaultDailyReviewForm);
+  const [reviewDrafts, setReviewDrafts] = useState<Record<string, DailyReviewDraft>>({});
+  const reviewSaveRequests = useRef(new Set<string>());
+  const currentDraft = reviewDrafts[tradeDate];
+  const dailyReviewForm = currentDraft?.form ?? defaultDailyReviewForm();
+  const dailyReview = currentDraft?.review;
+  const savingReview = currentDraft?.saving ?? null;
 
   useEffect(() => {
     let active = true;
+    setAccountError(null);
     void api.getAccount().then((value) => {
       if (active) setAccount(value);
     }).catch((reason: unknown) => {
-      if (active) {
-        setError(messageOf(reason));
-        setAccount(null);
-      }
+      if (active) setAccountError(messageOf(reason));
     });
     return () => { active = false; };
-  }, [api]);
+  }, [accountEpoch, api]);
 
   useEffect(() => {
     if (account === null || account === undefined) return;
     let active = true;
     setExecutions(undefined);
     setCashFlows(undefined);
-    setDailyReview(undefined);
+    setDayError(null);
+    setDayLoadedDate(null);
     void Promise.all([
       api.listExecutions(tradeDate),
       api.listCashFlows(tradeDate),
@@ -132,13 +153,36 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
       if (!active) return;
       setExecutions(nextExecutions);
       setCashFlows(nextCashFlows);
-      setDailyReview(nextReview);
-      setDailyReviewForm(nextReview ? formFromDailyReview(nextReview) : defaultDailyReviewForm());
+      setDayLoadedDate(tradeDate);
+      setReviewDrafts((current) => {
+        const draft = current[tradeDate];
+        if (draft?.dirty || draft?.saving) {
+          return draft.review !== undefined ? current : { ...current, [tradeDate]: { ...draft, review: nextReview } };
+        }
+        if (draft?.review && draft.review.revision > (nextReview?.revision ?? 0)) return current;
+        return { ...current, [tradeDate]: { form: nextReview ? formFromDailyReview(nextReview) : defaultDailyReviewForm(), review: nextReview, dirty: false, saving: null, error: null } };
+      });
     }).catch((reason: unknown) => {
-      if (active) setError(messageOf(reason));
+      if (active) setDayError(messageOf(reason));
     });
     return () => { active = false; };
   }, [account, api, dayRevision, tradeDate]);
+
+  function updateDailyReviewForm(update: (current: DailyReviewForm) => DailyReviewForm) {
+    setReviewDrafts((current) => {
+      const draft = current[tradeDate];
+      return {
+        ...current,
+        [tradeDate]: {
+          form: update(draft?.form ?? defaultDailyReviewForm()),
+          review: draft?.review,
+          dirty: true,
+          saving: draft?.saving ?? null,
+          error: null,
+        },
+      };
+    });
+  }
 
   useEffect(() => {
     setExecutionForm((current) => ({ ...current, executedAt: `${tradeDate}T15:00` }));
@@ -215,8 +259,21 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
   }
 
   function selectCalendarDay(date: string) {
+    dayDetailTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setTradeDate(date);
     setDayDetailOpen(true);
+  }
+
+  function openJournalEntry(target: "execution" | "review") {
+    selectJournalView("list");
+    setEntryTarget(target);
+  }
+
+  function jumpToMonth(month: string) {
+    if (!/^\d{4}-\d{2}$/.test(month)) return;
+    const day = Math.min(Number(tradeDate.slice(8)), daysInMonth(month));
+    setDayDetailOpen(false);
+    setTradeDate(`${month}-${String(day).padStart(2, "0")}`);
   }
 
   function shiftCalendar(direction: -1 | 1) {
@@ -226,12 +283,44 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
 
   useEffect(() => {
     if (!dayDetailOpen) return;
+    const dialog = dayDetailRef.current;
+    if (!dialog) return;
+    const focusableSelector = 'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+    const first = dialog.querySelector<HTMLElement>(focusableSelector);
+    (first ?? dialog).focus();
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setDayDetailOpen(false);
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setDayDetailOpen(false);
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(focusableSelector));
+      const first = focusable[0] ?? dialog;
+      const last = focusable.at(-1) ?? dialog;
+      if (!dialog.contains(document.activeElement) || event.shiftKey && document.activeElement === first || !event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      const trigger = dayDetailTriggerRef.current;
+      const returnTarget = trigger?.isConnected ? trigger
+        : calendarLayoutRef.current?.querySelector<HTMLButtonElement>(`button[data-date="${tradeDate}"]`)
+          ?? journalNavigationRef.current?.querySelector<HTMLButtonElement>('button[aria-pressed="true"]');
+      returnTarget?.focus();
+    };
   }, [dayDetailOpen]);
+
+  useEffect(() => {
+    if (journalView !== "list" || entryTarget === null) return;
+    const target = entryTarget === "execution" ? executionEntryRef.current : dailyCloseRef.current;
+    if (!target) return;
+    target.scrollIntoView?.({ block: "start" });
+    target.focus({ preventScroll: true });
+    setEntryTarget(null);
+  }, [entryTarget, journalView]);
 
   async function saveExecution(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -295,15 +384,17 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
   }
 
   async function saveDailyReview(status: DailyReviewStatus) {
-    if (savingReview !== null) return;
+    if (reviewSaveRequests.current.has(tradeDate) || dayLoadedDate !== tradeDate || !currentDraft) return;
     if (status === "completed" && dailyReviewForm.disciplineFollowed === "") {
-      setError("完成当日复盘前，请明确是否遵守计划。");
+      setReviewDrafts((current) => ({ ...current, [tradeDate]: { ...current[tradeDate], error: "完成当日复盘前，请明确是否遵守计划。" } }));
       return;
     }
-    setSavingReview(status);
-    setError(null);
+    const date = tradeDate;
+    const submittedForm = dailyReviewForm;
+    reviewSaveRequests.current.add(date);
+    setReviewDrafts((current) => ({ ...current, [date]: { ...current[date], saving: status, error: null } }));
     try {
-      const saved = await api.saveDailyReview(tradeDate, {
+      const saved = await api.saveDailyReview(date, {
         status,
         invalidationCondition: dailyReviewForm.invalidationCondition.trim(),
         nextDayPlan: dailyReviewForm.nextDayPlan.trim(),
@@ -312,12 +403,15 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
         note: dailyReviewForm.note.trim(),
         revision: dailyReview?.revision ?? null,
       });
-      setDailyReview(saved);
-      setDailyReviewForm(formFromDailyReview(saved));
+      setReviewDrafts((current) => {
+        const draft = current[date];
+        const edited = draft.form !== submittedForm;
+        return { ...current, [date]: { ...draft, review: saved, form: edited ? draft.form : formFromDailyReview(saved), dirty: edited, saving: null, error: null } };
+      });
     } catch (reason) {
-      setError(messageOf(reason));
+      setReviewDrafts((current) => ({ ...current, [date]: { ...current[date], saving: null, error: messageOf(reason) } }));
     } finally {
-      setSavingReview(null);
+      reviewSaveRequests.current.delete(date);
     }
   }
 
@@ -349,7 +443,9 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
     }
   }
 
-  if (account === undefined) return <section className="journal-loading">正在读取交易账户…</section>;
+  if (account === undefined) return accountError
+    ? <Panel title="交易账户暂不可用"><p className="journal-error" role="alert">{accountError}</p><button className="secondary-button" type="button" onClick={() => setAccountEpoch((value) => value + 1)}>重新加载账户</button></Panel>
+    : <section className="journal-loading" role="status">正在读取交易账户…</section>;
 
   if (account === null) {
     return <Panel title="创建交易账户" className="journal-onboarding" aria-label="创建交易账户">
@@ -394,35 +490,52 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
         : null;
   const reviewKey = reviewKind && reviewBounds ? `${reviewKind}:${reviewBounds.start}:${reviewBounds.end}` : null;
   const periodReviewOpen = reviewKey != null && openReviewKey === reviewKey;
+  const dayErrorNotice = dayError && <div><p className="journal-error" role="alert">当日数据加载失败：{dayError}</p><button className="secondary-button" type="button" onClick={() => setDayRevision((value) => value + 1)}>重新加载当日数据</button></div>;
 
   return <section className="trade-journal-page" aria-label="交易日记">
     <div className="journal-page-heading">
       <div>
-        <p className="journal-kicker">{journalView === "list" ? "交易日历" : showCalendar ? "交易日历" : "周期复盘"}</p>
-        <h2>{journalHeading(journalView, tradeDate)}</h2>
-        <p className="journal-lede">{journalView === "list" ? "记录、分析并优化您的交易表现。" : showCalendar ? "按日查看成交笔数、当日盈亏和复盘状态。" : "查看该周期的确定性复盘。"}</p>
+        <p className="journal-kicker">{journalView === "list" ? "记账与日复盘" : showCalendar ? "交易日历" : "周期报告"}</p>
+        <div className="journal-title-row">
+          {showCalendar ? <JournalMonthPicker value={calendarMonth} label={journalHeading(journalView, tradeDate)} onChange={jumpToMonth} /> : <h2>{journalHeading(journalView, tradeDate)}</h2>}
+          {showCalendar && <div className="journal-title-navigation" role="group" aria-label="日历翻页">
+            <button className="journal-calendar-chevron" type="button" aria-label={calendarNavLabel(journalView, -1)} onClick={() => shiftCalendar(-1)}><Icon icon={ChevronLeft} size={18} /></button>
+            <button className="journal-calendar-chevron" type="button" aria-label={calendarNavLabel(journalView, 1)} onClick={() => shiftCalendar(1)}><Icon icon={ChevronRight} size={18} /></button>
+            <button className="journal-today" type="button" onClick={() => { setDayDetailOpen(false); setTradeDate(today); }}>今天</button>
+          </div>}
+        </div>
+        <p className="journal-lede">{journalView === "list" ? "记录成交与资金流水，完成当日复盘。" : showCalendar ? "按日查看成交笔数、当日盈亏和复盘状态。" : "汇总周期表现，回看交易与计划执行。"}</p>
       </div>
-      {journalView === "list" ? <label className="journal-date">交易日期<input type="date" value={tradeDate} onChange={(event) => setTradeDate(event.target.value)} /></label> : <div className="journal-calendar-nav">
+      <div className="journal-heading-actions">
+      {journalView === "list" ? <label className="journal-date">交易日期<input type="date" value={tradeDate} onChange={(event) => setTradeDate(event.target.value)} /></label> : showCalendar ? <div className="journal-calendar-net">
+        <span>月度净盈亏</span>
+        <strong className={pnlToneClass(monthPnl)}>{monthPnl == null ? "—" : formatSignedMoney(monthPnl)}</strong>
+      </div> : <div className="journal-calendar-nav">
         <button className="journal-calendar-chevron" type="button" aria-label={calendarNavLabel(journalView, -1)} onClick={() => shiftCalendar(-1)}>
           <Icon icon={ChevronLeft} size={18} />
         </button>
         <div className="journal-calendar-net">
-          {showCalendar ? <>
-            <span>月度净盈亏</span>
-            <strong className={pnlToneClass(monthPnl)}>{monthPnl == null ? "—" : formatSignedMoney(monthPnl)}</strong>
-          </> : <>
-            <span>复盘区间</span>
-            <strong>{reviewBounds ? `${reviewBounds.start} – ${reviewBounds.end}` : "—"}</strong>
-          </>}
+          <span>复盘区间</span>
+          <strong>{reviewBounds ? `${reviewBounds.start} – ${reviewBounds.end}` : "—"}</strong>
         </div>
         <button className="journal-calendar-chevron" type="button" aria-label={calendarNavLabel(journalView, 1)} onClick={() => shiftCalendar(1)}>
           <Icon icon={ChevronRight} size={18} />
         </button>
       </div>}
+      <div className="journal-quick-actions">
+        <button className="primary-button" type="button" onClick={() => openJournalEntry("execution")}>记一笔</button>
+        <button className="secondary-button" type="button" onClick={() => openJournalEntry("review")}>写复盘</button>
+      </div>
+      </div>
     </div>
-    <div className="journal-toolbar">
-      <div className="journal-view-switch" role="group" aria-label="日记视图">
-        {journalViews.map((view) => (
+    <nav ref={journalNavigationRef} className="journal-primary-nav" aria-label="交易日记导航">
+      <button type="button" aria-pressed={showCalendar} onClick={() => selectJournalView(showCalendar ? journalView : "month")}>交易日历</button>
+      <button type="button" aria-pressed={journalView === "list"} onClick={() => selectJournalView("list")}>记账与日复盘</button>
+      <button type="button" aria-pressed={!showCalendar && journalView !== "list"} onClick={() => selectJournalView(journalView === "year" ? "year" : "quarter")}>周期报告</button>
+    </nav>
+    {journalView !== "list" && <div className="journal-toolbar">
+      <div className="journal-view-switch journal-secondary-switch" role="group" aria-label={showCalendar ? "日历显示方式" : "报告周期"}>
+        {journalViews.filter((view) => showCalendar ? view.id === "month" || view.id === "week" : view.id === "quarter" || view.id === "year").map((view) => (
           <button key={view.id} type="button" aria-pressed={journalView === view.id} onClick={() => selectJournalView(view.id)}>
             {view.label}
           </button>
@@ -433,8 +546,9 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
         <span className="is-loss">亏损</span>
         <span>无成交</span>
       </div>}
-    </div>
+    </div>}
     {error && <p className="journal-error" role="alert">{error}</p>}
+    {!dayDetailOpen && dayErrorNotice}
     <div className="journal-metrics" role="group" aria-label="账户概览">
       <article><span>总权益 (CNY)</span><strong>{displayMoney(account.totalEquity)}</strong></article>
       <article><span>可用现金</span><strong>{displayMoney(account.cash)}</strong></article>
@@ -451,7 +565,7 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
         <strong className="tone-drawdown">{drawdown == null ? "—" : formatRate(drawdown)}</strong>
       </article>
     </div>
-    {showCalendar && <div className="journal-calendar-layout">
+    {showCalendar && <div ref={calendarLayoutRef} className="journal-calendar-layout">
       {calendar === undefined || calendar.month !== calendarMonth ? <p className="journal-muted">正在读取交易日历…</p> : <CalendarGrid
         month={calendar.month}
         days={calendar.days}
@@ -462,6 +576,8 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
       />}
       {dayDetailOpen && <div className="journal-day-detail-backdrop" onClick={() => setDayDetailOpen(false)}>
         <aside
+          ref={dayDetailRef}
+          tabIndex={-1}
           className="journal-calendar-sidebar"
           role="dialog"
           aria-modal="true"
@@ -477,17 +593,18 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
               </button>
             </div>
           </div>
+          {dayErrorNotice}
           <div className="journal-calendar-sidebar-pnl">
             <strong className={pnlToneClass(selectedDay?.dailyPnl ?? null)}>{selectedDay?.dailyPnl == null ? "—" : formatSignedMoney(selectedDay.dailyPnl)}</strong>
             <span>当日盈亏</span>
           </div>
           <div className="journal-calendar-stats">
             <div><span>成交笔数</span><strong>{selectedDay?.executionCount ?? executions?.length ?? 0}</strong></div>
-            <div><span>资金流水</span><strong>{cashFlows?.length ?? 0}</strong></div>
+            <div><span>资金流水</span><strong>{cashFlows?.length ?? "—"}</strong></div>
           </div>
           <section className="journal-calendar-notes">
             <h4>当日成交</h4>
-            {executions === undefined ? <p className="journal-muted">正在读取成交…</p> : executions.length === 0 ? <p className="journal-muted">当日没有成交。</p> : <ul className="journal-list compact-list">
+            {executions === undefined ? <p className="journal-muted">{dayError ? "成交暂不可用。" : "正在读取成交…"}</p> : executions.length === 0 ? <p className="journal-muted">当日没有成交。</p> : <ul className="journal-list compact-list">
               {executions.map((execution) => <li key={execution.executionId}>
                 <div>
                   <strong>{execution.side === "buy" ? "买入" : "卖出"} <span>{execution.symbol}</span></strong>
@@ -498,14 +615,17 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
           </section>
           <section className="journal-calendar-notes">
             <h4>复盘摘记</h4>
-            {dailyReview == null ? <p className="journal-muted">当日尚未写复盘。</p> : <>
+            {dayLoadedDate !== tradeDate ? <p className="journal-muted">{dayError ? "复盘暂不可用。" : "正在读取复盘…"}</p> : dailyReview == null ? <p className="journal-muted">当日尚未写复盘。</p> : <>
               {dailyReview.note && <p>{dailyReview.note}</p>}
               {dailyReview.nextDayPlan && <p>次日计划：{dailyReview.nextDayPlan}</p>}
               {dailyReview.invalidationCondition && <p>失效条件：{dailyReview.invalidationCondition}</p>}
               {!dailyReview.note && !dailyReview.nextDayPlan && !dailyReview.invalidationCondition && <p className="journal-muted">复盘已保存，暂无文字摘记。</p>}
             </>}
           </section>
-          <button className="primary-button" type="button" onClick={() => selectJournalView("list")}>记录当日成交</button>
+          <div className="journal-detail-actions">
+            <button className="primary-button" type="button" onClick={() => openJournalEntry("execution")}>记一笔</button>
+            <button className="secondary-button" type="button" onClick={() => openJournalEntry("review")}>写复盘</button>
+          </div>
         </aside>
       </div>}
     </div>}
@@ -513,7 +633,7 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
     <div className="journal-workspace">
       <section className="journal-card journal-ledger" aria-label="今日交易">
         <CardTitle icon={List}>今日交易</CardTitle>
-        {executions === undefined ? <p className="journal-muted">正在读取成交…</p> : executions.length === 0 ? <div className="journal-empty">
+        {executions === undefined ? <p className="journal-muted">{dayError ? "成交暂不可用。" : "正在读取成交…"}</p> : executions.length === 0 ? <div className="journal-empty">
           <Icon icon={History} size={40} />
           <p>今日没有交易记录。</p>
         </div> : <ul className="journal-list">
@@ -527,7 +647,7 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
           </li>)}
         </ul>}
       </section>
-      <form className="journal-card execution-entry" onSubmit={(event) => void saveExecution(event)}>
+      <form ref={executionEntryRef} tabIndex={-1} aria-label="成交录入" className="journal-card execution-entry" onSubmit={(event) => void saveExecution(event)}>
         <CardTitle icon={PlusSquare}>成交录入</CardTitle>
         <div className="journal-form-grid">
           <Field label="代码"><input required value={executionForm.symbol} onChange={(event) => setExecutionForm((current) => ({ ...current, symbol: event.target.value }))} placeholder="例如 002940.SZ" /></Field>
@@ -558,23 +678,25 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
         {cashFlows !== undefined && cashFlows.length > 0 && <ul className="journal-list compact-list">{cashFlows.map((cashFlow) => <li key={cashFlow.cashFlowId}><div><strong>{cashFlow.kind === "deposit" ? "入金" : "出金"} {formatMoney(cashFlow.amount)}</strong><span>{cashFlow.note || "无备注"}</span></div><button className="secondary-button" type="button" onClick={() => void deleteCashFlow(cashFlow)}>删除</button></li>)}</ul>}
       </form>
     </div>
-    <section className="journal-card daily-close" aria-label="收盘检查">
+    <section ref={dailyCloseRef} tabIndex={-1} className="journal-card daily-close" aria-label="收盘检查">
       <div className="journal-card-heading">
         <CardTitle icon={ClipboardCheck}>收盘检查</CardTitle>
         <span className={`journal-status${reviewDone ? " done" : ""}`}>{reviewDone ? "已完成" : "未完成"}</span>
       </div>
+      <p className="journal-muted" role="status" aria-label="复盘保存状态">{savingReview !== null ? "正在保存…" : currentDraft?.dirty ? "有未保存修改" : dayLoadedDate !== tradeDate ? dayError ? "复盘加载失败" : "正在读取复盘…" : dailyReview ? "已保存" : "尚未保存"}</p>
+      {currentDraft?.error && <p className="journal-error" role="alert">{currentDraft.error}</p>}
       <div className="journal-close-grid">
-        <Field label="失败条件/市场失效"><textarea value={dailyReviewForm.invalidationCondition} onChange={(event) => setDailyReviewForm((current) => ({ ...current, invalidationCondition: event.target.value }))} placeholder="在什么情况下今天的逻辑设置失效了？" /></Field>
-        <Field label="明日计划"><textarea value={dailyReviewForm.nextDayPlan} onChange={(event) => setDailyReviewForm((current) => ({ ...current, nextDayPlan: event.target.value }))} placeholder="下个交易日您将重点关注哪些特定资产和策略？" /></Field>
+        <Field label="失败条件/市场失效"><textarea disabled={dailyReview === undefined} value={dailyReviewForm.invalidationCondition} onChange={(event) => updateDailyReviewForm((current) => ({ ...current, invalidationCondition: event.target.value }))} placeholder="在什么情况下今天的逻辑设置失效了？" /></Field>
+        <Field label="明日计划"><textarea disabled={dailyReview === undefined} value={dailyReviewForm.nextDayPlan} onChange={(event) => updateDailyReviewForm((current) => ({ ...current, nextDayPlan: event.target.value }))} placeholder="下个交易日您将重点关注哪些特定资产和策略？" /></Field>
         <div className="journal-close-selects">
-          <Field label="情绪状态(交易中)"><select value={dailyReviewForm.emotion} onChange={(event) => setDailyReviewForm((current) => ({ ...current, emotion: event.target.value as DailyReview["emotion"] }))}><option value="calm">冷静专注</option><option value="confident">自信</option><option value="anxious">焦虑/过度交易</option><option value="impulsive">冲动</option><option value="frustrated">沮丧/上头</option><option value="other">其他</option></select></Field>
-          <Field label="计划执行"><select aria-label="是否遵守计划" value={dailyReviewForm.disciplineFollowed} onChange={(event) => setDailyReviewForm((current) => ({ ...current, disciplineFollowed: event.target.value as DailyReviewForm["disciplineFollowed"] }))}><option value="">草稿中暂不判断</option><option value="true">严格执行计划</option><option value="false">未遵守计划</option></select></Field>
+          <Field label="情绪状态(交易中)"><select disabled={dailyReview === undefined} value={dailyReviewForm.emotion} onChange={(event) => updateDailyReviewForm((current) => ({ ...current, emotion: event.target.value as DailyReview["emotion"] }))}><option value="calm">冷静专注</option><option value="confident">自信</option><option value="anxious">焦虑/过度交易</option><option value="impulsive">冲动</option><option value="frustrated">沮丧/上头</option><option value="other">其他</option></select></Field>
+          <Field label="计划执行"><select disabled={dailyReview === undefined} aria-label="是否遵守计划" value={dailyReviewForm.disciplineFollowed} onChange={(event) => updateDailyReviewForm((current) => ({ ...current, disciplineFollowed: event.target.value as DailyReviewForm["disciplineFollowed"] }))}><option value="">草稿中暂不判断</option><option value="true">严格执行计划</option><option value="false">未遵守计划</option></select></Field>
         </div>
-        <Field label="常规日志备注"><textarea value={dailyReviewForm.note} onChange={(event) => setDailyReviewForm((current) => ({ ...current, note: event.target.value }))} placeholder="任何其他想法、截图链接或宏观观察..." /></Field>
+        <Field label="常规日志备注"><textarea disabled={dailyReview === undefined} value={dailyReviewForm.note} onChange={(event) => updateDailyReviewForm((current) => ({ ...current, note: event.target.value }))} placeholder="任何其他想法、截图链接或宏观观察..." /></Field>
       </div>
       <div className="journal-actions">
-        <button className="secondary-button" type="button" onClick={() => void saveDailyReview("draft")} disabled={savingReview !== null}>{savingReview === "draft" ? "正在保存…" : "保存草稿"}</button>
-        <button className="primary-button" type="button" onClick={() => void saveDailyReview("completed")} disabled={savingReview !== null}>{savingReview === "completed" ? "正在完成…" : "完成收盘检查"}</button>
+        <button className="secondary-button" type="button" onClick={() => void saveDailyReview("draft")} disabled={savingReview !== null || dayLoadedDate !== tradeDate}>{savingReview === "draft" ? "正在保存…" : "保存草稿"}</button>
+        <button className="primary-button" type="button" onClick={() => void saveDailyReview("completed")} disabled={savingReview !== null || dayLoadedDate !== tradeDate}>{savingReview === "completed" ? "正在完成…" : "完成收盘检查"}</button>
       </div>
     </section>
     </>}
@@ -591,7 +713,7 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
       periodStart={reviewBounds.start}
       periodEnd={reviewBounds.end}
     />}
-    {showReview && !showCalendar && !periodReviewOpen && <EmptyState title="先根据该周期成交记录生成确定性复盘。" />}
+    {showReview && !showCalendar && !periodReviewOpen && <EmptyState title="根据本周期成交记录生成复盘报告。" />}
     {showReview && !periodReviewOpen && reviewKey && <button className="primary-button" type="button" onClick={() => setOpenReviewKey(reviewKey)}>
       {reviewActionLabel(journalView)}
     </button>}
@@ -652,6 +774,7 @@ function CalendarGrid({
           className={["journal-calendar-day", tone, cell.inMonth ? "" : "is-outside", highlighted ? "is-selected" : ""].filter(Boolean).join(" ")}
           aria-pressed={highlighted}
           aria-label={calendarDayLabel(cell)}
+          data-date={cell.date}
           onClick={() => onSelect(cell.date)}
         >
           <span className="journal-calendar-day-number">{Number(cell.date.slice(8))}</span>

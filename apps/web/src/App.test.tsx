@@ -259,7 +259,9 @@ async function viewReport(user: User, name = "贵州茅台", symbol = "600519.SH
 
 async function openMaotaiReport() {
   if (!screen.queryByRole("button", { name: "查看 贵州茅台 600519.SH 报告" })) {
-    fireEvent.click(await screen.findByRole("button", { name: /观察进度/ }));
+    const progressButton = await screen.findByRole("button", { name: /观察进度/ });
+    await waitFor(() => expect(progressButton).toBeEnabled());
+    fireEvent.click(progressButton);
   }
   const button = await screen.findByRole("button", { name: "查看 贵州茅台 600519.SH 报告" });
   await act(async () => {
@@ -580,6 +582,127 @@ describe("research workbench", () => {
     expect(getReport).toHaveBeenCalledWith("600519.SH", "1d");
   });
 
+  it("reads completed and degraded reports continuously while preserving the selected timeframe", async () => {
+    const getReport = vi.fn(async (symbol: string, timeframe: Timeframe) => makeReport(symbol, timeframe, true));
+    const createInvestmentReport = vi.fn(auxiliaryApi().createInvestmentReport);
+    const user = userEvent.setup();
+    render(<App api={{
+      ...apiWith(getReport),
+      createInvestmentReport,
+      async getProgress() {
+        return [
+          ...completedProgress({ symbol: "600519.SH", name: "贵州茅台" }),
+          { symbol: "000858.SZ", name: "五粮液", stage: "降级", state: "degraded" },
+          { symbol: "000001.SZ", name: "平安银行", stage: "生成失败", state: "failed" },
+          { symbol: "002940.SZ", name: "昂利康", stage: "报告生成", state: "running" },
+        ];
+      },
+    }} />);
+    await viewReport(user);
+    await user.click(screen.getByRole("button", { name: "周线" }));
+    await screen.findByRole("heading", { name: "报告 600519.SH 1w" });
+    const selector = screen.getByRole("combobox", { name: "切换报告股票" });
+
+    expect(within(selector).getAllByRole("option")).toHaveLength(2);
+    expect(screen.getByRole("status", { name: "报告序号" })).toHaveTextContent("1 / 2");
+    expect(screen.getByRole("button", { name: "上一只" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "下一只" }));
+    expect(await screen.findByRole("heading", { name: "报告 000858.SZ 1w" })).toBeInTheDocument();
+    expect(selector).toHaveValue("000858.SZ");
+    expect(screen.getByRole("status", { name: "报告序号" })).toHaveTextContent("2 / 2");
+    expect(screen.getByRole("button", { name: "下一只" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "上一只" }));
+    expect(await screen.findByRole("heading", { name: "报告 600519.SH 1w" })).toBeInTheDocument();
+    await user.selectOptions(selector, "000858.SZ");
+    expect(await screen.findByRole("heading", { name: "报告 000858.SZ 1w" })).toBeInTheDocument();
+    expect(getReport).toHaveBeenCalledTimes(3);
+    expect(createInvestmentReport).not.toHaveBeenCalled();
+  });
+
+  it("preserves weekly selection during rapid report navigation and ignores the previous stock response", async () => {
+    const previousReport = deferred<Report>();
+    const rows = [...maotaiWuliangWatchlist(), { symbol: "000001.SZ", name: "平安银行", market: "SZ" as const }];
+    const getReport = vi.fn((symbol: string, timeframe: Timeframe) => symbol === "000858.SZ"
+      ? previousReport.promise
+      : Promise.resolve(makeReport(symbol, timeframe, true)));
+    const user = userEvent.setup();
+    render(<App api={{ ...apiWith(getReport), async getProgress() { return completedProgress(...rows); } }} />);
+    await viewReport(user);
+    await user.click(screen.getByRole("button", { name: "周线" }));
+    await screen.findByRole("heading", { name: "报告 600519.SH 1w" });
+    await user.click(screen.getByRole("button", { name: "下一只" }));
+    expect(screen.getByText("正在加载结构报告…")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "下一只" }));
+
+    expect(await screen.findByRole("heading", { name: "报告 000001.SZ 1w" })).toBeInTheDocument();
+    await act(async () => previousReport.resolve(makeReport("000858.SZ", "1w", true)));
+    expect(screen.getByRole("heading", { name: "报告 000001.SZ 1w" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "报告 000858.SZ 1w" })).not.toBeInTheDocument();
+    expect(getReport).toHaveBeenLastCalledWith("000001.SZ", "1w");
+  });
+
+  it("reports a weekly loading failure for the new stock without restoring the previous selection", async () => {
+    const createInvestmentReport = vi.fn(auxiliaryApi().createInvestmentReport);
+    const user = userEvent.setup();
+    render(<App api={{
+      ...apiWith(async (symbol, timeframe) => {
+        if (symbol === "000858.SZ") throw new ApiError("五粮液周线不可用", 503);
+        return makeReport(symbol, timeframe, true);
+      }),
+      createInvestmentReport,
+      async getProgress() { return completedProgress(...maotaiWuliangWatchlist()); },
+    }} />);
+    await viewReport(user);
+    await user.click(screen.getByRole("button", { name: "周线" }));
+    await screen.findByRole("heading", { name: "报告 600519.SH 1w" });
+    await user.click(screen.getByRole("button", { name: "下一只" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("五粮液周线不可用");
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("五粮液");
+    expect(screen.queryByRole("img", { name: "600519.SH 图表" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "生成 Pi AI 走势报告" }));
+    expect(createInvestmentReport).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "上一只" }));
+    expect(await screen.findByRole("heading", { name: "报告 600519.SH 1w" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("disables report navigation for a single result and when the current batch becomes empty", async () => {
+    const getProgress = vi.fn()
+      .mockResolvedValueOnce(completedProgress({ symbol: "600519.SH", name: "贵州茅台" }))
+      .mockResolvedValue([]);
+    const user = userEvent.setup();
+    render(<App api={{ ...apiWith(async (symbol, timeframe) => makeReport(symbol, timeframe, true)), getProgress }} />);
+    await viewReport(user);
+    expect(screen.getByRole("button", { name: "上一只" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "下一只" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "切换报告股票" })).toBeDisabled();
+    expect(screen.getByRole("status", { name: "报告序号" })).toHaveTextContent("1 / 1");
+
+    await user.click(screen.getByRole("link", { name: "交易日记" }));
+    await user.click(screen.getByRole("link", { name: /今日批次/ }));
+    await waitFor(() => expect(screen.getByRole("status", { name: "报告序号" })).toHaveTextContent("0 / 0"));
+    expect(screen.getByRole("button", { name: "上一只" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "下一只" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "切换报告股票" })).toHaveTextContent("暂无可读报告");
+    expect(screen.getByRole("heading", { name: "报告 600519.SH 1d" })).toBeInTheDocument();
+  });
+
+  it("uses the current candidate count and removes simulated navigation metadata", async () => {
+    const user = userEvent.setup();
+    render(<App api={{
+      ...apiWith(async (symbol) => makeReport(symbol)),
+      async getWatchlist() { return maotaiWuliangWatchlist(); },
+      async getProgress() { return []; },
+    }} />);
+    const link = screen.getByRole("link", { name: /今日批次/ });
+    await waitFor(() => expect(link).toHaveTextContent("02"));
+    await user.click(screen.getByRole("button", { name: "移除 000858.SZ" }));
+    expect(link).toHaveTextContent("01");
+    expect(screen.queryByText("系统：运行中")).not.toBeInTheDocument();
+    expect(screen.queryByText(/2026\.08\.11/)).not.toBeInTheDocument();
+  });
+
   it("switches timeframes and reuses cached reports", async () => {
     const calls: string[] = [];
     const api = apiWith(async (symbol, timeframe) => {
@@ -757,7 +880,8 @@ describe("research workbench", () => {
     expect(getProgress).toHaveBeenCalledTimes(2);
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     expect(getProgress).toHaveBeenCalledTimes(3);
-    expect(screen.getByText("运行中 · 1 / 1")).toBeInTheDocument();
+    expect(screen.getByText("全部完成 · 1 / 1")).toBeInTheDocument();
+    expect(screen.queryByText("LIVE")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "结构报告" })).not.toBeInTheDocument();
     await act(async () => { await Promise.resolve(); });
     vi.useRealTimers();
@@ -766,11 +890,159 @@ describe("research workbench", () => {
     expect(await screen.findByRole("heading", { name: "本批 AI 报告" })).toBeInTheDocument();
   });
 
+  it("resumes an existing batch after loading and stops polling after completion", async () => {
+    const getProgress = vi.fn()
+      .mockResolvedValueOnce([{ symbol: "600519.SH", name: "贵州茅台", stage: "报告生成", state: "running" }])
+      .mockResolvedValue(completedProgress({ symbol: "600519.SH", name: "贵州茅台" }));
+    const createBatch = vi.fn();
+    vi.useFakeTimers();
+    render(<App api={{ ...apiWith(async (symbol) => makeReport(symbol)), getProgress, createBatch }} />);
+    await act(async () => { await Promise.resolve(); });
+
+    expect(screen.getByText("LIVE")).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(screen.getByText("全部完成 · 1 / 1")).toBeInTheDocument();
+    expect(screen.queryByText("LIVE")).not.toBeInTheDocument();
+    expect(createBatch).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    expect(getProgress).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps completed batch reports available during a connection failure and resumes querying", async () => {
+    const completed = { symbol: "600519.SH", name: "贵州茅台", stage: "完成", state: "completed" as const };
+    const running = { symbol: "000858.SZ", name: "五粮液", stage: "报告生成", state: "running" as const };
+    const getProgress = vi.fn()
+      .mockResolvedValueOnce([completed, running])
+      .mockRejectedValueOnce(new ApiError("进度服务暂时断开", 503))
+      .mockResolvedValue([completed, { ...running, stage: "完成", state: "completed" }]);
+    const createBatch = vi.fn();
+    vi.useFakeTimers();
+    render(<App api={{ ...apiWith(async (symbol) => makeReport(symbol)), getProgress, createBatch }} />);
+    await act(async () => { await Promise.resolve(); await vi.advanceTimersByTimeAsync(2000); });
+
+    expect(screen.getByRole("alert")).toHaveTextContent("进度服务暂时断开");
+    expect(screen.getByRole("button", { name: "查看 贵州茅台 600519.SH 报告" })).toBeEnabled();
+    expect(screen.queryByText("LIVE")).not.toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    expect(getProgress).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByRole("button", { name: "恢复批次查询" }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByText("全部完成 · 2 / 2")).toBeInTheDocument();
+    expect(createBatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps a pending batch creation connected after visiting the journal", async () => {
+    const creation = deferred<{ id: string }>();
+    const getProgress = vi.fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValue(completedProgress({ symbol: "600519.SH", name: "贵州茅台" }));
+    const user = userEvent.setup();
+    render(<App api={{
+      ...apiWith(async (symbol) => makeReport(symbol)),
+      getProgress,
+      createBatch: () => creation.promise,
+    }} />);
+    await user.click(await screen.findByRole("button", { name: /生成本批报告/ }));
+    await user.click(screen.getByRole("link", { name: "交易日记" }));
+    await user.click(screen.getByRole("link", { name: /今日批次/ }));
+    await act(async () => creation.resolve({ id: "created-batch" }));
+
+    expect(await screen.findByRole("button", { name: /生成本批报告/ })).toBeEnabled();
+    expect(screen.getByText("全部完成 · 1 / 1")).toBeInTheDocument();
+  });
+
+  it("labels a finished batch with failed reports as partially failed", async () => {
+    const user = userEvent.setup();
+    render(<App api={{
+      ...apiWith(async (symbol) => makeReport(symbol)),
+      async getProgress() {
+        return [
+          { symbol: "600519.SH", name: "贵州茅台", stage: "完成", state: "completed" },
+          { symbol: "000858.SZ", name: "五粮液", stage: "生成失败", state: "failed" },
+        ];
+      },
+    }} />);
+    await user.click(await screen.findByRole("button", { name: /观察进度/ }));
+
+    expect(screen.getByText("部分失败 · 1 / 2")).toBeInTheDocument();
+    expect(screen.queryByText("LIVE")).not.toBeInTheDocument();
+  });
+
+  it("shows the selected stock above the report and presents each quote only once", async () => {
+    const user = userEvent.setup();
+    render(<App api={apiWith(async (symbol, timeframe) => ({ ...makeReport(symbol, timeframe, true), name: "贵州茅台" }))} />);
+    await viewReport(user);
+
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("贵州茅台");
+    expect(screen.queryByText("收盘后的结构，")).not.toBeInTheDocument();
+    expect(screen.getAllByLabelText("最新收盘")).toHaveLength(1);
+    expect(screen.queryByText("最新收盘 · 600519.SH")).not.toBeInTheDocument();
+    expect(screen.queryByText("候选")).not.toBeInTheDocument();
+  });
+
+  it("uses the progress stock name when the report payload only names its symbol", async () => {
+    const user = userEvent.setup();
+    render(<App api={apiWith(async (symbol, timeframe) => makeReport(symbol, timeframe, true))} />);
+    await viewReport(user);
+    expect(await screen.findByRole("heading", { level: 1 })).toHaveTextContent("贵州茅台 · 结构研报");
+  });
+
+  it("does not let a late batch report replace a newer AI request or its recovery id", async () => {
+    const oldBatchReport = deferred<InvestmentReportJob>();
+    const newJob = { ...makeInvestmentJob("completed", "600519.SH", "1d", "new-digest", "新 AI 报告"), reportId: "report-new" };
+    const currentReportQuery = vi.fn().mockRejectedValueOnce(new ApiError("新报告查询中断", 503)).mockResolvedValue(newJob);
+    const getInvestmentReport = vi.fn((reportId: string) => reportId === "report-old" ? oldBatchReport.promise : currentReportQuery());
+    vi.useFakeTimers();
+    render(<App api={{
+      ...apiWith(async (symbol, timeframe) => makeReport(symbol, timeframe, true)),
+      getProgress: async () => [
+        { symbol: "600519.SH", name: "贵州茅台", reportId: "report-old", stage: "完成", state: "completed" },
+        { symbol: "000858.SZ", name: "五粮液", stage: "生成", state: "running" },
+      ],
+      createInvestmentReport: async () => ({ reportId: "report-new", status: "queued", cached: false }),
+      getInvestmentReport,
+    }} />);
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "查看 贵州茅台 600519.SH 报告" })); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(getInvestmentReport).toHaveBeenCalledWith("report-old");
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "生成 Pi AI 走势报告" })); });
+    await act(async () => oldBatchReport.resolve({ ...makeInvestmentJob("completed", "600519.SH", "1d", "old-digest", "旧批次 AI 报告"), reportId: "report-old" }));
+    expect(screen.queryByRole("heading", { name: "旧批次 AI 报告" })).not.toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(screen.getByRole("alert")).toHaveTextContent("新报告查询中断");
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "恢复报告查询" })); });
+    expect(getInvestmentReport).toHaveBeenLastCalledWith("report-new");
+    expect(screen.getByRole("heading", { name: "新 AI 报告" })).toBeInTheDocument();
+  });
+
+  it("allows an explicitly created batch to replace an earlier manual AI report", async () => {
+    const user = userEvent.setup();
+    const getProgress = vi.fn()
+      .mockResolvedValueOnce(completedProgress({ symbol: "600519.SH", name: "贵州茅台" }))
+      .mockResolvedValue([{ symbol: "600519.SH", name: "贵州茅台", reportId: "new-batch-report", stage: "完成", state: "completed" }]);
+    render(<App api={{
+      ...apiWith(async (symbol, timeframe) => makeReport(symbol, timeframe, true)),
+      getProgress,
+      createInvestmentReport: async () => ({ reportId: "manual-report", status: "completed", cached: false }),
+      getInvestmentReport: async (reportId) => ({ ...makeInvestmentJob("completed", "600519.SH", "1d", reportId, reportId === "manual-report" ? "之前手动 AI 报告" : "最新批次 AI 报告"), reportId }),
+    }} />);
+    await viewReport(user);
+    await user.click(await screen.findByRole("button", { name: "生成 Pi AI 走势报告" }));
+    expect(await screen.findByRole("heading", { name: "之前手动 AI 报告" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回进度" }));
+    await user.click(screen.getByRole("button", { name: /生成本批报告/ }));
+    await viewReport(user);
+    expect(await screen.findByRole("heading", { name: "最新批次 AI 报告" })).toBeInTheDocument();
+  });
+
   it("shows a Chinese API error state", async () => {
     const user = userEvent.setup();
     render(<App initialError="Tushare token 未配置" />);
     await user.click(screen.getByRole("button", { name: /生成本批报告/ }));
-    expect(screen.getByRole("alert")).toHaveTextContent("数据服务暂不可用");
+    expect(screen.getByRole("alert")).toHaveTextContent("Tushare token 未配置");
+    expect(screen.getByRole("button", { name: "恢复批次查询" })).toBeEnabled();
   });
 
   it("loads the initial structure and information in parallel without generating AI", async () => {
@@ -1016,6 +1288,38 @@ describe("research workbench", () => {
     expect(getInvestmentReport).toHaveBeenCalledTimes(2);
   });
 
+  it("recovers an interrupted AI query with the existing report without generating again", async () => {
+    const createInvestmentReport = vi.fn(auxiliaryApi().createInvestmentReport);
+    const retryInvestmentReport = vi.fn(auxiliaryApi().retryInvestmentReport);
+    const getInvestmentReport = vi.fn()
+      .mockResolvedValueOnce(makeInvestmentJob("running"))
+      .mockRejectedValueOnce(new ApiError("报告状态连接中断", 503))
+      .mockResolvedValueOnce(makeInvestmentJob("completed"));
+    render(<App api={{
+      ...apiWith(async (symbol, timeframe) => makeReport(symbol, timeframe, true)),
+      createInvestmentReport,
+      retryInvestmentReport,
+      getInvestmentReport,
+    }} />);
+    await openMaotaiReport();
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "生成 Pi AI 走势报告" }));
+    await act(async () => { await Promise.resolve(); await vi.advanceTimersByTimeAsync(4000); });
+
+    expect(screen.getByRole("alert")).toHaveTextContent("报告状态连接中断");
+    expect(screen.queryByText("Pi AI 正在生成三情景报告")).not.toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    expect(getInvestmentReport).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByRole("button", { name: "恢复报告查询" }));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(screen.getByRole("heading", { name: "AI 报告 600519.SH 1d" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(getInvestmentReport).toHaveBeenLastCalledWith("report-600519.SH-1d");
+    expect(createInvestmentReport).toHaveBeenCalledOnce();
+    expect(retryInvestmentReport).not.toHaveBeenCalled();
+  });
+
   it("stops failed polling and retries only through the dedicated endpoint", async () => {
     const createInvestmentReport = vi.fn(auxiliaryApi().createInvestmentReport);
     const retryInvestmentReport = vi.fn(auxiliaryApi().retryInvestmentReport);
@@ -1078,7 +1382,7 @@ describe("research workbench", () => {
     fireEvent.click(screen.getByRole("button", { name: "查看 贵州茅台 600519.SH 报告" }));
     await act(async () => { await Promise.resolve(); });
 
-    expect(screen.getByRole("status")).toHaveTextContent("报告已排队");
+    expect(within(screen.getByRole("region", { name: "Pi AI 三情景走势报告" })).getByRole("status")).toHaveTextContent("报告已排队");
     await act(async () => { await vi.advanceTimersByTimeAsync(1999); });
     expect(getInvestmentReport).toHaveBeenCalledOnce();
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
@@ -1229,16 +1533,16 @@ describe("research workbench", () => {
     const declarations = (pattern: RegExp, source = styles) => source.match(pattern)?.[1] ?? "";
     const mediaBlock = (maxWidth: number) => {
       const marker = `@media (max-width: ${maxWidth}px)`;
-      const start = styles.lastIndexOf(marker);
-      if (start < 0) return "";
-      const open = styles.indexOf("{", start);
-      let depth = 0;
-      for (let index = open; index < styles.length; index += 1) {
-        if (styles[index] === "{") depth += 1;
-        if (styles[index] === "}") depth -= 1;
-        if (depth === 0) return styles.slice(start, index + 1);
-      }
-      return "";
+      return styles.split(marker).slice(1).map((source) => {
+        const open = source.indexOf("{");
+        let depth = 0;
+        for (let index = open; index < source.length; index += 1) {
+          if (source[index] === "{") depth += 1;
+          if (source[index] === "}") depth -= 1;
+          if (depth === 0) return marker + source.slice(0, index + 1);
+        }
+        return "";
+      }).join("\n");
     };
     const scopedFontRules = [...styles.matchAll(/\.batch-page\s+:is\(\s*([\s\S]*?)\s*\)\s*\{([^}]*)\}/g)];
     const selectorsForFontSize = (fontSize: number) => scopedFontRules
@@ -1345,11 +1649,11 @@ describe("research workbench", () => {
       ".delivery-actions button",
       ".delivery-action-link",
     ];
-    expect(selectorsForFontSize(12)).toHaveLength(bodySelectors.length);
-    expect(selectorsForFontSize(12)).toEqual(expect.arrayContaining(bodySelectors));
-    expect(selectorsForFontSize(10)).toHaveLength(labelSelectors.length);
-    expect(selectorsForFontSize(10)).toEqual(expect.arrayContaining(labelSelectors));
-    expectDeclarations(declarations(/\.batch-page\s+\.market-chip\s*\{([^}]*)\}/), [/font-size:\s*10px\s*!important/]);
+    expect(selectorsForFontSize(14)).toHaveLength(bodySelectors.length);
+    expect(selectorsForFontSize(14)).toEqual(expect.arrayContaining(bodySelectors));
+    expect(selectorsForFontSize(12)).toHaveLength(labelSelectors.length);
+    expect(selectorsForFontSize(12)).toEqual(expect.arrayContaining(labelSelectors));
+    expectDeclarations(declarations(/\.batch-page\s+\.market-chip\s*\{([^}]*)\}/), [/font-size:\s*11px\s*!important/]);
 
     expectDeclarations(declarations(/\.information-toggle\s*\{([^}]*)\}/), [
       /width:\s*100%/,
@@ -1359,7 +1663,7 @@ describe("research workbench", () => {
       /border-radius:\s*var\(--radius-control\)/,
       /background:\s*transparent/,
       /color:\s*var\(--muted\)/,
-      /font-size:\s*10px/,
+      /font-size:\s*13px/,
     ]);
     expectDeclarations(declarations(/\.information-toggle:hover,\s*\.information-toggle:focus-visible\s*\{([^}]*)\}/), [
       /border-color:\s*color-mix\(in srgb,\s*var\(--accent\)\s+45%,\s*transparent\)/,

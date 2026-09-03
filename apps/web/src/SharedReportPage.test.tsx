@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, type WorkbenchApi } from "./api";
@@ -117,7 +117,42 @@ describe("SharedReportPage", () => {
 
     expect(screen.getByText("免责声明")).toBeInTheDocument();
     expect(screen.getByText("本报告基于固化数据生成，仅供研究参考，不构成任何投资建议。")).toBeInTheDocument();
-    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "报告阅读导航" })).toBeInTheDocument();
+  });
+
+  it.each([false, true])("阅读导航滚动并聚焦对应章节，保留分享路由（减少动态效果：%s）", async (reduceMotion) => {
+    const user = userEvent.setup();
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: reduceMotion })));
+    const previousUrl = window.location.href;
+    window.history.replaceState(null, "", "#/share/token-1");
+    render(<SharedReportPage token="token-1" api={apiWith(async () => sharedReport())} />);
+
+    try {
+      const navigation = await screen.findByRole("navigation", { name: "报告阅读导航" });
+      const sections = [
+        ["摘要", "报告摘要"],
+        ["结构图", "缠论结构图"],
+        ["情景", "三情景展望"],
+        ["风险", "风险提示"],
+        ["证据", "证据来源"],
+        ["兑现结果", "兑现结果"],
+      ];
+      expect(within(navigation).queryByRole("link")).not.toBeInTheDocument();
+      expect(within(navigation).getAllByRole("button")).toHaveLength(sections.length);
+      for (const [label, sectionName] of sections) {
+        const section = screen.getByRole("region", { name: sectionName });
+        const scrollIntoView = vi.fn();
+        Object.defineProperty(section, "scrollIntoView", { configurable: true, value: scrollIntoView });
+
+        await user.click(within(navigation).getByRole("button", { name: label }));
+
+        expect(scrollIntoView).toHaveBeenCalledWith({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+        expect(section).toHaveFocus();
+        expect(window.location.hash).toBe("#/share/token-1");
+      }
+    } finally {
+      window.history.replaceState(null, "", previousUrl);
+    }
   });
 
   it("exports via the browser print dialog", async () => {
@@ -172,6 +207,9 @@ describe("SharedReportPage", () => {
     expect(pdfButton).toHaveClass("share-export-button");
     expect(exportButton).toHaveClass("share-export-button", "share-export-image-button");
     expect(options.filter(tools)).toBe(false);
+    const navigation = screen.getByRole("navigation", { name: "报告阅读导航" });
+    expect(navigation).toHaveAttribute("data-export-ignore", "true");
+    expect(options.filter(navigation)).toBe(false);
     expect(options.filter(screen.getByText("结构处于等待确认阶段。"))).toBe(true);
 
     resolveToBlob(blob);
@@ -341,5 +379,8 @@ describe("SharedReportPage", () => {
 
     await screen.findByRole("heading", { name: "结构与资讯综合研判" });
     expect(screen.queryByText("情景兑现结果")).not.toBeInTheDocument();
+    const navigation = screen.getByRole("navigation", { name: "报告阅读导航" });
+    expect(within(navigation).queryByRole("button", { name: "兑现结果" })).not.toBeInTheDocument();
+    expect(within(navigation).getAllByRole("button")).toHaveLength(5);
   });
 });

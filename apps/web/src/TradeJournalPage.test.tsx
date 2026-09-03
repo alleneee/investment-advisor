@@ -1,8 +1,8 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { TradeJournalPage } from "./TradeJournalPage";
-import type { ReviewPeriodKind, TradingAccount, TradingCalendarMonth, TradingExecution, TradingPeriodSummary } from "./trading-types";
+import type { DailyReview, ReviewPeriodKind, TradingAccount, TradingCalendarMonth, TradingExecution, TradingPeriodSummary } from "./trading-types";
 import type { TradingApi } from "./trading-api";
 
 const { journalReturnChartRender } = vi.hoisted(() => ({ journalReturnChartRender: vi.fn() }));
@@ -85,6 +85,207 @@ function apiForJournal(overrides: Partial<TradingApi> = {}): TradingApi {
 }
 
 describe("交易日记", () => {
+  it("将日历、记账和周期报告分为主导航与对应次级视图", async () => {
+    const user = userEvent.setup();
+    render(<TradeJournalPage api={apiForJournal({ getAccount: vi.fn(async () => account) })} today="2026-08-17" />);
+    const navigation = within(await screen.findByRole("navigation", { name: "交易日记导航" }));
+    expect(navigation.getByRole("button", { name: "交易日历" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("group", { name: "日历显示方式" })).toHaveTextContent("月视图周视图");
+    expect(screen.queryByRole("button", { name: "季报" })).not.toBeInTheDocument();
+    await user.click(navigation.getByRole("button", { name: "周期报告" }));
+    expect(screen.getByRole("group", { name: "报告周期" })).toHaveTextContent("季报年报");
+    expect(screen.queryByRole("button", { name: "月视图" })).not.toBeInTheDocument();
+    await user.click(navigation.getByRole("button", { name: "记账与日复盘" }));
+    expect(screen.getByRole("heading", { name: "每日交易日志" })).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "报告周期" })).not.toBeInTheDocument();
+    await user.click(navigation.getByRole("button", { name: "交易日历" }));
+    expect(screen.getByRole("button", { name: "月视图" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "生成本月复盘" })).toBeInTheDocument();
+  });
+
+  it("日历可直接跳转月份并回到今天", async () => {
+    const user = userEvent.setup();
+    const getCalendar = vi.fn(async (month: string) => emptyCalendar(month));
+    render(<TradeJournalPage api={apiForJournal({ getAccount: vi.fn(async () => account), getCalendar })} today="2026-08-17" />);
+    await screen.findByRole("grid", { name: "交易月历" });
+    await user.click(screen.getByRole("button", { name: "选择月份" }));
+    await user.click(within(screen.getByRole("dialog", { name: "选择月份" })).getByRole("button", { name: "7月" }));
+    expect(screen.getByRole("heading", { name: "2026年7月" })).toBeInTheDocument();
+    expect(getCalendar).toHaveBeenCalledWith("2026-07");
+    await user.click(screen.getByRole("button", { name: "今天" }));
+    expect(await screen.findByRole("heading", { name: "2026年8月" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "选择月份" })).toHaveTextContent("2026年8月");
+  });
+
+  it("快捷入口聚焦对应编辑区并保留未保存复盘", async () => {
+    const user = userEvent.setup();
+    render(<TradeJournalPage api={apiForJournal({ getAccount: vi.fn(async () => account) })} today="2026-08-17" />);
+    await user.click(await screen.findByRole("button", { name: "写复盘" }));
+    expect(screen.getByRole("region", { name: "收盘检查" })).toHaveFocus();
+    await user.type(screen.getByLabelText("常规日志备注"), "导航后仍需保留的复盘");
+    await user.click(screen.getByRole("button", { name: "交易日历" }));
+    await user.click(screen.getByRole("button", { name: "记一笔" }));
+    expect(screen.getByRole("form", { name: "成交录入" })).toHaveFocus();
+    expect(screen.getByLabelText("常规日志备注")).toHaveValue("导航后仍需保留的复盘");
+    await user.click(screen.getByRole("button", { name: "写复盘" }));
+    expect(screen.getByRole("region", { name: "收盘检查" })).toHaveFocus();
+  });
+
+  it("当日明细约束键盘焦点，关闭返回日期，快捷复盘定位同一天", async () => {
+    const user = userEvent.setup();
+    render(<TradeJournalPage api={apiForJournal({ getAccount: vi.fn(async () => account) })} today="2026-08-17" />);
+    const day = await screen.findByRole("button", { name: /2026年8月18日，/ });
+    await user.click(day);
+    const dialog = within(screen.getByRole("dialog", { name: "当日明细" }));
+    const close = dialog.getByRole("button", { name: "关闭当日明细" });
+    expect(close).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(dialog.getByRole("button", { name: "写复盘" })).toHaveFocus();
+    await user.tab();
+    expect(close).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(day).toHaveFocus();
+    await user.click(day);
+    await user.click(within(screen.getByRole("dialog", { name: "当日明细" })).getByRole("button", { name: "写复盘" }));
+    expect(screen.getByRole("region", { name: "收盘检查" })).toHaveFocus();
+    expect(screen.getByLabelText("交易日期")).toHaveValue("2026-08-18");
+  });
+
+  it.each([true, false])("跨月日期关闭明细后恢复到可用日历入口（新月份已加载：%s）", async (loaded) => {
+    const user = userEvent.setup();
+    let resolveSeptember: (calendar: TradingCalendarMonth) => void = () => {};
+    const september = new Promise<TradingCalendarMonth>((resolve) => { resolveSeptember = resolve; });
+    const getCalendar = vi.fn(async (month: string) => month === "2026-09" ? september : emptyCalendar(month));
+    render(<TradeJournalPage api={apiForJournal({ getAccount: vi.fn(async () => account), getCalendar })} today="2026-08-17" />);
+    const originalDay = await screen.findByRole("button", { name: /2026年9月1日，/ });
+    await user.click(originalDay);
+    expect(originalDay).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "关闭当日明细" })).toHaveFocus();
+    if (loaded) await act(async () => { resolveSeptember(emptyCalendar("2026-09")); });
+
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("dialog", { name: "当日明细" })).not.toBeInTheDocument();
+    const expectedTarget = loaded
+      ? screen.getByRole("button", { name: /2026年9月1日，/ })
+      : within(screen.getByRole("navigation", { name: "交易日记导航" })).getByRole("button", { name: "交易日历" });
+    expect(expectedTarget).toHaveFocus();
+  });
+
+  it("账户加载失败不会显示创建账户，重试后恢复日记", async () => {
+    const user = userEvent.setup();
+    const getAccount = vi.fn().mockRejectedValueOnce(new Error("账户连接失败")).mockResolvedValue(account);
+    render(<TradeJournalPage api={apiForJournal({ getAccount })} today="2026-08-17" />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("账户连接失败");
+    expect(screen.queryByRole("heading", { name: "创建交易账户" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "重新加载账户" }));
+    expect(await screen.findByRole("heading", { name: "2026年8月" })).toBeInTheDocument();
+  });
+
+  it("当日加载失败提供重试，不将失败显示为读取中或没有复盘", async () => {
+    const user = userEvent.setup();
+    const listExecutions = vi.fn().mockRejectedValueOnce(new Error("成交连接失败")).mockResolvedValue([]);
+    render(<TradeJournalPage api={apiForJournal({ getAccount: vi.fn(async () => account), listExecutions })} today="2026-08-17" initialView="list" />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("成交连接失败");
+    expect(screen.queryByText("正在读取成交…")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存草稿" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "重新加载当日数据" }));
+    expect(await screen.findByText("今日没有交易记录。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存草稿" })).toBeEnabled();
+  });
+
+  it("当日明细弹窗内可重试失败的数据加载", async () => {
+    const user = userEvent.setup();
+    const listExecutions = vi.fn().mockRejectedValueOnce(new Error("成交连接失败")).mockResolvedValue([]);
+    render(<TradeJournalPage api={apiForJournal({ getAccount: vi.fn(async () => account), listExecutions })} today="2026-08-17" />);
+    await user.click(await screen.findByRole("button", { name: /2026年8月17日，/ }));
+    const dialog = within(screen.getByRole("dialog", { name: "当日明细" }));
+    expect(dialog.getByRole("alert")).toHaveTextContent("成交连接失败");
+    expect(dialog.queryByText("当日尚未写复盘。")).not.toBeInTheDocument();
+    await user.click(dialog.getByRole("button", { name: "重新加载当日数据" }));
+    expect(await dialog.findByText("当日没有成交。")).toBeInTheDocument();
+  });
+
+  it("首次日期复盘加载完成前禁止编辑，加载后保留完整服务端内容", async () => {
+    let finishLoad!: (value: DailyReview) => void;
+    const saved: DailyReview = { dailyReviewId: "review-17", tradeDate: "2026-08-17", status: "draft", invalidationCondition: "跌破前低", nextDayPlan: "观察已有持仓", emotion: "confident", disciplineFollowed: true, note: "原有复盘", revision: 3, dailyReviewRevision: 3 };
+    render(<TradeJournalPage api={apiForJournal({ getAccount: vi.fn(async () => account), getDailyReview: () => new Promise((resolve) => { finishLoad = resolve; }) })} today="2026-08-17" initialView="list" />);
+    expect(await screen.findByLabelText("常规日志备注")).toBeDisabled();
+    expect(screen.getByLabelText("明日计划")).toBeDisabled();
+    expect(screen.getByLabelText("情绪状态(交易中)")).toBeDisabled();
+    await act(async () => finishLoad(saved));
+    expect(screen.getByLabelText("常规日志备注")).toBeEnabled();
+    expect(screen.getByLabelText("常规日志备注")).toHaveValue("原有复盘");
+    expect(screen.getByLabelText("明日计划")).toHaveValue("观察已有持仓");
+    expect(screen.getByLabelText("失败条件/市场失效")).toHaveValue("跌破前低");
+    expect(screen.getByLabelText("是否遵守计划")).toHaveValue("true");
+  });
+
+  it("按日期保留未保存复盘，保存成交后的账户刷新不覆盖草稿", async () => {
+    const user = userEvent.setup();
+    const saved: TradingExecution = {
+      executionId: "draft-trade", symbol: "002940.SZ", name: "昂利康", executedAt: "2026-08-17T15:00:00+08:00", side: "buy", price: "20", quantity: 100, fee: "0", primaryReason: "pullback_confirmation", tags: [], note: "", clientIdempotencyKey: "draft-trade", revision: 1, ledgerRevision: 1,
+    };
+    const getDailyReview = vi.fn(async () => null);
+    render(<TradeJournalPage api={apiForJournal({ getAccount: vi.fn(async () => ({ ...account })), getDailyReview, createExecution: vi.fn(async () => saved) })} today="2026-08-17" initialView="list" />);
+    await screen.findByText("今日没有交易记录。");
+    await user.type(screen.getByLabelText("常规日志备注"), "保留十七日草稿");
+    await act(async () => { fireEvent.change(screen.getByLabelText("交易日期"), { target: { value: "2026-08-18" } }); });
+    await waitFor(() => expect(getDailyReview).toHaveBeenCalledWith("2026-08-18"));
+    await user.type(screen.getByLabelText("常规日志备注"), "保留十八日草稿");
+    await act(async () => { fireEvent.change(screen.getByLabelText("交易日期"), { target: { value: "2026-08-17" } }); });
+    await waitFor(() => expect(screen.getByLabelText("常规日志备注")).toHaveValue("保留十七日草稿"));
+    await user.type(screen.getByLabelText("代码"), "002940.SZ");
+    await user.clear(screen.getByLabelText("成交价"));
+    await user.type(screen.getByLabelText("成交价"), "20");
+    await user.click(screen.getByRole("button", { name: "保存交易记录" }));
+    await waitFor(() => expect(getDailyReview.mock.calls.length).toBeGreaterThan(3));
+    expect(screen.getByLabelText("常规日志备注")).toHaveValue("保留十七日草稿");
+    expect(screen.getByRole("status", { name: "复盘保存状态" })).toHaveTextContent("有未保存修改");
+    await act(async () => { fireEvent.change(screen.getByLabelText("交易日期"), { target: { value: "2026-08-18" } }); });
+    expect(screen.getByLabelText("常规日志备注")).toHaveValue("保留十八日草稿");
+  });
+
+  it("旧日期保存完成不会覆盖新日期草稿，保存中再次编辑仍保持未保存", async () => {
+    const user = userEvent.setup();
+    let finishSave!: (value: DailyReview) => void;
+    const saveDailyReview = vi.fn(() => new Promise<DailyReview>((resolve) => { finishSave = resolve; }));
+    const api = apiForJournal({ getAccount: vi.fn(async () => account), saveDailyReview });
+    render(<TradeJournalPage api={api} today="2026-08-17" initialView="list" />);
+    await screen.findByText("今日没有交易记录。");
+    await user.type(screen.getByLabelText("常规日志备注"), "提交版本");
+    await user.click(screen.getByRole("button", { name: "保存草稿" }));
+    expect(screen.getByRole("button", { name: "正在保存…" })).toBeDisabled();
+    await user.type(screen.getByLabelText("常规日志备注"), "继续编辑");
+    await act(async () => { fireEvent.change(screen.getByLabelText("交易日期"), { target: { value: "2026-08-18" } }); });
+    await waitFor(() => expect(api.getDailyReview).toHaveBeenCalledWith("2026-08-18"));
+    await user.type(screen.getByLabelText("常规日志备注"), "十八日内容");
+    await act(async () => finishSave({ dailyReviewId: "review-17", tradeDate: "2026-08-17", status: "draft", invalidationCondition: "", nextDayPlan: "", emotion: "calm", disciplineFollowed: null, note: "提交版本", revision: 1, dailyReviewRevision: 1 }));
+    expect(saveDailyReview).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText("常规日志备注")).toHaveValue("十八日内容");
+    await act(async () => { fireEvent.change(screen.getByLabelText("交易日期"), { target: { value: "2026-08-17" } }); });
+    expect(screen.getByLabelText("常规日志备注")).toHaveValue("提交版本继续编辑");
+    expect(screen.getByRole("status", { name: "复盘保存状态" })).toHaveTextContent("有未保存修改");
+  });
+
+  it("保存失败保留草稿，重试成功后显示已保存", async () => {
+    const user = userEvent.setup();
+    const saved: DailyReview = { dailyReviewId: "review-17", tradeDate: "2026-08-17", status: "draft", invalidationCondition: "", nextDayPlan: "", emotion: "calm", disciplineFollowed: null, note: "保留这段复盘", revision: 1, dailyReviewRevision: 1 };
+    const saveDailyReview = vi.fn().mockRejectedValueOnce(new Error("保存连接失败")).mockResolvedValue(saved);
+    render(<TradeJournalPage api={apiForJournal({ getAccount: vi.fn(async () => account), saveDailyReview })} today="2026-08-17" initialView="list" />);
+    await screen.findByText("今日没有交易记录。");
+    await user.type(screen.getByLabelText("常规日志备注"), "保留这段复盘");
+    await user.click(screen.getByRole("button", { name: "保存草稿" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("保存连接失败");
+    expect(screen.getByLabelText("常规日志备注")).toHaveValue("保留这段复盘");
+    expect(screen.getByRole("status", { name: "复盘保存状态" })).toHaveTextContent("有未保存修改");
+    await user.click(screen.getByRole("button", { name: "保存草稿" }));
+    expect(await screen.findByRole("status", { name: "复盘保存状态" })).toHaveTextContent("已保存");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("在没有账户时创建唯一账户并进入每日工作台", async () => {
     const user = userEvent.setup();
     const api = apiForJournal();
@@ -135,7 +336,7 @@ describe("交易日记", () => {
     render(<TradeJournalPage api={api} today="2026-08-17" />);
 
     expect(await screen.findByRole("heading", { name: "2026年8月" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "列表视图" }));
+    await user.click(screen.getByRole("button", { name: "记账与日复盘" }));
     expect(await screen.findByRole("heading", { name: "每日交易日志" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "回踩确认" })).toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText("方向"), "sell");
@@ -214,7 +415,7 @@ describe("交易日记", () => {
     await user.click(screen.getByRole("button", { name: "关闭当日明细" }));
     expect(screen.queryByRole("dialog", { name: "当日明细" })).not.toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: /2026年8月17日，1 笔成交/ }));
-    await user.click(screen.getByRole("button", { name: "记录当日成交" }));
+    await user.click(within(screen.getByRole("dialog", { name: "当日明细" })).getByRole("button", { name: "记一笔" }));
     expect(await screen.findByRole("heading", { name: "每日交易日志" })).toBeInTheDocument();
     expect(screen.getByLabelText("方向")).toBeInTheDocument();
   });
@@ -255,7 +456,7 @@ describe("交易日记", () => {
     expect(getPeriodSummary).toHaveBeenCalledWith("2026-08-17", "2026-08-21");
     expect(screen.queryByText("32.28%")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "季报" }));
+    await user.click(screen.getByRole("button", { name: "周期报告" }));
     expect(await screen.findByText("本季最大回撤")).toBeInTheDocument();
     expect(await screen.findByText("4.56%")).toBeInTheDocument();
     expect(getPeriodSummary).toHaveBeenCalledWith("2026-07-01", "2026-09-30");
@@ -371,7 +572,7 @@ describe("交易日记", () => {
     expect(screen.queryByRole("heading", { name: "报告版本" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "结构位置归因" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "列表视图" }));
+    await user.click(screen.getByRole("button", { name: "记账与日复盘" }));
     expect(await screen.findByRole("heading", { name: "每日交易日志" })).toBeInTheDocument();
     expect(screen.getByLabelText("方向")).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "周期复盘" })).not.toBeInTheDocument();
@@ -410,7 +611,7 @@ describe("交易日记", () => {
     render(<TradeJournalPage api={api} today="2026-08-17" />);
 
     expect(await screen.findByRole("heading", { name: "2026年8月" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "季报" }));
+    await user.click(screen.getByRole("button", { name: "周期报告" }));
     expect(await screen.findByRole("heading", { name: "2026年第三季度" })).toBeInTheDocument();
     expect(screen.queryByRole("grid", { name: "交易月历" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "周期复盘" })).not.toBeInTheDocument();
@@ -450,7 +651,7 @@ describe("交易日记", () => {
     expect(await screen.findByRole("img", { name: "收益图 week 2026-08-17 2026-08-21" })).toBeInTheDocument();
     expect(getPeriodSummary).toHaveBeenCalledWith("2026-08-17", "2026-08-21");
 
-    await user.click(screen.getByRole("button", { name: "季报" }));
+    await user.click(screen.getByRole("button", { name: "周期报告" }));
     expect(await screen.findByRole("img", { name: "收益图 quarter 2026-07-01 2026-09-30" })).toBeInTheDocument();
     expect(getPeriodSummary).toHaveBeenCalledWith("2026-07-01", "2026-09-30");
 
@@ -547,7 +748,7 @@ describe("交易日记", () => {
     render(<TradeJournalPage api={api} today="2026-08-17" />);
 
     expect(await screen.findByRole("img", { name: "收益图 month 2026-08-01 2026-08-31" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "列表视图" }));
+    await user.click(screen.getByRole("button", { name: "记账与日复盘" }));
     await user.type(screen.getByLabelText("金额 (CNY)"), "1000.00");
     await user.type(screen.getByLabelText("流水备注"), "测试入金");
     await user.click(screen.getByRole("button", { name: "记录资金流水" }));
@@ -555,7 +756,7 @@ describe("交易日记", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "记录资金流水" })).not.toBeDisabled());
 
     journalReturnChartRender.mockClear();
-    await user.click(screen.getByRole("button", { name: "月视图" }));
+    await user.click(screen.getByRole("button", { name: "交易日历" }));
     await waitFor(() => expect(getPeriodSummary).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole("img", { name: "收益图 month loading" })).toBeInTheDocument();
     expect(screen.queryByRole("img", { name: "收益图 month 2026-08-01 2026-08-31" })).not.toBeInTheDocument();
@@ -577,10 +778,10 @@ describe("交易日记", () => {
     render(<TradeJournalPage api={api} today="2026-08-17" />);
 
     expect(await screen.findByRole("img", { name: "收益图 month 2026-08-01 2026-08-31" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "列表视图" }));
+    await user.click(screen.getByRole("button", { name: "记账与日复盘" }));
 
     journalReturnChartRender.mockClear();
-    await user.click(screen.getByRole("button", { name: "月视图" }));
+    await user.click(screen.getByRole("button", { name: "交易日历" }));
     await waitFor(() => expect(getPeriodSummary).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole("img", { name: "收益图 month loading" })).toBeInTheDocument();
     expect(journalReturnChartRender.mock.calls.every(([props]) => props.summary === undefined)).toBe(true);

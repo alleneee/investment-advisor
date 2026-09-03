@@ -52,6 +52,8 @@ export function ReviewCenterPage({
   const [history, setHistory] = useState<TradingReviewReport[]>([]);
   const [busy, setBusy] = useState<"preview" | "create" | "retry" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pollError, setPollError] = useState<{ reportId: string; message: string } | null>(null);
+  const [pollEpoch, setPollEpoch] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -66,18 +68,26 @@ export function ReviewCenterPage({
   useEffect(() => {
     if (report?.snapshotStatus !== "pending" && report?.snapshotStatus !== "running") return;
     let active = true;
-    const timer = setTimeout(() => {
-      void api.getReviewReport(report.reportId).then((next) => {
-        if (active) setReport(next);
-      }).catch((reason: unknown) => {
-        if (active) setError(messageOf(reason));
-      });
-    }, 2000);
+    let timer: ReturnType<typeof setTimeout>;
+    const reportId = report.reportId;
+    setPollError(null);
+    async function poll() {
+      try {
+        const next = await api.getReviewReport(reportId);
+        if (!active) return;
+        setReport(next);
+        setHistory((items) => upsertReport(items, next));
+        if (next.snapshotStatus === "pending" || next.snapshotStatus === "running") timer = setTimeout(() => void poll(), 2000);
+      } catch (reason) {
+        if (active) setPollError({ reportId, message: messageOf(reason) });
+      }
+    }
+    timer = setTimeout(() => void poll(), 2000);
     return () => {
       active = false;
       clearTimeout(timer);
     };
-  }, [api, report?.reportId, report?.snapshotStatus]);
+  }, [api, pollEpoch, report?.reportId, report?.snapshotStatus]);
 
   function selectPeriod(kind: ReviewPeriodKind) {
     setFreeKind(kind);
@@ -111,13 +121,7 @@ export function ReviewCenterPage({
       setReport(next);
       setHistory((items) => upsertReport(items, next));
     } catch (reason) {
-      try {
-        const previewed = await api.getReviewPreview(periodKind, periodStart, periodEnd);
-        setReport(previewed);
-        setError(null);
-      } catch {
-        setError(messageOf(reason));
-      }
+      setError(`报告未保存：${messageOf(reason)}。请重试生成，或查看期间预览。`);
     } finally {
       setBusy(null);
     }
@@ -178,6 +182,7 @@ export function ReviewCenterPage({
       </section> : <EmptyState title="该周期还没有固化报告。" />}
     />}
     {report && <ReviewState report={report} onRetry={() => void retry()} retrying={busy === "retry"} />}
+    {pollError?.reportId === report?.reportId && pollError && <div><p className="journal-error" role="alert">报告状态查询中断：{pollError.message}</p><button className="secondary-button" type="button" onClick={() => setPollEpoch((value) => value + 1)}>恢复查询</button></div>}
     {deterministic && <Panel title="Pi 复盘总结" heading="h3">
       {report?.aiStatus === "not_requested" ? <p><strong>Pi 总结尚未请求</strong><span>本版先展示可审计的确定性统计，不用模型替代交易事实。</span></p> : <p><strong>{aiStatusLabel(report!.aiStatus)}</strong><span>交易复盘文字状态独立于确定性快照；当前页面只展示服务端返回的真实状态。</span></p>}
     </Panel>}

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ReviewCenterPage } from "./ReviewCenterPage";
@@ -204,6 +204,53 @@ async function generateReview(overrides: Partial<TradingApi> = {}) {
 }
 
 describe("复盘中心", () => {
+  it("相同生成状态持续查询直到完成，并同步报告版本状态", async () => {
+    vi.useFakeTimers();
+    try {
+      const running: TradingReviewReport = { ...report, snapshotId: null, snapshotStatus: "running", deterministicReport: null };
+      const getReviewReport = vi.fn().mockResolvedValueOnce({ ...running }).mockResolvedValueOnce({ ...running }).mockResolvedValue(report);
+      render(<ReviewCenterPage api={apiForReview({ createReviewReport: vi.fn(async () => running), listReviewReports: vi.fn(async () => []), getReviewReport })} today="2026-08-18" />);
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "生成确定性复盘" })); });
+      for (let index = 0; index < 3; index += 1) await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(getReviewReport).toHaveBeenCalledTimes(3);
+      expect(screen.getByRole("heading", { name: "确定性复盘结果" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /V1 已完成/ })).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("查询连接失败后能恢复查询已有任务，不重新生成报告", async () => {
+    vi.useFakeTimers();
+    try {
+      const pending: TradingReviewReport = { ...report, snapshotId: null, snapshotStatus: "pending", deterministicReport: null };
+      const getReviewReport = vi.fn().mockRejectedValueOnce(new Error("连接中断")).mockResolvedValue(report);
+      const createReviewReport = vi.fn(async () => pending);
+      render(<ReviewCenterPage api={apiForReview({ createReviewReport, getReviewReport })} today="2026-08-18" />);
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "生成确定性复盘" })); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(screen.getByRole("alert")).toHaveTextContent("连接中断");
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "恢复查询" })); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(screen.getByRole("heading", { name: "确定性复盘结果" })).toBeInTheDocument();
+      expect(createReviewReport).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText(/连接中断/)).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("生成失败明确报告未保存，不自动用预览掩盖失败", async () => {
+    const user = userEvent.setup();
+    const api = apiForReview({ createReviewReport: vi.fn(async () => { throw new Error("保存服务不可用"); }), listReviewReports: vi.fn(async () => []) });
+    render(<ReviewCenterPage api={api} today="2026-08-18" />);
+    await user.click(screen.getByRole("button", { name: "生成确定性复盘" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("保存服务不可用");
+    expect(screen.getByRole("alert")).toHaveTextContent("未保存");
+    expect(api.getReviewPreview).not.toHaveBeenCalled();
+    expect(screen.queryByRole("heading", { name: "确定性复盘结果" })).not.toBeInTheDocument();
+  });
+
   it("选择完整周期后展示账户指标带、理由事实和交易周期，不再画旧复盘图", async () => {
     const { api } = await generateReview();
 

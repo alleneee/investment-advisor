@@ -1,5 +1,5 @@
 import { toBlob } from "html-to-image";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { ApiError, type WorkbenchApi } from "./api";
 import { ChanChart } from "./ChanChart";
 import {
@@ -22,6 +22,12 @@ const INVALID_LINK_MESSAGE = "分享链接无效或已撤销，请与您的顾�
 
 export function SharedReportPage({ token, api }: SharedReportPageProps) {
   const reportRef = useRef<HTMLElement | null>(null);
+  const summaryRef = useRef<HTMLElement | null>(null);
+  const chartRef = useRef<HTMLElement | null>(null);
+  const scenariosRef = useRef<HTMLElement | null>(null);
+  const risksRef = useRef<HTMLElement | null>(null);
+  const evidenceRef = useRef<HTMLElement | null>(null);
+  const outcomeRef = useRef<HTMLElement | null>(null);
   const exportGenerationRef = useRef(0);
   const [report, setReport] = useState<SharedReport | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -133,25 +139,34 @@ export function SharedReportPage({ token, api }: SharedReportPageProps) {
         </dl>
       </header>
 
-      <section className="share-section" aria-label="报告摘要">
+      <nav className="share-reading-nav" aria-label="报告阅读导航" data-export-ignore="true">
+        <button type="button" onClick={() => focusSection(summaryRef)}>摘要</button>
+        <button type="button" onClick={() => focusSection(chartRef)}>结构图</button>
+        <button type="button" onClick={() => focusSection(scenariosRef)}>情景</button>
+        <button type="button" onClick={() => focusSection(risksRef)}>风险</button>
+        <button type="button" onClick={() => focusSection(evidenceRef)}>证据</button>
+        {report.outcome && <button type="button" onClick={() => focusSection(outcomeRef)}>兑现结果</button>}
+      </nav>
+
+      <section ref={summaryRef} tabIndex={-1} className="share-section" aria-label="报告摘要">
         <p className="share-summary">{report.executiveSummary}</p>
         <blockquote className="share-thesis">{report.outlook.thesis}</blockquote>
       </section>
 
-      <section className="share-section share-chart-section" aria-label="缠论结构图">
+      <section ref={chartRef} tabIndex={-1} className="share-section share-chart-section" aria-label="缠论结构图">
         <h2>缠论结构与固化行情</h2>
         <ChanChart symbol={report.symbol} data={report.chart} />
         {report.quality.warnings.length > 0 && <p className="share-quality-note">{report.quality.warnings.join("；")}</p>}
       </section>
 
-      <section className="share-section" aria-label="三情景展望">
+      <section ref={scenariosRef} tabIndex={-1} className="share-section" aria-label="三情景展望">
         <h2>三情景展望（未来五到二十个交易日）</h2>
         <div className="share-scenarios">
           {report.outlook.scenarios.map((scenario) => <SharedScenarioCard scenario={scenario} key={scenario.case} />)}
         </div>
       </section>
 
-      <section className="share-section" aria-label="风险提示">
+      <section ref={risksRef} tabIndex={-1} className="share-section" aria-label="风险提示">
         <h2>风险提示</h2>
         {report.risks.length
           ? <ul className="share-risks">
@@ -160,7 +175,7 @@ export function SharedReportPage({ token, api }: SharedReportPageProps) {
           : <p className="share-empty">本报告未列出额外风险条目。</p>}
       </section>
 
-      <section className="share-section" aria-label="证据来源">
+      <section ref={evidenceRef} tabIndex={-1} className="share-section" aria-label="证据来源">
         <h2>证据来源</h2>
         <ol className="share-evidence">
           {report.evidence.map((fact) => <li key={fact.ref}>
@@ -175,7 +190,7 @@ export function SharedReportPage({ token, api }: SharedReportPageProps) {
         </ol>
       </section>
 
-      {report.outcome && <SharedOutcomeSection outcome={report.outcome} />}
+      {report.outcome && <SharedOutcomeSection outcome={report.outcome} sectionRef={outcomeRef} />}
 
       <footer className="share-disclaimer" role="note">
         <strong>免责声明</strong>
@@ -183,6 +198,16 @@ export function SharedReportPage({ token, api }: SharedReportPageProps) {
       </footer>
     </article>
   </div>;
+}
+
+function focusSection(sectionRef: RefObject<HTMLElement | null>) {
+  const section = sectionRef.current;
+  if (!section) return;
+  section.focus({ preventScroll: true });
+  section.scrollIntoView({
+    behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    block: "start",
+  });
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -219,8 +244,8 @@ function SharedScenarioCard({ scenario }: { scenario: InvestmentScenario }) {
   </article>;
 }
 
-function SharedOutcomeSection({ outcome }: { outcome: SharedReportOutcome }) {
-  return <section className="share-section share-outcome" aria-label="兑现结果">
+function SharedOutcomeSection({ outcome, sectionRef }: { outcome: SharedReportOutcome; sectionRef: RefObject<HTMLElement | null> }) {
+  return <section ref={sectionRef} tabIndex={-1} className="share-section share-outcome" aria-label="兑现结果">
     <h2>情景兑现结果</h2>
     <dl className="share-meta">
       <div><dt>兑现结论</dt><dd>{outcomeStatusLabel(outcome.status, outcome.realizedCase)}</dd></div>

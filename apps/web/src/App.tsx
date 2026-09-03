@@ -5,16 +5,7 @@ import { OutlookPanel } from "./OutlookPanel";
 import { SharedReportPage } from "./SharedReportPage";
 import { StockInformationPanel } from "./StockInformationPanel";
 import { TradeJournalPage } from "./TradeJournalPage";
-import {
-  activeCenter,
-  centerPositionLabel,
-  centerPositionTone,
-  deriveQuote,
-  formatTradeDate,
-  quoteTone,
-  signedAmount,
-  signedPercent,
-} from "./quote";
+import { formatTradeDate } from "./quote";
 import { createMockTradingApi, type TradingApi } from "./trading-api";
 import { Atmosphere } from "./ui/Atmosphere";
 import { EmptyState } from "./ui/EmptyState";
@@ -26,7 +17,7 @@ import { Notice } from "./ui/Notice";
 import { Panel } from "./ui/Panel";
 import { QuoteBand } from "./ui/QuoteBand";
 import { StatusChip } from "./ui/StatusChip";
-import { ArrowUpRight, ChevronLeft, LayoutDashboard, NotebookPen, Plus, Terminal, X } from "lucide-react";
+import { ArrowUpRight, ChevronLeft, ChevronRight, LayoutDashboard, NotebookPen, Plus, Terminal, X } from "lucide-react";
 import type {
   InvestmentReportJob,
   InvestmentReportStatus,
@@ -99,21 +90,26 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
   const [outlookPendingStatus, setOutlookPendingStatus] = useState<InvestmentReportStatus | null>(null);
   const [outlookBusy, setOutlookBusy] = useState(false);
   const [outlookError, setOutlookError] = useState<string | null>(null);
+  const [outlookRecovering, setOutlookRecovering] = useState(false);
   const [deliveryBusy, setDeliveryBusy] = useState(false);
   const [deliveryError, setDeliveryError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [batchError, setBatchError] = useState<string | null>(null);
+  const [batchRecovering, setBatchRecovering] = useState(false);
   const [batchStage, setBatchStage] = useState<BatchStage>("pool");
   const [view, setView] = useState<WorkbenchView>(viewFromHash);
   const [routeHash, setRouteHash] = useState(window.location.hash);
   const reportCache = useRef(new Map<string, Report>());
   const reportRequests = useRef(new Map<string, Promise<Report>>());
   const currentRequest = useRef<string | null>(null);
+  const currentReportTimeframe = useRef<Timeframe>("1d");
   const informationCache = useRef(new Map<string, StockInformation>());
   const informationRequests = useRef(new Map<string, Promise<StockInformation>>());
   const currentInformationRequest = useRef<string | null>(null);
   const outlookCache = useRef(new Map<string, InvestmentReportJob>());
   const outlookLatestDigest = useRef(new Map<string, string>());
   const outlookRuns = useRef(new Map<string, { reportId: string; status: InvestmentReportStatus }>());
+  const requestedOutlookRuns = useRef(new Map<string, string>());
   const currentOutlookSelection = useRef<{ key: string; symbol: string; timeframe: Timeframe } | null>(null);
   const outlookTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const outlookPollToken = useRef(0);
@@ -139,9 +135,12 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
   }, [service]);
 
   useEffect(() => {
-    if (view !== "batch") return;
+    if (view !== "batch" || busy) return;
     let cancelled = false;
     const token = lifecycleToken.current;
+    stopBatchPolling();
+    setBatchRecovering(false);
+    const progressToken = batchPollToken.current;
     void service.getWatchlist().then((items) => {
       if (cancelled || !mounted.current || lifecycleToken.current !== token) return;
       setWatchlist(items);
@@ -150,17 +149,20 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
       setNotice(errorMessage(error));
     });
     void service.getProgress().then((items) => {
-      if (cancelled || !mounted.current || lifecycleToken.current !== token) return;
+      if (cancelled || !mounted.current || lifecycleToken.current !== token || batchPollToken.current !== progressToken) return;
       setProgress(items);
+      setBatchError(null);
       if (items.some((item) => item.state === "queued" || item.state === "running")) {
         setBatchStage((stage) => (stage === "report" ? stage : "progress"));
+        scheduleBatchPoll(progressToken);
       }
     }).catch((error: unknown) => {
-      if (cancelled || !mounted.current || lifecycleToken.current !== token || isAbortError(error)) return;
-      setNotice(errorMessage(error));
+      if (cancelled || !mounted.current || lifecycleToken.current !== token || batchPollToken.current !== progressToken || isAbortError(error)) return;
+      setBatchError(errorMessage(error));
     });
     return () => {
       cancelled = true;
+      if (batchPollToken.current === progressToken) stopBatchPolling();
     };
   }, [view, service]);
 
@@ -182,15 +184,23 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
 
   const completed = useMemo(() => progress.filter((item) => item.state === "completed").length, [progress]);
   const runningCount = useMemo(() => progress.filter((item) => item.state === "running").length, [progress]);
-  const runningLabel = progress.length ? `运行中 · ${completed} / ${progress.length}` : "暂无运行";
+  const hasActiveBatch = progress.some((item) => item.state === "queued" || item.state === "running");
   const batchChip = batchStatus(progress);
-  // 顶部 KPI 条优先展示当前标的的行情事实；没有报告时才退回批次计数。
-  const quote = useMemo(() => (report ? deriveQuote(report.chart) : null), [report]);
-  const quoteCenter = useMemo(() => (report ? activeCenter(report.chart) : null), [report]);
+  const runningLabel = batchError
+    ? `查询已暂停 · ${completed} / ${progress.length}`
+    : progress.length ? `${hasActiveBatch ? "运行中" : batchChip.label} · ${completed} / ${progress.length}` : "暂无运行";
+  const selectedName = progress.find((item) => item.symbol === currentSymbol)?.name
+    ?? watchlist.find((item) => item.symbol === currentSymbol)?.name
+    ?? report?.name
+    ?? currentSymbol;
+  const readableReports = progress.filter(reportReady);
+  const currentReportIndex = readableReports.findIndex((item) => item.symbol === currentSymbol);
+  const localDate = new Intl.DateTimeFormat("zh-CN", { dateStyle: "long" }).format(new Date());
 
   async function loadReport(symbol: string, timeframe: Timeframe, clear = false) {
     const key = `${symbol}:${timeframe}`;
     currentRequest.current = key;
+    currentReportTimeframe.current = timeframe;
     setChartNotice(null);
     const cached = reportCache.current.get(key);
     if (cached) {
@@ -215,7 +225,8 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
       showOutlookSelection(symbol, timeframe);
     } catch (error) {
       if (currentRequest.current !== key || isAbortError(error)) return;
-      if (timeframe === "1w" && report) {
+      if (!clear && timeframe === "1w" && report?.symbol === symbol) {
+        currentReportTimeframe.current = report.timeframe;
         setChartNotice("周线加载失败，请重试。");
         showOutlookSelection(report.symbol, report.timeframe);
       }
@@ -256,17 +267,19 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
     }
   }
 
-  function selectSymbol(symbol: string, clear = false) {
+  function selectSymbol(symbol: string, clear = false, timeframe: Timeframe = "1d") {
     if (!clear && currentSymbol === symbol) return;
     setCurrentSymbol(symbol);
+    setNotice(null);
     currentInformationRequest.current = symbol;
     resetOutlookSelection();
-    void loadReport(symbol, "1d", true);
+    void loadReport(symbol, timeframe, true);
     void loadInformation(symbol, true);
   }
 
   function showOutlookSelection(symbol: string, timeframe: Timeframe) {
     stopOutlookPolling();
+    setOutlookRecovering(false);
     const key = `${symbol}:${timeframe}`;
     currentOutlookSelection.current = { key, symbol, timeframe };
     setOutlookError(null);
@@ -291,6 +304,7 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
 
   function resetOutlookSelection() {
     stopOutlookPolling();
+    setOutlookRecovering(false);
     currentOutlookSelection.current = null;
     setOutlookJob(null);
     setOutlookPendingStatus(null);
@@ -341,6 +355,7 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
       if (outlookPollToken.current !== token || currentOutlookSelection.current?.key !== selectionKey) return;
       cacheOutlookJob(selectionKey, job);
       setOutlookJob(job);
+      setOutlookError(null);
       if (job.status === "queued" || job.status === "running") {
         setOutlookPendingStatus(job.status);
         scheduleOutlookPoll(reportId, selectionKey, token);
@@ -351,6 +366,20 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
       if (outlookPollToken.current !== token || currentOutlookSelection.current?.key !== selectionKey) return;
       setOutlookPendingStatus(null);
       setOutlookError(errorMessage(error));
+    }
+  }
+
+  async function resumeOutlookQuery() {
+    const selection = currentOutlookSelection.current;
+    const run = selection ? outlookRuns.current.get(selection.key) : null;
+    if (!selection || !run || outlookRecovering) return;
+    stopOutlookPolling();
+    const token = outlookPollToken.current;
+    setOutlookRecovering(true);
+    try {
+      await pollOutlook(run.reportId, selection.key, token);
+    } finally {
+      if (mounted.current && outlookPollToken.current === token) setOutlookRecovering(false);
     }
   }
 
@@ -379,6 +408,7 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
       const items = await service.getProgress();
       if (!mounted.current || batchPollToken.current !== token) return;
       setProgress(items);
+      setBatchError(null);
       for (const item of items) {
         if (item.state !== "completed" || !item.reportId || hydratedBatchReports.current.has(item.reportId)) continue;
         hydratedBatchReports.current.add(item.reportId);
@@ -387,8 +417,19 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
       if (items.some((item) => item.state === "queued" || item.state === "running")) scheduleBatchPoll(token);
     } catch (error) {
       if (!mounted.current || batchPollToken.current !== token) return;
-      setNotice(errorMessage(error));
-      scheduleBatchPoll(token);
+      setBatchError(errorMessage(error));
+    }
+  }
+
+  async function resumeBatchQuery() {
+    if (batchRecovering) return;
+    stopBatchPolling();
+    const token = batchPollToken.current;
+    setBatchRecovering(true);
+    try {
+      await refreshBatchProgress(token);
+    } finally {
+      if (mounted.current && batchPollToken.current === token) setBatchRecovering(false);
     }
   }
 
@@ -398,6 +439,8 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
       const job = await service.getInvestmentReport(item.reportId);
       if (!mounted.current || batchPollToken.current !== token) return;
       const selectionKey = `${item.symbol}:1d`;
+      const requestedReportId = requestedOutlookRuns.current.get(selectionKey);
+      if (requestedReportId && requestedReportId !== job.reportId) return;
       cacheOutlookJob(selectionKey, job);
       if (currentOutlookSelection.current?.key === selectionKey) {
         setOutlookJob(job);
@@ -420,6 +463,7 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
     try {
       const created = await service.createInvestmentReport(selection.symbol, selection.timeframe);
       if (!mounted.current || lifecycleToken.current !== mutationToken) return;
+      requestedOutlookRuns.current.set(selection.key, created.reportId);
       outlookRuns.current.set(selection.key, { reportId: created.reportId, status: created.status });
       if (currentOutlookSelection.current?.key !== selection.key) return;
       setOutlookJob(null);
@@ -453,6 +497,7 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
     try {
       const retried = await service.retryInvestmentReport(failed.reportId);
       if (!mounted.current || lifecycleToken.current !== mutationToken) return;
+      requestedOutlookRuns.current.set(selection.key, retried.reportId);
       outlookRuns.current.set(selection.key, { reportId: retried.reportId, status: retried.status });
       if (currentOutlookSelection.current?.key !== selection.key) return;
       setOutlookJob(null);
@@ -582,21 +627,32 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
     selectSymbol(item.symbol);
   }
 
+  function switchReport(symbol: string) {
+    if (!readableReports.some((item) => item.symbol === symbol)) return;
+    selectSymbol(symbol, false, currentReportTimeframe.current);
+  }
+
   async function createBatch() {
     if (!watchlist.length) return;
     stopBatchPolling();
     const token = batchPollToken.current;
+    const previousRequests = new Map(requestedOutlookRuns.current);
     hydratedBatchReports.current.clear();
+    setBatchError(null);
+    setBatchRecovering(false);
     setBatchStage("progress");
     setProgress(watchlist.map((item) => ({ ...item, stage: "排队", state: "queued" })));
     setBusy(true);
     try {
       await service.createBatch();
       if (!mounted.current || batchPollToken.current !== token) return;
+      for (const [key, reportId] of previousRequests) {
+        if (requestedOutlookRuns.current.get(key) === reportId) requestedOutlookRuns.current.delete(key);
+      }
       setNotice(null);
       await refreshBatchProgress(token);
     } catch (error) {
-      if (mounted.current && batchPollToken.current === token) setNotice(errorMessage(error));
+      if (mounted.current && batchPollToken.current === token) setBatchError(errorMessage(error));
     } finally {
       if (mounted.current && batchPollToken.current === token) setBusy(false);
     }
@@ -612,17 +668,19 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
         </div>
         <div className="rail-caption">结构投研台</div>
         <nav aria-label="主导航">
-          <a href="#/batch" className={`nav-item${view === "batch" ? " active" : ""}`} aria-current={view === "batch" ? "page" : undefined} onClick={() => setView("batch")}><Icon icon={LayoutDashboard} />今日批次 <span className="nav-count">{progress.length.toString().padStart(2, "0")}</span></a>
+          <a href="#/batch" className={`nav-item${view === "batch" ? " active" : ""}`} aria-current={view === "batch" ? "page" : undefined} onClick={() => setView("batch")}><Icon icon={LayoutDashboard} />今日批次 <span className="nav-count">{watchlist.length.toString().padStart(2, "0")}</span></a>
           <a href="#/journal" className={`nav-item${view === "journal" ? " active" : ""}`} aria-current={view === "journal" ? "page" : undefined} onClick={() => setView("journal")}><Icon icon={NotebookPen} />交易日记</a>
         </nav>
-        <div className="rail-footer"><span className="rail-status"><i aria-hidden="true" />系统：运行中</span></div>
+        <div className="rail-footer"><time className="rail-status">{localDate}</time></div>
       </aside>
 
       <main className="main-column">
-        <header className="topbar">
+        <header className={`topbar${view === "batch" && batchStage === "report" ? " report-topbar" : ""}`}>
           <div>
-            <div className="eyebrow">{viewEyebrow(view)}</div>
-            {view === "batch" ? <h1>收盘后的结构，<em>现在</em>可见。</h1> : <h1>交易日记</h1>}
+            <div className="eyebrow">{view === "batch" && batchStage === "report" ? currentSymbol : viewEyebrow(view)}</div>
+            {view === "batch"
+              ? batchStage === "report" ? <h1>{selectedName} · 结构研报</h1> : <h1>收盘后的结构，<em>现在</em>可见。</h1>
+              : <h1>交易日记</h1>}
           </div>
           {view === "batch" && batchStage !== "report" && <button className="primary-button" onClick={() => void createBatch()} disabled={busy || !watchlist.length}>
             {busy ? "正在创建…" : "生成本批报告"}<Icon icon={ArrowUpRight} />
@@ -631,7 +689,11 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
 
         {notice && view === "batch" && <Notice title="数据服务暂不可用" detail={notice} />}
 
-        {view === "batch" && <div className="batch-page">
+        {view === "batch" && <div className={`batch-page${batchStage === "report" ? " batch-report-page" : ""}`}>
+          {batchError && <div className="batch-connection-error" role="alert">
+            <div><strong>批次状态暂不可用</strong><p>{batchError}</p></div>
+            <button type="button" className="secondary-button" disabled={batchRecovering} onClick={() => void resumeBatchQuery()}>{batchRecovering ? "正在恢复…" : "恢复批次查询"}</button>
+          </div>}
           <nav className="batch-steps" aria-label="批次步骤">
             <button type="button" className={batchStage === "pool" ? "is-current" : ""} aria-current={batchStage === "pool" ? "step" : undefined} onClick={() => setBatchStage("pool")}>
               <span>1</span>查询候选
@@ -643,39 +705,11 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
               <span>3</span>查看报告
             </button>
           </nav>
-          {batchStage !== "progress" && <KpiStrip>
-          {batchStage === "report" && quote
-            ? <>
-              <MetricTile
-                label={`最新收盘 · ${report?.symbol ?? ""}`}
-                value={quote.last.toFixed(2)}
-                tone={quoteTone(quote.changeRate)}
-                detail={`AS OF ${report ? formatTradeDate(report.asOf) : "—"}`}
-              />
-              <MetricTile
-                label="涨跌幅"
-                value={signedPercent(quote.changeRate)}
-                tone={quoteTone(quote.changeRate)}
-                detail={`涨跌额 ${signedAmount(quote.change)}`}
-              />
-              <MetricTile
-                label="中枢位置"
-                value={quoteCenter ? centerPositionLabel(quoteCenter.position) : "无中枢"}
-                tone={quoteCenter ? centerPositionTone(quoteCenter.position) : "neutral"}
-                detail={quoteCenter ? `${quoteCenter.lower.toFixed(2)} – ${quoteCenter.upper.toFixed(2)}` : "现价未落在任何笔中枢"}
-              />
-              <MetricTile
-                label="本批状态"
-                value={<StatusChip tone={batchChip.tone} label={batchChip.label} />}
-                detail={`自选 ${watchlist.length} · 完成 ${completed} · 运行 ${runningCount}`}
-              />
-            </>
-            : <>
+          {batchStage === "pool" && <KpiStrip>
               <MetricTile label="候选" value={String(watchlist.length).padStart(2, "0")} />
               <MetricTile label="已完成" value={String(completed).padStart(2, "0")} />
               <MetricTile label="运行中" value={String(runningCount).padStart(2, "0")} />
               <MetricTile label="本批状态" value={<StatusChip tone={batchChip.tone} label={batchChip.label} />} />
-            </>}
         </KpiStrip>}
         <div className="batch-cockpit">
           {batchStage === "pool" && <Panel title="候选池" className="watchlist-panel">
@@ -687,7 +721,7 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
           </Panel>}
           {batchStage === "progress" && <Panel title="本批进度" className="pulse-panel">
             <div className="progress-toolbar">
-              <span className="live-pill"><i />LIVE</span>
+              {hasActiveBatch && !batchError && <span className="live-pill"><i />LIVE</span>}
               <strong>{runningLabel}</strong>
               <span className="progress-meta">盘后手动触发</span>
             </div>
@@ -710,7 +744,21 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
             ))}</div>
           </Panel>}
           {batchStage === "report" && <>
-          <button type="button" className="batch-back" onClick={() => setBatchStage("progress")}><Icon icon={ChevronLeft} size={16} />返回进度</button>
+          <div className="report-reader-toolbar">
+            <button type="button" className="batch-back" onClick={() => setBatchStage("progress")}><Icon icon={ChevronLeft} size={16} />返回进度</button>
+            <nav className="report-reader-navigation" aria-label="连续阅读报告">
+              <button type="button" className="secondary-button" disabled={currentReportIndex <= 0} onClick={() => switchReport(readableReports[currentReportIndex - 1].symbol)}><Icon icon={ChevronLeft} size={16} />上一只</button>
+              <label className="report-reader-select">
+                <span>本批报告</span>
+                <select aria-label="切换报告股票" value={currentReportIndex < 0 ? "" : currentSymbol ?? ""} disabled={readableReports.length === 0 || readableReports.length === 1 && currentReportIndex === 0} onChange={(event) => switchReport(event.target.value)}>
+                  {currentReportIndex < 0 && <option value="" disabled>{readableReports.length ? "选择本批报告" : "暂无可读报告"}</option>}
+                  {readableReports.map((item) => <option key={item.symbol} value={item.symbol}>{item.name} · {item.symbol}</option>)}
+                </select>
+              </label>
+              <span className="report-reader-position" role="status" aria-label="报告序号">{currentReportIndex + 1} / {readableReports.length}</span>
+              <button type="button" className="secondary-button" disabled={readableReports.length === 0 || currentReportIndex >= readableReports.length - 1} onClick={() => switchReport(readableReports[currentReportIndex + 1].symbol)}>下一只<Icon icon={ChevronRight} size={16} /></button>
+            </nav>
+          </div>
           <Panel title="结构报告" className="report-section">
             {report && <ReportView
               report={report}
@@ -732,6 +780,8 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
               pendingStatus={outlookPendingStatus}
               busy={outlookBusy}
               requestError={outlookError}
+              queryBusy={outlookRecovering}
+              onResumeQuery={currentOutlookSelection.current && outlookRuns.current.has(currentOutlookSelection.current.key) ? () => void resumeOutlookQuery() : undefined}
               onGenerate={() => void createOutlook()}
               onRetry={() => void retryOutlook()}
               deliveryBusy={deliveryBusy}
@@ -767,9 +817,8 @@ function ReportView({
   chartNotice?: string | null;
   onTimeframeChange?: (timeframe: Timeframe) => void;
 }) {
-  const market = report.symbol.endsWith(".SZ") ? "SZ" : "SH";
   return <article className="report-card">
-    <div className="report-header"><div><div className="report-symbol"><span className="market-chip">{market}</span>{report.symbol} <span>{report.name}</span></div><h3>{report.headline}</h3></div><div className="report-header-actions">{onTimeframeChange && <div className="timeframe-switch" aria-label="图表周期"><button type="button" aria-pressed={report.timeframe === "1d"} onClick={() => onTimeframeChange("1d")}>日线</button><button type="button" aria-label={loadingTimeframe === "1w" ? "周线加载中" : "周线"} aria-pressed={report.timeframe === "1w"} disabled={loadingTimeframe === "1w"} onClick={() => onTimeframeChange("1w")}>{loadingTimeframe === "1w" ? "加载中…" : "周线"}</button></div>}<div className="report-meta"><span>AS OF</span><strong>{formatTradeDate(report.asOf)}</strong><span className={`quality-tag ${report.quality}`}>{report.quality === "ok" ? "数据完整" : "部分降级"}</span></div></div></div>
+    <div className="report-header"><h3>{report.headline}</h3><div className="report-header-actions">{onTimeframeChange && <div className="timeframe-switch" aria-label="图表周期"><button type="button" aria-pressed={report.timeframe === "1d"} onClick={() => onTimeframeChange("1d")}>日线</button><button type="button" aria-label={loadingTimeframe === "1w" ? "周线加载中" : "周线"} aria-pressed={report.timeframe === "1w"} disabled={loadingTimeframe === "1w"} onClick={() => onTimeframeChange("1w")}>{loadingTimeframe === "1w" ? "加载中…" : "周线"}</button></div>}<div className="report-meta"><span>AS OF</span><strong>{formatTradeDate(report.asOf)}</strong><span className={`quality-tag ${report.quality}`}>{report.quality === "ok" ? "数据完整" : "部分降级"}</span></div></div></div>
     <QuoteBand chart={report.chart} />
     <div className="report-body"><div className="chart-pane">{chartNotice && <div className="chart-notice" role="status">{chartNotice}</div>}<ChanChart symbol={report.symbol} data={report.chart} /></div></div>
     <div className="report-footer"><div className="sources"><span>来源</span>{report.sources.map((source) => <span className="source-chip" key={source}>{source}</span>)}</div><div className="review-state">审阅状态：<strong>{report.review}</strong></div><div className="quality-note">{report.qualityNote}</div></div>
@@ -807,15 +856,16 @@ function stateLabel(state: RunProgress["state"]): string {
 
 function batchStatus(progress: RunProgress[]): { label: string; tone: MetricTone } {
   if (!progress.length) return { label: "无批次", tone: "neutral" };
-  if (progress.some((item) => item.state === "failed")) return { label: "失败", tone: "down" };
-  if (progress.some((item) => item.state === "degraded")) return { label: "降级", tone: "risk" };
   if (progress.some((item) => item.state === "running" || item.state === "queued")) return { label: "进行中", tone: "risk" };
-  return { label: "完成", tone: "up" };
+  if (progress.every((item) => item.state === "failed")) return { label: "全部失败", tone: "down" };
+  if (progress.some((item) => item.state === "failed")) return { label: "部分失败", tone: "down" };
+  if (progress.some((item) => item.state === "degraded")) return { label: "部分降级", tone: "risk" };
+  return { label: "全部完成", tone: "up" };
 }
 
 function viewEyebrow(view: WorkbenchView): string {
   return {
-    batch: "A-SHARE STRUCTURAL RESEARCH · 2026.08.11",
-    journal: "TRADING JOURNAL · DAILY CLOSE",
+    batch: "盘后投研 · 当前批次",
+    journal: "交易记录 · 收盘复盘",
   }[view];
 }

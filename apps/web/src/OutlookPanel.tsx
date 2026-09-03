@@ -18,10 +18,12 @@ interface OutlookPanelProps {
   pendingStatus?: InvestmentReportStatus | null;
   busy?: boolean;
   requestError?: string | null;
+  queryBusy?: boolean;
   deliveryBusy?: boolean;
   deliveryError?: string | null;
   onGenerate: () => void;
   onRetry: () => void;
+  onResumeQuery?: () => void;
   onReview?: (decision: ReportReviewDecision) => void;
   onPublish?: () => void;
   onEvaluateOutcome?: () => void;
@@ -36,10 +38,12 @@ export function OutlookPanel({
   pendingStatus = null,
   busy = false,
   requestError = null,
+  queryBusy = false,
   deliveryBusy = false,
   deliveryError = null,
   onGenerate,
   onRetry,
+  onResumeQuery,
   onReview,
   onPublish,
   onEvaluateOutcome,
@@ -55,13 +59,16 @@ export function OutlookPanel({
       </div>
       {job?.report && <div className="outlook-meta"><span>GENERATED</span><time dateTime={job.report.generatedAt}>{job.report.generatedAt}</time><strong>{reviewLabel(job.reviewStatus)}</strong></div>}
     </div>
-    {!status && <div className="outlook-idle">
+    {!status && !(requestError && onResumeQuery) && <div className="outlook-idle">
       <div><strong>尚未生成 Pi AI 走势报告</strong><p>按当前股票与周期固化输入后，生成偏强、基准、偏弱三种条件化情景。</p></div>
       <button type="button" className="outlook-action" disabled={busy} onClick={onGenerate}>{busy ? "正在创建…" : "生成 Pi AI 走势报告"}</button>
     </div>}
-    {requestError && !status && <div className="outlook-error" role="alert">{requestError}</div>}
-    {status === "queued" && <ReportProgress label="报告已排队" detail="等待 Pi AI 运行资源" />}
-    {status === "running" && <ReportProgress label="Pi AI 正在生成三情景报告" detail="结构与资讯正在整理" />}
+    {requestError && <div className="outlook-error" role="alert">
+      <div>{onResumeQuery && <strong>报告查询已暂停</strong>}<p>{requestError}</p></div>
+      {onResumeQuery && <button type="button" className="secondary-button" disabled={queryBusy} onClick={onResumeQuery}>{queryBusy ? "正在恢复…" : "恢复报告查询"}</button>}
+    </div>}
+    {status === "queued" && !requestError && <ReportProgress label="报告已排队" detail="等待 Pi AI 运行资源" />}
+    {status === "running" && !requestError && <ReportProgress label="Pi AI 正在生成三情景报告" detail="结构与资讯正在整理" />}
     {status === "failed" && <div className="outlook-failed" role="alert">
       <div><span>{job?.error?.code ?? "REPORT_FAILED"}</span><strong>{job?.error?.message ?? "Pi AI 报告生成失败"}</strong></div>
       {job?.error?.retryable && <button type="button" disabled={busy} onClick={onRetry}>{busy ? "正在重试…" : "重试 Pi AI 报告"}</button>}
