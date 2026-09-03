@@ -163,9 +163,8 @@ def symbol_bs_summary(
     symbols = {str(row["symbol"]) for row in period_rows if row.get("symbol")}
     start_positions = _positions_as_of(executions, ledger.cash_flows, initial_capital, mark_start)
     end_positions = _positions_as_of(executions, ledger.cash_flows, initial_capital, mark_end)
-    if closes is not None:
-        symbols.update(start_positions)
-        symbols.update(end_positions)
+    symbols.update(start_positions)
+    symbols.update(end_positions)
 
     summaries: list[dict[str, Any]] = []
     for symbol in sorted(symbols):

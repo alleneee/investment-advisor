@@ -57,6 +57,28 @@ def _by_id(rows: list[dict], key: str) -> dict[str, dict]:
     return {row[key]: row for row in rows}
 
 
+def test_held_symbol_without_closes_still_listed_with_realized_pnl() -> None:
+    executions = [_execution("buy", "2026-01-05", "buy", quantity=100)]
+    summary = _by_id(
+        symbol_bs_summary(
+            executions,
+            replay_rows("100000", executions, []),
+            {"600000.SH": "浦发银行"},
+            date(2026, 1, 12),
+            date(2026, 1, 16),
+            trading_days=[date(2026, 1, 12), date(2026, 1, 16)],
+            initial_capital="100000",
+            mark_start=date(2026, 1, 9),
+            mark_end=date(2026, 1, 16),
+        ),
+        "symbol",
+    )
+
+    assert set(summary) == {"600000.SH"}
+    assert summary["600000.SH"]["realized_pnl"] == money_text(0)
+    assert summary["600000.SH"]["period_pnl"] == money_text(0)
+
+
 def test_held_symbol_without_period_trades_uses_window_closes() -> None:
     executions = [
         _execution("buy", "2026-01-05", "buy", quantity=100),

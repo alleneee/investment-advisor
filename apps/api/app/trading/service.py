@@ -447,6 +447,10 @@ class TradingService:
         trading_days = [day for day in all_days if start <= day <= min(end, as_of)] or None
         mark_end = next((day for day in reversed(all_days) if start <= day <= end), None)
         mark_start = next((day for day in reversed(all_days) if day < start), None)
+        if mark_end is None and start <= as_of:
+            mark_end = min(end, as_of)
+        if mark_start is None and start > activation:
+            mark_start = start - timedelta(days=1)
         price_days = [day for day in (mark_start, mark_end) if day is not None]
         closes = None
         if price_days:
