@@ -797,7 +797,7 @@ function Workbench({ service, tradingService }: { service: WorkbenchApi; trading
           </>}
         </div></div>}
 
-        {view === "journal" && <TradeJournalPage key={routeHash === "#/reviews" ? "week" : "month"} api={tradingService} initialView={routeHash === "#/reviews" ? "week" : "month"} />}
+        {view === "journal" && <TradeJournalPage key={routeHash === "#/reviews" ? "week" : "month"} api={tradingService} searchStocks={(query) => service.searchStocks(query)} initialView={routeHash === "#/reviews" ? "week" : "month"} />}
       </main>
     </div>
   );

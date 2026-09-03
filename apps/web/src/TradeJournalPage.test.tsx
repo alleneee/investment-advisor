@@ -366,6 +366,64 @@ describe("交易日记", () => {
     expect(listExecutions).toHaveBeenCalledWith("2026-08-17");
   });
 
+  it("输入名称或代码后从候选自动填写代码与名称", async () => {
+    const user = userEvent.setup();
+    const searchStocks = vi.fn(async () => [
+      { symbol: "002309.SZ", name: "中利集团", cnspell: "zljt" },
+    ]);
+    const createExecution = vi.fn(async () => ({
+      executionId: "execution-1",
+      symbol: "002309.SZ",
+      name: "中利集团",
+      executedAt: "2026-08-17T14:30:00+08:00",
+      side: "buy" as const,
+      price: "3.21",
+      quantity: 100,
+      fee: "5.00",
+      primaryReason: "pullback_confirmation" as const,
+      tags: [],
+      note: "",
+      clientIdempotencyKey: "11111111-1111-4111-8111-111111111111",
+      revision: 1,
+      ledgerRevision: 1,
+    }));
+    const api = apiForJournal({ getAccount: vi.fn(async () => account), createExecution });
+    render(<TradeJournalPage api={api} today="2026-08-17" searchStocks={searchStocks} />);
+
+    expect(await screen.findByRole("heading", { name: "2026年8月" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "记账与日复盘" }));
+    expect(await screen.findByRole("heading", { name: "每日交易日志" })).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("代码"), "中利");
+    const option = await screen.findByRole("option", { name: /中利集团/ });
+    await user.click(option);
+
+    expect(screen.getByLabelText("代码")).toHaveValue("002309.SZ");
+    expect(screen.getByLabelText("资产名称")).toHaveValue("中利集团");
+
+    await user.clear(screen.getByLabelText("成交价"));
+    await user.type(screen.getByLabelText("成交价"), "3.21");
+    await user.clear(screen.getByLabelText("份额/数量"));
+    await user.type(screen.getByLabelText("份额/数量"), "100");
+    await user.click(screen.getByRole("button", { name: "保存交易记录" }));
+
+    await waitFor(() => expect(createExecution).toHaveBeenCalledWith(expect.objectContaining({
+      symbol: "002309.SZ",
+      name: "中利集团",
+    })));
+  });
+
+  it("无资金流水时默认收起，点击后可录入", async () => {
+    const user = userEvent.setup();
+    render(<TradeJournalPage api={apiForJournal({ getAccount: vi.fn(async () => account) })} today="2026-08-17" initialView="list" />);
+
+    expect(await screen.findByRole("heading", { name: "每日交易日志" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "记录资金流水" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "＋ 记一笔资金流水" }));
+    expect(screen.getByRole("button", { name: "记录资金流水" })).toBeInTheDocument();
+    expect(screen.getByLabelText("金额 (CNY)")).toBeInTheDocument();
+  });
+
   it("月视图按日展示成交笔数，点击日期后侧栏显示当日流水", async () => {
     const user = userEvent.setup();
     const saved: TradingExecution = {
@@ -749,6 +807,7 @@ describe("交易日记", () => {
 
     expect(await screen.findByRole("img", { name: "收益图 month 2026-08-01 2026-08-31" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "记账与日复盘" }));
+    await user.click(screen.getByRole("button", { name: "＋ 记一笔资金流水" }));
     await user.type(screen.getByLabelText("金额 (CNY)"), "1000.00");
     await user.type(screen.getByLabelText("流水备注"), "测试入金");
     await user.click(screen.getByRole("button", { name: "记录资金流水" }));

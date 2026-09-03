@@ -6,10 +6,12 @@ import { JournalReturnChart } from "./JournalReturnChart";
 import { ReviewCenterPage } from "./ReviewCenterPage";
 import { buyReasons, reasonLabels, sellReasons } from "./trading-api";
 import type { TradingApi } from "./trading-api";
+import { normalizeTradingSymbol } from "./trading-symbol";
 import { EmptyState } from "./ui/EmptyState";
 import { formatMoney, formatRate, formatSignedMoney } from "./ui/formatDisplay";
 import { Icon } from "./ui/Icon";
 import { Panel } from "./ui/Panel";
+import type { StockSuggestion } from "./types";
 import type {
   CashFlow,
   CashFlowKind,
@@ -37,6 +39,7 @@ interface TradeJournalPageProps {
   api: TradingApi;
   today?: string;
   initialView?: JournalView;
+  searchStocks?: (query: string) => Promise<StockSuggestion[]>;
 }
 
 interface ExecutionForm {
@@ -87,7 +90,7 @@ interface PeriodSummaryFailure {
   dayRevision: number;
 }
 
-export function TradeJournalPage({ api, today = currentShanghaiDate(), initialView = "month" }: TradeJournalPageProps) {
+export function TradeJournalPage({ api, today = currentShanghaiDate(), initialView = "month", searchStocks }: TradeJournalPageProps) {
   const [account, setAccount] = useState<TradingAccount | null | undefined>(undefined);
   const [accountError, setAccountError] = useState<string | null>(null);
   const [accountEpoch, setAccountEpoch] = useState(0);
@@ -119,7 +122,11 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
   const [savingCashFlow, setSavingCashFlow] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [executionForm, setExecutionForm] = useState<ExecutionForm>(() => defaultExecutionForm(today));
+  const [symbolSuggestions, setSymbolSuggestions] = useState<StockSuggestion[]>([]);
+  const [symbolQuery, setSymbolQuery] = useState("");
+  const [symbolPickerOpen, setSymbolPickerOpen] = useState(false);
   const [cashFlowForm, setCashFlowForm] = useState<CashFlowForm>(() => defaultCashFlowForm(today));
+  const [cashFlowOpen, setCashFlowOpen] = useState(false);
   const [reviewDrafts, setReviewDrafts] = useState<Record<string, DailyReviewDraft>>({});
   const reviewSaveRequests = useRef(new Set<string>());
   const currentDraft = reviewDrafts[tradeDate];
@@ -322,6 +329,43 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
     setEntryTarget(null);
   }, [entryTarget, journalView]);
 
+  useEffect(() => {
+    if (!searchStocks) return;
+    const query = symbolQuery.trim();
+    if (!query) {
+      setSymbolSuggestions([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void searchStocks(query).then((rows) => {
+        if (cancelled) return;
+        setSymbolSuggestions(rows);
+        if (rows.length === 1) {
+          const [only] = rows;
+          setExecutionForm((current) => (
+            normalizeTradingSymbol(current.symbol) === only.symbol && !current.name
+              ? { ...current, name: only.name }
+              : current
+          ));
+        }
+      }).catch(() => {
+        if (!cancelled) setSymbolSuggestions([]);
+      });
+    }, 200);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [symbolQuery, searchStocks]);
+
+  function chooseSymbolSuggestion(item: StockSuggestion) {
+    setExecutionForm((current) => ({ ...current, symbol: item.symbol, name: item.name }));
+    setSymbolQuery("");
+    setSymbolSuggestions([]);
+    setSymbolPickerOpen(false);
+  }
+
   async function saveExecution(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (savingExecution) return;
@@ -334,7 +378,7 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
     setError(null);
     try {
       const saved = await api.createExecution({
-        symbol: executionForm.symbol.trim().toUpperCase(),
+        symbol: normalizeTradingSymbol(executionForm.symbol),
         name: executionForm.name.trim(),
         executedAt: shanghaiDateTime(executionForm.executedAt),
         side: executionForm.side,
@@ -348,6 +392,9 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
       });
       setExecutions((items) => replaceExecution(items, saved));
       setExecutionForm((current) => ({ ...defaultExecutionForm(tradeDate, current.side), symbol: "", name: "", tags: "", note: "" }));
+      setSymbolQuery("");
+      setSymbolSuggestions([]);
+      setSymbolPickerOpen(false);
       setDayRevision((value) => value + 1);
       const refreshedAccount = await api.getAccount();
       if (refreshedAccount) setAccount(refreshedAccount);
@@ -650,8 +697,40 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
       <form ref={executionEntryRef} tabIndex={-1} aria-label="成交录入" className="journal-card execution-entry" onSubmit={(event) => void saveExecution(event)}>
         <CardTitle icon={PlusSquare}>成交录入</CardTitle>
         <div className="journal-form-grid">
-          <Field label="代码"><input required value={executionForm.symbol} onChange={(event) => setExecutionForm((current) => ({ ...current, symbol: event.target.value }))} placeholder="例如 002940.SZ" /></Field>
-          <Field label="资产名称"><input value={executionForm.name} onChange={(event) => setExecutionForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如 昂利康" /></Field>
+          <Field label="代码">
+            <div className="journal-symbol-field">
+              <input
+                required
+                value={executionForm.symbol}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setExecutionForm((current) => ({ ...current, symbol: value }));
+                  setSymbolQuery(value);
+                  setSymbolPickerOpen(true);
+                }}
+                onFocus={() => setSymbolPickerOpen(true)}
+                onBlur={() => window.setTimeout(() => setSymbolPickerOpen(false), 150)}
+                placeholder="输入代码或名称，如 002309 / 中利集团"
+                autoComplete="off"
+                role="combobox"
+                aria-expanded={symbolPickerOpen && symbolSuggestions.length > 0}
+                aria-controls="journal-symbol-suggestions"
+              />
+              {searchStocks && symbolPickerOpen && symbolSuggestions.length > 0 && (
+                <ul className="journal-symbol-suggestions" id="journal-symbol-suggestions" role="listbox" aria-label="股票候选">
+                  {symbolSuggestions.map((item) => (
+                    <li key={item.symbol}>
+                      <button type="button" role="option" aria-selected={executionForm.symbol.toUpperCase() === item.symbol} onMouseDown={(event) => event.preventDefault()} onClick={() => chooseSymbolSuggestion(item)}>
+                        <span className="journal-symbol-suggestion-name">{item.name}</span>
+                        <span className="journal-symbol-suggestion-code">{item.symbol}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </Field>
+          <Field label="资产名称"><input value={executionForm.name} onChange={(event) => setExecutionForm((current) => ({ ...current, name: event.target.value }))} placeholder="选择候选后自动填写，也可手填" /></Field>
           <Field label="成交时间"><input required type="datetime-local" value={executionForm.executedAt} onChange={(event) => setExecutionForm((current) => ({ ...current, executedAt: event.target.value }))} /></Field>
           <Field label="方向"><select aria-label="方向" value={executionForm.side} onChange={(event) => {
             const side = event.target.value as TradingSide;
@@ -664,19 +743,29 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
           <Field label="附加标签 (以逗号分隔)" className="journal-span-two"><input value={executionForm.tags} onChange={(event) => setExecutionForm((current) => ({ ...current, tags: event.target.value }))} placeholder="日内, 波段, 剥头皮..." /></Field>
           <Field label="成交备注" className="journal-span-two"><textarea value={executionForm.note} onChange={(event) => setExecutionForm((current) => ({ ...current, note: event.target.value }))} placeholder="输入有关成交设置的详情..." rows={3} /></Field>
         </div>
-        <button className="primary-button journal-save" type="submit" disabled={savingExecution}><Icon icon={Save} size={16} />{savingExecution ? "正在保存…" : "保存交易记录"}</button>
-      </form>
-      <form className="journal-card cash-flow-entry" onSubmit={(event) => void saveCashFlow(event)}>
-        <CardTitle icon={Wallet}>资金流水</CardTitle>
-        <div className="journal-stack">
-          <Field label="交易时间"><input required type="datetime-local" value={cashFlowForm.occurredAt} onChange={(event) => setCashFlowForm((current) => ({ ...current, occurredAt: event.target.value }))} /></Field>
-          <Field label="资金类型"><select value={cashFlowForm.kind} onChange={(event) => setCashFlowForm((current) => ({ ...current, kind: event.target.value as CashFlowKind }))}><option value="deposit">入金</option><option value="withdrawal">出金</option></select></Field>
-          <Field label="金额 (CNY)"><input required inputMode="decimal" value={cashFlowForm.amount} onChange={(event) => setCashFlowForm((current) => ({ ...current, amount: event.target.value }))} placeholder="0.00" /></Field>
-          <Field label="流水备注"><textarea value={cashFlowForm.note} onChange={(event) => setCashFlowForm((current) => ({ ...current, note: event.target.value }))} rows={4} /></Field>
+        <div className="journal-entry-actions">
+          <button className="primary-button journal-save" type="submit" disabled={savingExecution}><Icon icon={Save} size={16} />{savingExecution ? "正在保存…" : "保存交易记录"}</button>
+          {!cashFlowOpen && !(cashFlows !== undefined && cashFlows.length > 0) && <button className="secondary-button journal-ghost" type="button" onClick={() => setCashFlowOpen(true)}>＋ 记一笔资金流水</button>}
         </div>
-        <button className="secondary-button journal-ghost" type="submit" disabled={savingCashFlow}>{savingCashFlow ? "正在保存…" : "记录资金流水"}</button>
-        {cashFlows !== undefined && cashFlows.length > 0 && <ul className="journal-list compact-list">{cashFlows.map((cashFlow) => <li key={cashFlow.cashFlowId}><div><strong>{cashFlow.kind === "deposit" ? "入金" : "出金"} {formatMoney(cashFlow.amount)}</strong><span>{cashFlow.note || "无备注"}</span></div><button className="secondary-button" type="button" onClick={() => void deleteCashFlow(cashFlow)}>删除</button></li>)}</ul>}
       </form>
+      {(cashFlowOpen || (cashFlows !== undefined && cashFlows.length > 0)) && <form className="journal-card cash-flow-entry" onSubmit={(event) => void saveCashFlow(event)}>
+        <div className="journal-card-heading">
+          <CardTitle icon={Wallet}>资金流水</CardTitle>
+          {cashFlowOpen
+            ? <button className="secondary-button journal-ghost" type="button" onClick={() => setCashFlowOpen(false)}>收起</button>
+            : <button className="secondary-button journal-ghost" type="button" onClick={() => setCashFlowOpen(true)}>记一笔转入/转出</button>}
+        </div>
+        {cashFlows !== undefined && cashFlows.length > 0 && <ul className="journal-list compact-list">{cashFlows.map((cashFlow) => <li key={cashFlow.cashFlowId}><div><strong>{cashFlow.kind === "deposit" ? "入金" : "出金"} {formatMoney(cashFlow.amount)}</strong><span>{cashFlow.note || "无备注"}</span></div><button className="secondary-button" type="button" onClick={() => void deleteCashFlow(cashFlow)}>删除</button></li>)}</ul>}
+        {cashFlowOpen && <>
+          <div className="journal-stack">
+            <Field label="交易时间"><input required type="datetime-local" value={cashFlowForm.occurredAt} onChange={(event) => setCashFlowForm((current) => ({ ...current, occurredAt: event.target.value }))} /></Field>
+            <Field label="资金类型"><select value={cashFlowForm.kind} onChange={(event) => setCashFlowForm((current) => ({ ...current, kind: event.target.value as CashFlowKind }))}><option value="deposit">入金</option><option value="withdrawal">出金</option></select></Field>
+            <Field label="金额 (CNY)"><input required inputMode="decimal" value={cashFlowForm.amount} onChange={(event) => setCashFlowForm((current) => ({ ...current, amount: event.target.value }))} placeholder="0.00" /></Field>
+            <Field label="流水备注"><textarea value={cashFlowForm.note} onChange={(event) => setCashFlowForm((current) => ({ ...current, note: event.target.value }))} rows={4} /></Field>
+          </div>
+          <button className="secondary-button journal-ghost" type="submit" disabled={savingCashFlow}>{savingCashFlow ? "正在保存…" : "记录资金流水"}</button>
+        </>}
+      </form>}
     </div>
     <section ref={dailyCloseRef} tabIndex={-1} className="journal-card daily-close" aria-label="收盘检查">
       <div className="journal-card-heading">

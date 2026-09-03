@@ -997,9 +997,13 @@ textarea { min-height: 74px; padding: 10px 14px; resize: vertical; line-height: 
 .trade-journal-page .journal-workspace {
   display: grid;
   grid-template-columns: minmax(220px, 3fr) minmax(0, 6fr) minmax(240px, 3fr);
-  align-items: stretch;
+  align-items: start;
   gap: 24px;
 }
+.trade-journal-page .journal-ledger { grid-column: 1; }
+.trade-journal-page .execution-entry { grid-column: 2; }
+.trade-journal-page .cash-flow-entry { grid-column: 3; }
+.journal-entry-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .trade-journal-page .journal-card {
   display: flex;
   min-width: 0;
@@ -1047,6 +1051,45 @@ textarea { min-height: 74px; padding: 10px 14px; resize: vertical; line-height: 
   gap: 16px;
   margin-top: 0;
 }
+.journal-symbol-field { position: relative; }
+.journal-symbol-suggestions {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--panel, #16181d);
+  border: 1px solid var(--border, #2a2d34);
+  border-radius: var(--ledger-radius, 8px);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .45);
+}
+.journal-symbol-suggestions li { margin: 0; }
+.journal-symbol-suggestions button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.journal-symbol-suggestions button:hover,
+.journal-symbol-suggestions button[aria-selected="true"] {
+  background: rgba(255, 255, 255, .08);
+}
+.journal-symbol-suggestion-name { font-weight: 600; }
+.journal-symbol-suggestion-code { color: var(--ledger-muted, #8b909a); font-size: 12px; }
 .journal-stack { display: grid; gap: 16px; flex: 1; }
 .journal-field {
   display: grid;
