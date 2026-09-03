@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, Overflow, localcontext
@@ -12,6 +12,7 @@ from .contracts import (
     TradingReducerError,
     decimal_value,
 )
+from .symbols import trading_symbol_prefix
 
 MONEY_QUANTUM = Decimal("0.01")
 MIN_DECIMAL_PRECISION = 28
@@ -99,13 +100,23 @@ class InsufficientCashError(TradingReducerError):
 class InsufficientPositionError(TradingReducerError):
     code = "INSUFFICIENT_POSITION"
 
-    def __init__(self, event: LedgerEvent, available_quantity: int) -> None:
+    def __init__(
+        self,
+        event: LedgerEvent,
+        available_quantity: int,
+        *,
+        aliases: Sequence[tuple[str, int]] = (),
+    ) -> None:
         self.event_id = event.event_id
         self.symbol = event.symbol
         self.available_quantity = available_quantity
+        self.aliases = tuple(aliases)
+        extra = ""
+        if aliases:
+            extra = "；" + "、".join(f"{symbol} 现有 {quantity} 股" for symbol, quantity in aliases)
         super().__init__(
             f"{event.event_id}: {event.symbol} 可卖 {available_quantity} 股，"
-            f"不能卖出 {event.quantity} 股"
+            f"不能卖出 {event.quantity} 股{extra}"
         )
 
 
@@ -340,7 +351,16 @@ def replay_ledger(initial_cash: Decimal | int | str, events: Iterable[LedgerEven
                 continue
 
             if current_quantity < event.quantity:
-                raise InsufficientPositionError(event, current_quantity)
+                aliases = [
+                    (symbol, position.quantity)
+                    for symbol, position in positions.items()
+                    if (
+                        trading_symbol_prefix(symbol) == trading_symbol_prefix(event.symbol)
+                        and symbol != event.symbol
+                        and position.quantity
+                    )
+                ]
+                raise InsufficientPositionError(event, current_quantity, aliases=aliases)
             cycle = open_cycles.get(event.symbol)
             if cycle is None:
                 raise InvalidLedgerEventError(f"{event.symbol} 没有开放交易周期")

@@ -40,6 +40,7 @@ from .store import (
     TradingStore,
     TradingStoreError,
 )
+from .symbols import normalize_trading_symbol
 
 _CLIENT_STORE_CODES = {
     "DUPLICATE_TYPE",
@@ -140,7 +141,7 @@ class TradingService:
 
     def create_execution(self, payload: Mapping[str, Any], details: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
         account = self._account()
-        request = {"account_id": account["account_id"], **payload}
+        request = {"account_id": account["account_id"], **payload, "symbol": self._normalized_symbol(payload)}
         existing = self._find_by_key(self.store.list_executions(account["account_id"], include_deleted=True), request)
         digest = self._execution_request_digest(request, details)
         request["_service_request_digest"] = digest
@@ -181,7 +182,7 @@ class TradingService:
         rows = self.store.list_executions(account["account_id"], include_deleted=True)
         existing = self._find_by_id(rows, "execution_id", execution_id)
         self._require_current(existing, revision, "成交")
-        request = {"account_id": account["account_id"], **payload}
+        request = {"account_id": account["account_id"], **payload, "symbol": self._normalized_symbol(payload)}
         digest = self._execution_request_digest(request, details)
         request["_service_request_digest"] = digest
         candidate = self._execution_event(
@@ -807,7 +808,7 @@ class TradingService:
             occurred_at=datetime.fromisoformat(str(request["occurred_at"])),
             created_at=datetime.fromisoformat(created_at) if created_at else datetime.now(UTC),
             kind=request["side"],
-            symbol=str(request["symbol"]),
+            symbol=normalize_trading_symbol(str(request["symbol"])),
             amount=Decimal(str(request["price"])),
             quantity=int(request["quantity"]),
             fee=Decimal(str(request["fee"])),
@@ -888,6 +889,13 @@ class TradingService:
     @staticmethod
     def _normalized_time(value: Any) -> str:
         return datetime.fromisoformat(str(value)).astimezone(ZoneInfo("Asia/Shanghai")).isoformat()
+
+    @staticmethod
+    def _normalized_symbol(request: Mapping[str, Any]) -> str:
+        try:
+            return normalize_trading_symbol(str(request["symbol"]))
+        except (TypeError, ValueError) as exc:
+            raise InvalidTradingRequestError(str(exc)) from exc
 
     def _execution_response(self, row: Mapping[str, Any]) -> dict[str, Any]:
         with self.database.read() as connection:

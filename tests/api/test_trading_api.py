@@ -649,6 +649,43 @@ async def test_execution_range_patch_delete_and_position_validation() -> None:
 
 
 @pytest.mark.anyio
+async def test_bare_code_sell_matches_full_ts_code_position() -> None:
+    app = create_app(database=Database())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/api/trading/account", json=_account())).status_code == 201
+        buy = await client.post(
+            "/api/trading/executions",
+            json=_execution(
+                "77777777-7777-4777-8777-777777777777",
+                symbol="002309.SZ",
+                name="中利集团",
+                price="2.77",
+                quantity=9400,
+            ),
+        )
+        sell = await client.post(
+            "/api/trading/executions",
+            json=_execution(
+                "88888888-8888-4888-8888-888888888888",
+                symbol="002309",
+                name="中利集团",
+                side="sell",
+                price="3.42",
+                quantity=9400,
+                primary_reason="take_profit",
+                executed_at="2026-01-11T09:30:00+08:00",
+            ),
+        )
+        listed = await client.get("/api/trading/executions?date=2026-01-11")
+
+    assert buy.status_code == 201
+    assert sell.status_code == 201
+    assert sell.json()["symbol"] == "002309.SZ"
+    assert [row["symbol"] for row in listed.json()] == ["002309.SZ"]
+
+
+@pytest.mark.anyio
 async def test_execution_range_uses_shanghai_trade_date_and_normalized_sorting() -> None:
     app = create_app(database=Database())
 

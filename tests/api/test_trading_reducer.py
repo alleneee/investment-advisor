@@ -71,6 +71,20 @@ def test_selling_more_than_position_fails_without_a_partial_result() -> None:
     assert error.value.available_quantity == 100
 
 
+def test_insufficient_position_hints_alias_symbol_with_same_prefix() -> None:
+    events = [
+        _event("buy", "2026-01-05T09:30:00", "buy", amount="10", quantity=100, symbol="002309.SZ"),
+        _event("sell", "2026-01-06T09:30:00", "sell", amount="10", quantity=50, symbol="002309"),
+    ]
+
+    with pytest.raises(InsufficientPositionError) as error:
+        replay_ledger(Decimal(1000), events)
+
+    assert error.value.available_quantity == 0
+    assert error.value.aliases == (("002309.SZ", 100),)
+    assert "002309.SZ 现有 100 股" in str(error.value)
+
+
 def test_buying_more_than_cash_fails() -> None:
     event = _event("buy", "2026-01-05T09:30:00", "buy", amount="10", quantity=101)
 
