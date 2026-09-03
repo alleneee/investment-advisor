@@ -58,9 +58,9 @@ export function App({ api, tradingApi, initialError }: AppProps) {
   const service = useMemo(() => api ?? createMockApi(initialError), [api, initialError]);
   const tradingService = useMemo(() => tradingApi ?? createMockTradingApi(), [tradingApi]);
   const [shareToken, setShareToken] = useState<string | null>(shareTokenFromHash);
-  if (import.meta.env.PROD && api == null) {
-    return <Notice title="未配置 API 地址" detail="请设置 VITE_API_BASE_URL 后重新启动前端，当前不会使用内置假数据。" />;
-  }
+  
+  // Show notice in production if API is not configured, but still allow using mock data
+  const showApiNotice = import.meta.env.PROD && api == null;
 
   useEffect(() => {
     const sync = () => setShareToken(shareTokenFromHash());
