@@ -437,9 +437,14 @@ export function createHttpApi(baseUrl: string): WorkbenchApi {
   let activeSymbol = "600519.SH";
 
   async function request<T>(path: string, init?: RequestInit): Promise<T> {
+    const headers: Record<string, string> = { ...(init?.headers as Record<string, string> | undefined) };
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method !== "GET" && method !== "HEAD" && headers["content-type"] == null) {
+      headers["content-type"] = "application/json";
+    }
     const response = await fetch(`${root}${path}`, {
       ...init,
-      headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+      headers,
     });
     if (!response.ok) {
       let message = `API 请求失败（${response.status}）`;

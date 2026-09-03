@@ -86,11 +86,23 @@ def create_app(
         yield
 
     instance = FastAPI(title="Chan Market API", lifespan=app_lifespan)
-    
-    cors_origins = os.getenv("CORS_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173").split(",")
+
+    cors_origins = [
+        origin.strip()
+        for origin in os.getenv(
+            "CORS_ORIGINS",
+            "http://127.0.0.1:5173,http://localhost:5173",
+        ).split(",")
+        if origin.strip()
+    ]
+    cors_origin_regex = os.getenv(
+        "CORS_ORIGIN_REGEX",
+        r"https://.*\.trycloudflare\.com|https://.*\.railway\.app|https://.*\.onrender\.com|http://(localhost|127\.0\.0\.1):\d+",
+    )
     instance.add_middleware(
         CORSMiddleware,
-        allow_origins=cors_origins,
+        allow_origins=["*"] if cors_origins == ["*"] else cors_origins,
+        allow_origin_regex=None if cors_origins == ["*"] else cors_origin_regex,
         allow_methods=["*"],
         allow_headers=["*"],
     )

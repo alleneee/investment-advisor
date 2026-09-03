@@ -58,9 +58,6 @@ export function App({ api, tradingApi, initialError }: AppProps) {
   const service = useMemo(() => api ?? createMockApi(initialError), [api, initialError]);
   const tradingService = useMemo(() => tradingApi ?? createMockTradingApi(), [tradingApi]);
   const [shareToken, setShareToken] = useState<string | null>(shareTokenFromHash);
-  
-  // Show notice in production if API is not configured, but still allow using mock data
-  const showApiNotice = import.meta.env.PROD && api == null;
 
   useEffect(() => {
     const sync = () => setShareToken(shareTokenFromHash());
