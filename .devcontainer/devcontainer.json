@@ -1,0 +1,3 @@
+name: investment-advisor
+services:
+  - type: postgres

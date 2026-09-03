@@ -7,6 +7,38 @@ A 股结构投研台：Tushare → 缠论引擎 → Pi 投研报告。
 Node sidecar 让 Pi 只生成受证据引用约束的三情景研究叙述。React 页面将 K 线、
 成交量、缠论结构、资讯证据和后续走势组合为一份完整报告。
 
+## 🚀 快速部署
+
+本项目支持多种部署方式，详细说明请查看 [DEPLOY.md](./DEPLOY.md)。
+
+**一键部署选项：**
+
+- **Railway**: [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/investment-advisor)
+- **Render**: [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
+- **Docker Compose**: 本地或自建服务器部署（见下方说明）
+
+**部署后可用功能：**
+- ✅ 前端 UI 和基础交互
+- ✅ 数据库存储
+- ⚠️ 真实 A 股行情数据（需要配置 `TUSHARE_TOKEN` 或 `HITHINK_FINANCE_API_KEY`）
+- ⚠️ AI 投研报告生成（需要配置 `PI_PROVIDER`, `PI_MODEL`, `PI_API_KEY`）
+
+**使用 Docker Compose 本地部署：**
+
+```bash
+# 克隆仓库
+git clone https://github.com/alleneee/investment-advisor.git
+cd investment-advisor
+
+# 构建并启动所有服务
+docker compose up -d
+
+# 访问应用
+# Web UI: http://localhost
+# API: http://localhost:8000
+# API 健康检查: http://localhost:8000/health
+```
+
 ## 数据链路
 
 ```mermaid

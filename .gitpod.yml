@@ -1,0 +1,52 @@
+tasks:
+  - name: Setup Database
+    init: |
+      # Wait for PostgreSQL to be ready
+      sleep 5
+      export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/chan_market"
+      
+  - name: Start API
+    init: |
+      uv sync
+      uv pip install -r requirements-market-data.txt
+    command: |
+      export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/chan_market"
+      export INTERNAL_AGENT_TOKEN="gitpod-dev-token-12345"
+      export AGENT_RUNTIME_URL="http://localhost:8081"
+      export CORS_ORIGINS="$(gp url 5173)"
+      export MARKET_PROVIDER="auto"
+      uv run --env-file .env uvicorn --factory app.main:create_app --app-dir apps/api --host 0.0.0.0 --port 8000
+      
+  - name: Start Agent Runtime
+    init: npm install
+    command: |
+      export INTERNAL_AGENT_TOKEN="gitpod-dev-token-12345"
+      export PYTHON_API_BASE_URL="http://localhost:8000"
+      export PI_AGENT_PORT="8081"
+      npm run agent:dev
+      
+  - name: Start Web
+    init: npm --prefix apps/web install --install-strategy=shallow
+    command: |
+      export VITE_API_BASE_URL="$(gp url 8000)"
+      cd apps/web
+      npm run dev -- --host 0.0.0.0
+
+ports:
+  - port: 5432
+    onOpen: ignore
+  - port: 8000
+    onOpen: ignore
+    visibility: public
+  - port: 8081
+    onOpen: ignore
+  - port: 5173
+    onOpen: open-browser
+    visibility: public
+
+vscode:
+  extensions:
+    - ms-python.python
+    - dbaeumer.vscode-eslint
+
+image: gitpod/workspace-postgres

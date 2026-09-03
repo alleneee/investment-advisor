@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: chan_market
+      POSTGRES_USER: chan_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chan_user -d chan_market"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://chan_user:${DB_PASSWORD:-changeme}@db:5432/chan_market
+      INTERNAL_AGENT_TOKEN: ${INTERNAL_AGENT_TOKEN:-dev-token-12345}
+      AGENT_RUNTIME_URL: http://agent:8081
+      CORS_ORIGINS: http://localhost:3000,http://localhost:80
+      MARKET_PROVIDER: auto
+      TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
+      HITHINK_FINANCE_API_KEY: ${HITHINK_FINANCE_API_KEY:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: .
+      dockerfile: apps/agent-runtime/Dockerfile
+    ports:
+      - "8081:8081"
+    environment:
+      INTERNAL_AGENT_TOKEN: ${INTERNAL_AGENT_TOKEN:-dev-token-12345}
+      PYTHON_API_BASE_URL: http://api:8000
+      PI_AGENT_PORT: 8081
+      PI_PROVIDER: ${PI_PROVIDER:-}
+      PI_MODEL: ${PI_MODEL:-}
+      PI_BASE_URL: ${PI_BASE_URL:-}
+      PI_API_KEY: ${PI_API_KEY:-}
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
