@@ -1,0 +1,10 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "apps/agent-runtime/Dockerfile"
+
+[deploy]
+startCommand = "node --import tsx apps/agent-runtime/src/server-entry.ts"
+healthcheckPath = "/health"
+healthcheckTimeout = 100
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 10

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import FastAPI
@@ -86,12 +86,19 @@ def create_app(
         yield
 
     instance = FastAPI(title="Chan Market API", lifespan=app_lifespan)
+    
+    cors_origins = os.getenv("CORS_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173").split(",")
     instance.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+        allow_origins=cors_origins,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    
+    @instance.get("/health")
+    def health_check():
+        return {"status": "ok", "timestamp": datetime.now(UTC).isoformat()}
+    
     instance.include_router(
         create_router(db, market_service, information, reports, outcomes, stocks, reviews)
     )
