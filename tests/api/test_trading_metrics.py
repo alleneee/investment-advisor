@@ -679,7 +679,7 @@ async def test_account_summary_returns_when_market_provider_hangs() -> None:
     assert elapsed < 8
     body = account.json()
     assert body["name"] == "主账户"
-    assert Decimal(body["cash"]) == Decimal("90")
+    assert Decimal(body["cash"]) == Decimal(90)
     assert body["data_quality"] in {"degraded", "unavailable"}
 
 
