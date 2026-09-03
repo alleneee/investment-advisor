@@ -1004,6 +1004,23 @@ textarea { min-height: 74px; padding: 10px 14px; resize: vertical; line-height: 
 .trade-journal-page .execution-entry { grid-column: 2; }
 .trade-journal-page .cash-flow-entry { grid-column: 3; }
 .journal-entry-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.journal-datetime { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.journal-datetime > input[type="date"] { flex: 1 1 150px; min-width: 130px; }
+.journal-datetime > input[type="time"] { flex: 0 0 110px; }
+.journal-time-presets { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
+.journal-time-presets button {
+  padding: 4px 10px;
+  border: 1px solid color-mix(in srgb, var(--ledger-line) 55%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ledger-muted, #8b909a);
+  font-size: 12px;
+  cursor: pointer;
+}
+.journal-time-presets button:hover {
+  color: var(--ledger-text, #e8eaed);
+  border-color: var(--ledger-primary, #4a90e2);
+}
 .trade-journal-page .journal-card {
   display: flex;
   min-width: 0;

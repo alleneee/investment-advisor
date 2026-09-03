@@ -413,6 +413,43 @@ describe("交易日记", () => {
     })));
   });
 
+  it("成交时间可用日期/时刻输入与快捷时刻按钮编辑", async () => {
+    const user = userEvent.setup();
+    const createExecution = vi.fn(async () => ({
+      executionId: "execution-1",
+      symbol: "002940.SZ",
+      name: "昂利康",
+      executedAt: "2026-08-17T09:30:00+08:00",
+      side: "buy" as const,
+      price: "20",
+      quantity: 100,
+      fee: "0",
+      primaryReason: "pullback_confirmation" as const,
+      tags: [],
+      note: "",
+      clientIdempotencyKey: "11111111-1111-4111-8111-111111111111",
+      revision: 1,
+      ledgerRevision: 1,
+    }));
+    const api = apiForJournal({ getAccount: vi.fn(async () => account), createExecution });
+    render(<TradeJournalPage api={api} today="2026-08-17" initialView="list" />);
+
+    expect(await screen.findByRole("heading", { name: "每日交易日志" })).toBeInTheDocument();
+    expect(screen.getByLabelText("成交日期")).toHaveValue("2026-08-17");
+    expect(screen.getByLabelText("成交时刻")).toHaveValue("15:00");
+    await user.click(screen.getByRole("button", { name: "开盘 9:30" }));
+    expect(screen.getByLabelText("成交时刻")).toHaveValue("09:30");
+
+    await user.type(screen.getByLabelText("股票代码"), "002940.SZ");
+    await user.clear(screen.getByLabelText("成交价"));
+    await user.type(screen.getByLabelText("成交价"), "20");
+    await user.click(screen.getByRole("button", { name: "保存交易记录" }));
+
+    await waitFor(() => expect(createExecution).toHaveBeenCalledWith(expect.objectContaining({
+      executedAt: "2026-08-17T09:30:00+08:00",
+    })));
+  });
+
   it("无资金流水时默认收起，点击后可录入", async () => {
     const user = userEvent.setup();
     render(<TradeJournalPage api={apiForJournal({ getAccount: vi.fn(async () => account) })} today="2026-08-17" initialView="list" />);

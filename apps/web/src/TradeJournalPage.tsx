@@ -731,7 +731,16 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
             </div>
           </Field>
           <Field label="股票名称"><input value={executionForm.name} onChange={(event) => setExecutionForm((current) => ({ ...current, name: event.target.value }))} placeholder="选择候选后自动填写，也可手填" /></Field>
-          <Field label="成交时间"><input required type="datetime-local" value={executionForm.executedAt} onChange={(event) => setExecutionForm((current) => ({ ...current, executedAt: event.target.value }))} /></Field>
+          <Field label="成交时间" className="journal-span-two">
+            <div className="journal-datetime">
+              <input required type="date" aria-label="成交日期" value={dateOf(executionForm.executedAt)} onChange={(event) => setExecutionForm((current) => ({ ...current, executedAt: joinDateTime(event.target.value, timeOf(current.executedAt)) }))} />
+              <input required type="time" aria-label="成交时刻" step={60} value={timeOf(executionForm.executedAt)} onChange={(event) => setExecutionForm((current) => ({ ...current, executedAt: joinDateTime(dateOf(current.executedAt), event.target.value) }))} />
+              <div className="journal-time-presets" role="group" aria-label="常用成交时刻">
+                {TIME_PRESETS.map((preset) => <button key={preset.time} type="button" onClick={() => setExecutionForm((current) => ({ ...current, executedAt: joinDateTime(dateOf(current.executedAt), preset.time) }))}>{preset.label}</button>)}
+                <button type="button" onClick={() => setExecutionForm((current) => ({ ...current, executedAt: joinDateTime(dateOf(current.executedAt), currentShanghaiTime()) }))}>现在</button>
+              </div>
+            </div>
+          </Field>
           <Field label="方向"><select aria-label="方向" value={executionForm.side} onChange={(event) => {
             const side = event.target.value as TradingSide;
             setExecutionForm((current) => ({ ...current, side, primaryReason: side === "buy" ? buyReasons[1] : sellReasons[0] }));
@@ -1061,6 +1070,30 @@ function replaceCashFlow(items: CashFlow[] | undefined, saved: CashFlow): CashFl
 
 function splitTags(value: string): string[] {
   return [...new Set(value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean))];
+}
+
+const TIME_PRESETS: Array<{ time: string; label: string }> = [
+  { time: "09:30", label: "开盘 9:30" },
+  { time: "11:30", label: "午间 11:30" },
+  { time: "13:00", label: "午后 13:00" },
+  { time: "14:57", label: "尾盘 14:57" },
+  { time: "15:00", label: "收盘 15:00" },
+];
+
+function dateOf(value: string): string {
+  return value.slice(0, 10);
+}
+
+function timeOf(value: string): string {
+  return value.length >= 16 ? value.slice(11, 16) : "15:00";
+}
+
+function joinDateTime(date: string, time: string): string {
+  return `${date || currentShanghaiDate()}T${time || "15:00"}`;
+}
+
+function currentShanghaiTime(): string {
+  return new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date());
 }
 
 function shanghaiDateTime(value: string): string {
