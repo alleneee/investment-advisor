@@ -573,6 +573,9 @@ async def test_missing_calendar_provider_is_lazy_tushare_calendar_not_weekday_fa
             LazyCalendarProvider.calendar_calls += 1
             return [{"cal_date": "2026-01-05", "is_open": 1}]
 
+    monkeypatch.delenv("HITHINK_FINANCE_API_KEY", raising=False)
+    monkeypatch.delenv("FUYAO_API_KEY", raising=False)
+    monkeypatch.delenv("FUYAO_TOKEN", raising=False)
     monkeypatch.setattr("app.providers.tushare.TushareMarketProvider", LazyCalendarProvider)
     app = create_app(
         database=Database(),
