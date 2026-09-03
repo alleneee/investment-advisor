@@ -697,7 +697,7 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
       <form ref={executionEntryRef} tabIndex={-1} aria-label="成交录入" className="journal-card execution-entry" onSubmit={(event) => void saveExecution(event)}>
         <CardTitle icon={PlusSquare}>成交录入</CardTitle>
         <div className="journal-form-grid">
-          <Field label="代码">
+          <Field label="股票代码">
             <div className="journal-symbol-field">
               <input
                 required
@@ -730,7 +730,7 @@ export function TradeJournalPage({ api, today = currentShanghaiDate(), initialVi
               )}
             </div>
           </Field>
-          <Field label="资产名称"><input value={executionForm.name} onChange={(event) => setExecutionForm((current) => ({ ...current, name: event.target.value }))} placeholder="选择候选后自动填写，也可手填" /></Field>
+          <Field label="股票名称"><input value={executionForm.name} onChange={(event) => setExecutionForm((current) => ({ ...current, name: event.target.value }))} placeholder="选择候选后自动填写，也可手填" /></Field>
           <Field label="成交时间"><input required type="datetime-local" value={executionForm.executedAt} onChange={(event) => setExecutionForm((current) => ({ ...current, executedAt: event.target.value }))} /></Field>
           <Field label="方向"><select aria-label="方向" value={executionForm.side} onChange={(event) => {
             const side = event.target.value as TradingSide;

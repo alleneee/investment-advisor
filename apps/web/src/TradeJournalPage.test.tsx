@@ -237,7 +237,7 @@ describe("交易日记", () => {
     await user.type(screen.getByLabelText("常规日志备注"), "保留十八日草稿");
     await act(async () => { fireEvent.change(screen.getByLabelText("交易日期"), { target: { value: "2026-08-17" } }); });
     await waitFor(() => expect(screen.getByLabelText("常规日志备注")).toHaveValue("保留十七日草稿"));
-    await user.type(screen.getByLabelText("代码"), "002940.SZ");
+    await user.type(screen.getByLabelText("股票代码"), "002940.SZ");
     await user.clear(screen.getByLabelText("成交价"));
     await user.type(screen.getByLabelText("成交价"), "20");
     await user.click(screen.getByRole("button", { name: "保存交易记录" }));
@@ -342,8 +342,8 @@ describe("交易日记", () => {
     await user.selectOptions(screen.getByLabelText("方向"), "sell");
     expect(screen.getByRole("option", { name: "止损" })).toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText("方向"), "buy");
-    await user.type(screen.getByLabelText("代码"), "002940.SZ");
-    await user.type(screen.getByLabelText("资产名称"), "昂利康");
+    await user.type(screen.getByLabelText("股票代码"), "002940.SZ");
+    await user.type(screen.getByLabelText("股票名称"), "昂利康");
     await user.clear(screen.getByLabelText("成交价"));
     await user.type(screen.getByLabelText("成交价"), "20.15");
     await user.clear(screen.getByLabelText("份额/数量"));
@@ -394,12 +394,12 @@ describe("交易日记", () => {
     await user.click(screen.getByRole("button", { name: "记账与日复盘" }));
     expect(await screen.findByRole("heading", { name: "每日交易日志" })).toBeInTheDocument();
 
-    await user.type(screen.getByLabelText("代码"), "中利");
+    await user.type(screen.getByLabelText("股票代码"), "中利");
     const option = await screen.findByRole("option", { name: /中利集团/ });
     await user.click(option);
 
-    expect(screen.getByLabelText("代码")).toHaveValue("002309.SZ");
-    expect(screen.getByLabelText("资产名称")).toHaveValue("中利集团");
+    expect(screen.getByLabelText("股票代码")).toHaveValue("002309.SZ");
+    expect(screen.getByLabelText("股票名称")).toHaveValue("中利集团");
 
     await user.clear(screen.getByLabelText("成交价"));
     await user.type(screen.getByLabelText("成交价"), "3.21");
